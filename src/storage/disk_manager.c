@@ -231,12 +231,6 @@ typedef UINT64 DISK_STAB_UNIT;
  * DISK_VOLUME_HEADER = fixed fields + variable fields
  * variable fields = volume fullname + next volume fullname + remarks
  * volume fullname & next volume fullname max length = DB_MAX_PATH_LENGTH (include null character)
- *
- * TODO : The current maximum size for volume fullname is 4K.
- * This will cause bugs if PAGESIZE is set to 4K or 8K.
- * While the max size is 4K when PAGESIZE is 16K, it should decrease proportionally as PAGESIZE decreases.
- * Setting the volume fullname size to 2K for an 8K PAGESIZE and 1K for a 4K PAGESIZE should work without bugs.
- * This issue will be created and handled in a separate issue.
  */
 #define DISK_VOLUME_HEADER_REMARKS_MAX_SIZE (int) (DB_PAGESIZE - (DISK_VOLUME_HEADER_FIXED_FIELDS_SIZE + DB_MAX_PATH_LENGTH + DB_MAX_PATH_LENGTH))
 

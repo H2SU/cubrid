@@ -120,7 +120,13 @@ extern PGLENGTH db_User_page_size;
 #define VSID_IS_SECTOR_OF_VPID(vsid, vpid) \
   ((vsid)->volid == (vpid)->volid && (vsid)->sectid == SECTOR_FROM_PAGEID ((vpid)->pageid))
 
-#define DB_MAX_PATH_LENGTH      PATH_MAX
+#if DB_PAGESIZE <= 4096
+#define DB_MAX_PATH_LENGTH  1024
+#elif DB_PAGESIZE <= 8192
+#define DB_MAX_PATH_LENGTH  2048
+#else
+#define DB_MAX_PATH_LENGTH  4096
+#endif
 
 #define DISK_VFID_SIZE (OR_INT_SIZE + OR_SHORT_SIZE)
 #define DISK_VPID_SIZE (OR_INT_SIZE + OR_SHORT_SIZE)
