@@ -916,7 +916,7 @@ net_server_conn_down (THREAD_ENTRY * thread_p, CSS_THREAD_ARG arg)
   int local_tran_index;
   THREAD_ENTRY *suspended_p;
   size_t loop_count_for_pending_request = 0;
-  SESSION_ID session_id;
+  SESSION_ID session_id = DB_EMPTY_SESSION;
 
   if (thread_p == NULL)
     {
@@ -1062,8 +1062,11 @@ loop:
       session_remove_query_entry_all (thread_p);
     }
 
-  session_get_session_id (thread_p, &session_id);
-  session_state_destroy (thread_p, session_id);
+  if (conn_p->session_p != NULL)
+    {
+      session_get_session_id (thread_p, &session_id);
+      session_state_destroy (thread_p, session_id);
+    }
 
   css_free_conn (conn_p);
 
