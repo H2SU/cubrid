@@ -916,6 +916,7 @@ net_server_conn_down (THREAD_ENTRY * thread_p, CSS_THREAD_ARG arg)
   int local_tran_index;
   THREAD_ENTRY *suspended_p;
   size_t loop_count_for_pending_request = 0;
+  SESSION_ID session_id;
 
   if (thread_p == NULL)
     {
@@ -1060,6 +1061,10 @@ loop:
       (void) xboot_unregister_client (thread_p, tran_index);
       session_remove_query_entry_all (thread_p);
     }
+
+  session_get_session_id (thread_p, &session_id);
+  session_state_destroy (thread_p, session_id);
+
   css_free_conn (conn_p);
 
   css_set_thread_info (thread_p, -1, 0, local_tran_index, -1);
