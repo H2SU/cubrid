@@ -2727,7 +2727,6 @@ csql_exit_session (int error)
 	  histo_stop ();
 	}
     }
-  db_end_session ();
 
   if (db_shutdown () < 0)
     {
