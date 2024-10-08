@@ -944,6 +944,7 @@ net_server_conn_down (THREAD_ENTRY * thread_p, CSS_THREAD_ARG arg)
   if (conn_p->session_p != NULL)
     {
       ssession_stop_attached_threads (conn_p->session_p);
+      session_get_session_id (thread_p, &session_id);
     }
 
 loop:
@@ -1062,9 +1063,8 @@ loop:
       session_remove_query_entry_all (thread_p);
     }
 
-  if (conn_p->session_p != NULL)
+  if (session_id > DB_EMPTY_SESSION)
     {
-      session_get_session_id (thread_p, &session_id);
       session_state_destroy (thread_p, session_id);
     }
 
