@@ -561,15 +561,13 @@ endif(WIN32)
 target_include_directories(cubrid PRIVATE ${JAVA_INC} ${EP_INCLUDES} ${FLEX_INCLUDE_DIRS})
 
 if(UNIX)
-  target_link_libraries(cubrid LINK_PRIVATE -Wl,-whole-archive ${EP_LIBS} -Wl,-no-whole-archive)
+  target_link_libraries(cubrid LINK_PRIVATE -Wl,-whole-archive ${EP_LIBS} ${EP_LIBCUBRID_LIBS} -Wl,-no-whole-archive)
   target_link_libraries(cubrid LINK_PUBLIC ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
   target_link_libraries(cubrid PUBLIC stdc++fs)
   target_link_libraries(cubrid PUBLIC rt)
 
-  # Add TBB
-  target_include_directories(cubrid PUBLIC ${TBB_INCLUDES})
-  target_link_libraries(cubrid LINK_PRIVATE ${TBB_LIBS})
-  add_dependencies(cubrid ${TBB_TARGETS})
+  target_include_directories(cubrid PUBLIC ${EP_LIBCUBRID_INCLUDES})
+  add_dependencies(cubrid ${EP_LIBCUBRID_TARGETS})
 else(UNIX)
   target_link_libraries(cubrid LINK_PRIVATE ${EP_LIBS})
 endif(UNIX)
