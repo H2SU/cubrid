@@ -127,6 +127,7 @@ namespace cubmem
       std::string m_server_name;
       // Entries of m_stat_name_map and m_stat_map will not be deleted
       tbb::concurrent_unordered_map <std::string, int> m_stat_name_map;        // key: stat name, value: stat id
+      tbb::concurrent_unordered_map <char *, int> memory_debug_map;
 #if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
       tbb::concurrent_unordered_map <intptr_t, MMON_DEBUG_INFO> m_error_tracking_map;
 #endif
@@ -174,7 +175,22 @@ namespace cubmem
 
     // size should not be 0 because of MMON_METAINFO_SIZE
     assert (size > 0);
+    m_meta_alloc_count++;
 
+    const auto search2 = memory_debug_map.find (ptr);
+    if (search2 != memory_debug_map.end ())
+      {
+	search2->second++;
+
+	fprintf (stderr, "[ERROR_A] double alloc(value : %d) : %p\n",search2->second, (void *)ptr);
+	fflush (stderr);
+      }
+    else
+      {
+	fprintf (stderr, "[ALLOC] alloc success(total_alloc_count : %d) : %p\n",m_meta_alloc_count.load(), (void *)ptr);
+	fflush (stderr);
+	memory_debug_map.insert ({ptr,1});
+      }
     MMON_METAINFO *metainfo = (MMON_METAINFO *) get_metainfo_pos (ptr, size);
 
     metainfo->allocated_size = (uint64_t) size;
@@ -222,7 +238,7 @@ retry:
 
     // put meta info into the allocated chunk
     metainfo->magic_number = m_magic_number;
-    m_meta_alloc_count++;
+
 #if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
     check_add_stat_tracking_error_is_exist (metainfo, file, line);
 #endif
@@ -234,6 +250,33 @@ retry:
 
     if (allocated_size >= MMON_METAINFO_SIZE)
       {
+	const auto search2 = memory_debug_map.find (ptr);
+	if (search2 == memory_debug_map.end ())
+	  {
+	    // fprintf (stderr, "[ERROR_F] not existed : %p\n", (void *)ptr);
+	    // fflush (stderr);
+	  }
+	else
+	  {
+	    search2->second -= 1;
+
+	    if (search2->second < 0)
+	      {
+		fprintf (stderr, "[ERROR_F] double free(value : %d) < 0 : %p\n",search2->second, (void *)ptr);
+		fflush (stderr);
+	      }
+	    else
+	      {
+		fprintf (stderr, "[FREE] success(total_alloc_count : %d) : %p\n",m_meta_alloc_count.load(), (void *)ptr);
+		fflush (stderr);
+	      }
+
+	    if (search2->second == 0)
+	      {
+		memory_debug_map.unsafe_erase (ptr);
+	      }
+	  }
+
 	MMON_METAINFO *metainfo = (MMON_METAINFO *) get_metainfo_pos (ptr, allocated_size);
 
 #if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
