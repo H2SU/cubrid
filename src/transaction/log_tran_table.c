@@ -80,8 +80,6 @@
 #include "session.h"
 #include "pl_session.hpp"
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #define RMUTEX_NAME_TDES_TOPOP "TDES_TOPOP"
 

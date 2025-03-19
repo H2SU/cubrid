@@ -31,8 +31,6 @@
 #include <stdlib.h>
 #include <ctype.h>
 #endif
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #define CP_NONE  (CHAR_PROP_NONE)
 #define CP_SPC   (CHAR_PROP_SPACE)

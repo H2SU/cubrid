@@ -51,8 +51,6 @@
 #if !defined (WINDOWS)
 #include <sys/time.h>
 #endif /* WINDOWS */
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #define EVENT_LOG_FILE_DIR "server"
 #define EVENT_LOG_FILE_SUFFIX ".event"

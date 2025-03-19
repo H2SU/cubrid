@@ -60,8 +60,6 @@
 #include "thread_manager.hpp"
 #include "session.h"
 #include "network_request_def.hpp"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 static void net_server_init (void);
 static int net_server_request (THREAD_ENTRY * thread_p, unsigned int rid, int request, int size, char *buffer);

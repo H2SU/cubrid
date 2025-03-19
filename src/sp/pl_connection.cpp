@@ -29,8 +29,6 @@
 #include "pl_comm.h" /* pl_disconnect_server (), pl_ping () */
 #include "object_representation.h" /* OR_ */
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubpl
 {

@@ -45,9 +45,6 @@
 
 #include <db_json.hpp>
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
-
 #define MAX_LEN_CONNECTION_URL    512
 
 // *INDENT-OFF*

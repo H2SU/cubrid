@@ -26,8 +26,6 @@
 #include "xasl.h"
 #include "xasl_cache.h"
 #include "xserver_interface.h"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 /*
  *  xsession_create_new () - create a new session

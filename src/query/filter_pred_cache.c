@@ -34,8 +34,6 @@
 #include "xasl_unpack_info.hpp"
 
 #include <algorithm>
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 typedef struct fpcache_ent FPCACHE_ENTRY;
 struct fpcache_ent

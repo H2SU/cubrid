@@ -57,8 +57,6 @@
 #if defined(WINDOWS)
 #include "intl_support.h"
 #endif
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 /*
  * MESSAGE CATALOG FILE FORMAT.

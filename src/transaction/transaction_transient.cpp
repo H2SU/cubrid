@@ -29,8 +29,6 @@
 #include "vacuum.h"
 
 #include <cstring>  // for std::strcpy
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 //
 // TODO: Create a "transaction transient" abstract interface and split this into multiple files
 //

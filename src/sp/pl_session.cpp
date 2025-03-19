@@ -29,8 +29,6 @@
 
 #include "method_struct_parameter_info.hpp"
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubpl
 {

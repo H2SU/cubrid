@@ -25,8 +25,6 @@
 #include "pl_session.hpp"
 #include "pl_signature.hpp"
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubscan
 {

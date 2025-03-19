@@ -36,8 +36,6 @@
 #include <sys/wait.h>
 #include <signal.h>
 #endif
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 /*
  * create_child_process() - create a child process

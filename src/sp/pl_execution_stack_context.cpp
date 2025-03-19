@@ -26,8 +26,6 @@
 
 #include "log_impl.h"
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 namespace cubpl
 {
   execution_stack::execution_stack (cubthread::entry *thread_p)

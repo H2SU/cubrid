@@ -34,8 +34,6 @@
 #if !defined (SERVER_MODE)
 #include "network_interface_cl.h"
 #endif /* !defined (SERVER_MODE) */
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 /************************************************************************/
 /* TODO: why is this on client?                                         */

@@ -31,8 +31,6 @@
 #include "error_manager.h"
 #include "memory_alloc.h"
 #include "perf_monitor.h"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 /*
  * log_zip - compress(zip) log data into LOG_ZIP

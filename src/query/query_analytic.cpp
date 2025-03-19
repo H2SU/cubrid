@@ -33,8 +33,6 @@
 #include "xasl_analytic.hpp"
 
 #include <cmath>
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 static int qdata_analytic_interpolation (cubthread::entry *thread_p, cubxasl::analytic_list_node *ana_p,
     QFILE_LIST_SCAN_ID *scan_id);

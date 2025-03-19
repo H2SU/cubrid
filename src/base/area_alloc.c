@@ -43,8 +43,6 @@
 #if !defined (SERVER_MODE)
 #include "work_space.h"
 #endif /* !defined (SERVER_MODE) */
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #if !defined (SERVER_MODE)
 #define pthread_mutex_init(a, b)

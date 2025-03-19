@@ -41,8 +41,6 @@
 #include "server_support.h"
 #include "dbtype.h"
 #include "thread_manager.hpp"	// for thread_get_thread_entry_info and thread_sleep
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 /*
  * xtran_server_commit - Commit the current transaction

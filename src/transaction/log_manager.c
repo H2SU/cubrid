@@ -95,8 +95,6 @@
 #include "dbtype.h"
 #include "cnv.h"
 #include "flashback.h"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #if !defined(SERVER_MODE)
 

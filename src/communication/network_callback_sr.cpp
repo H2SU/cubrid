@@ -28,8 +28,6 @@
 #include "method_callback.hpp"
 #endif
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #if defined (SERVER_MODE)
 int xs_callback_send (cubthread::entry *thread_p, const cubmem::extensible_block &mem)

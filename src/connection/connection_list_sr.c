@@ -37,8 +37,6 @@
 
 #include "connection_list_sr.h"
 #include "connection_error.h"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #ifdef TRACE_LIST
 static int css_check_list (CSS_LIST * ptr);

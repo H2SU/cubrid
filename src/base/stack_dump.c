@@ -63,8 +63,6 @@
 #include "stack_dump.h"
 #endif // x86_SOLARIS, LINUX
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #if defined(x86_SOLARIS)
 #define FRAME_PTR_REGISTER      EBP

@@ -22,8 +22,6 @@
 #include "lockfree_transaction_table.hpp"
 
 #include <cassert>
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace lockfree
 {

@@ -24,8 +24,6 @@
 
 #include "pinnable_buffer.hpp"
 #include "pinning.hpp"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubmem
 {

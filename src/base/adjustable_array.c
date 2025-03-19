@@ -34,8 +34,6 @@
 
 #include "porting.h"
 #include "adjustable_array.h"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 /*
  * adj_ar_concat_strings() - concatenate the specified strings

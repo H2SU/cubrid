@@ -32,8 +32,6 @@
 #include "error_manager.h"
 
 #include <algorithm>
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubload
 {

@@ -25,8 +25,6 @@
 #include <locale>
 #include <codecvt>
 #include <string>
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cublocale
 {

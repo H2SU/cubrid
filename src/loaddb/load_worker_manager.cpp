@@ -32,8 +32,6 @@
 #include <condition_variable>
 #include <mutex>
 #include <set>
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubload
 {

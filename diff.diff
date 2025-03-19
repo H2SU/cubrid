@@ -1,0 +1,5689 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f42622349..8274a1d23 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -411,6 +411,7 @@ set(SP_DIR                   ${CMAKE_SOURCE_DIR}/src/sp)
+ set(LOADDB_DIR               ${CMAKE_SOURCE_DIR}/src/loaddb)
+ set(METHOD_DIR               ${CMAKE_SOURCE_DIR}/src/method)
+ set(MONITOR_DIR              ${CMAKE_SOURCE_DIR}/src/monitor)
++set(MEMMON_DIR               ${CMAKE_SOURCE_DIR}/src/memmon)
+ set(OBJECT_DIR               ${CMAKE_SOURCE_DIR}/src/object)
+ set(ODBC_DIR                 ${CMAKE_SOURCE_DIR}/src/odbc)
+ set(OLEDB_DIR                ${CMAKE_SOURCE_DIR}/src/oledb)
+@@ -452,6 +453,7 @@ include_directories(
+   src/thread
+   src/transaction
+   src/xasl
++  src/memmon
+   )
+ if(WITH_CCI)
+   include_directories(
+@@ -853,6 +855,7 @@ add_subdirectory(sa)
+ add_subdirectory(cs)
+ add_subdirectory(cubrid)
+ add_subdirectory(util)
++add_subdirectory(memmon)
+ if(WITH_CCI)
+   add_subdirectory(cubrid-cci)
+ endif(WITH_CCI)
+diff --git a/cubrid-cci b/cubrid-cci
+--- a/cubrid-cci
++++ b/cubrid-cci
+@@ -1 +1 @@
+-Subproject commit ef5470ffae4aa934425145e393fefc81899c84a7
++Subproject commit ef5470ffae4aa934425145e393fefc81899c84a7-dirty
+diff --git a/cubrid-jdbc b/cubrid-jdbc
+index 9f34bb2b2..be76d9bb8 160000
+--- a/cubrid-jdbc
++++ b/cubrid-jdbc
+@@ -1 +1 @@
+-Subproject commit 9f34bb2b26c59afd3488116caa2a7105048802c7
++Subproject commit be76d9bb893475986f632b89a885f15ea3480eca
+diff --git a/cubrid/CMakeLists.txt b/cubrid/CMakeLists.txt
+index e80a9b21f..68151e8e6 100644
+--- a/cubrid/CMakeLists.txt
++++ b/cubrid/CMakeLists.txt
+@@ -524,6 +524,7 @@ set (CUBRID_LIB_SOURCES
+   ${THREAD_SOURCES}
+   ${TRANSACTION_SOURCES}
+   ${XASL_SOURCES}
++  ../src/memmon/memmon.cpp
+   )
+ 
+ set (CUBRID_LIB_HEADERS
+@@ -539,6 +540,7 @@ set (CUBRID_LIB_HEADERS
+   ${TRANSACTION_HEADERS}
+   ${XASL_HEADERS}
+   ${LOADDB_HEADERS}
++  ${MEMMON_HEADERS}
+   )
+ 
+ add_library(cubrid SHARED
+diff --git a/memmon/CMakeLists.txt b/memmon/CMakeLists.txt
+new file mode 100644
+index 000000000..bce5fc4a8
+--- /dev/null
++++ b/memmon/CMakeLists.txt
+@@ -0,0 +1,21 @@
++set(MEMMON_SOURCES
++  ${MEMMON_DIR}/memmon.cpp
++  )
++
++add_library(memmon SHARED
++${MEMMON_SOURCES}
++)
++
++set(MEMMON_HEADERS
++  ${MEMMON_DIR}/memmon.hpp
++)
++
++install(TARGETS memmon
++  RUNTIME DESTINATION ${CUBRID_BINDIR} COMPONENT Library
++  LIBRARY DESTINATION ${CUBRID_LIBDIR} COMPONENT Library
++  )
++
++target_include_directories(memmon PRIVATE ${EP_INCLUDES})
++target_include_directories(memmon PRIVATE ${CUBRID_INCLUDES})
++
++target_link_libraries (memmon LINK_PRIVATE cubrid)
+\ No newline at end of file
+diff --git a/src/base/adjustable_array.c b/src/base/adjustable_array.c
+index 8d2f884e8..55973637a 100644
+--- a/src/base/adjustable_array.c
++++ b/src/base/adjustable_array.c
+@@ -34,8 +34,6 @@
+ 
+ #include "porting.h"
+ #include "adjustable_array.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * adj_ar_concat_strings() - concatenate the specified strings
+diff --git a/src/base/area_alloc.c b/src/base/area_alloc.c
+index a37f9806f..3f51714bf 100644
+--- a/src/base/area_alloc.c
++++ b/src/base/area_alloc.c
+@@ -43,8 +43,6 @@
+ #if !defined (SERVER_MODE)
+ #include "work_space.h"
+ #endif /* !defined (SERVER_MODE) */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined (SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/base/base64.c b/src/base/base64.c
+index 1bc4e803f..99b83ab61 100644
+--- a/src/base/base64.c
++++ b/src/base/base64.c
+@@ -37,8 +37,6 @@
+ #include "error_code.h"
+ #include "memory_alloc.h"
+ #include "base64.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define  MAX_BASE64_LINE_LENGTH      76
+ #define  CH_INVALID                  -1
+diff --git a/src/base/binaryheap.c b/src/base/binaryheap.c
+index 77943fa25..12f52dc45 100644
+--- a/src/base/binaryheap.c
++++ b/src/base/binaryheap.c
+@@ -24,8 +24,6 @@
+ #include "binaryheap.h"
+ #include "memory_alloc.h"
+ #include "error_manager.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define BH_PARENT(i)	((i - 1)/2)
+ #define BH_LEFT(i)	(2*(i) + 1)
+diff --git a/src/base/bit.c b/src/base/bit.c
+index 2863ecf7d..8aa77e49b 100644
+--- a/src/base/bit.c
++++ b/src/base/bit.c
+@@ -26,8 +26,6 @@
+ #include "bit.h"
+ 
+ #include <assert.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * 8-bit section
+diff --git a/src/base/chartype.c b/src/base/chartype.c
+index a55692bfa..ba6d08cb7 100644
+--- a/src/base/chartype.c
++++ b/src/base/chartype.c
+@@ -31,8 +31,6 @@
+ #include <stdlib.h>
+ #include <ctype.h>
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define CP_NONE  (CHAR_PROP_NONE)
+ #define CP_SPC   (CHAR_PROP_SPACE)
+diff --git a/src/base/condition_handler.c b/src/base/condition_handler.c
+index 606a07dc8..413256c91 100644
+--- a/src/base/condition_handler.c
++++ b/src/base/condition_handler.c
+@@ -38,8 +38,6 @@
+ #include "adjustable_array.h"
+ #include "condition_handler_err.h"
+ #include "intl_support.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* format type of condition argument */
+ enum co_format_type
+diff --git a/src/base/cubrid_getopt_long.c b/src/base/cubrid_getopt_long.c
+index d3d2fbd4f..b4df44869 100644
+--- a/src/base/cubrid_getopt_long.c
++++ b/src/base/cubrid_getopt_long.c
+@@ -37,8 +37,6 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include "cubrid_getopt.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define REPLACE_GETOPT
+ 
+diff --git a/src/base/databases_file.c b/src/base/databases_file.c
+index bfc4b5a66..4829a1ecd 100644
+--- a/src/base/databases_file.c
++++ b/src/base/databases_file.c
+@@ -55,8 +55,6 @@
+ #include "misc_string.h"
+ #include "wintcp.h"
+ #endif /* WINDOWS */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ 
+ /* conservative upper bound of a line in databases.txt */
+diff --git a/src/base/dtoa.c b/src/base/dtoa.c
+index 815a85896..7b02bf574 100644
+--- a/src/base/dtoa.c
++++ b/src/base/dtoa.c
+@@ -33,8 +33,6 @@
+ #ifdef DEBUG
+ #include <stdio.h>
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ void free_Bigints (struct _Jv_Bigint *p);
+ 
+diff --git a/src/base/dynamic_array.c b/src/base/dynamic_array.c
+index c07867df6..805f9f001 100644
+--- a/src/base/dynamic_array.c
++++ b/src/base/dynamic_array.c
+@@ -25,8 +25,6 @@
+ 
+ #include "error_code.h"
+ #include "dynamic_array.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ dynamic_array *
+ da_create (int count, size_t len)
+diff --git a/src/base/encryption.c b/src/base/encryption.c
+index 2455d7ab4..0197a3fb5 100644
+--- a/src/base/encryption.c
++++ b/src/base/encryption.c
+@@ -37,8 +37,6 @@
+ #include "encryption.h"
+ #include "memory_alloc.h"
+ #include "sha1.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (WINDOWS)
+ static BYTE des_Keyblob[] = {
+diff --git a/src/base/environment_variable.c b/src/base/environment_variable.c
+index e0e582fb3..e3c272215 100644
+--- a/src/base/environment_variable.c
++++ b/src/base/environment_variable.c
+@@ -32,8 +32,6 @@
+ #include "porting.h"
+ #include "error_code.h"
+ #include "environment_variable.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* available root directory symbols; NULL terminated array */
+ static const char envvar_Prefix_name[] = "CUBRID";
+diff --git a/src/base/error_context.cpp b/src/base/error_context.cpp
+index 124d7efe5..8857214b6 100644
+--- a/src/base/error_context.cpp
++++ b/src/base/error_context.cpp
+@@ -31,8 +31,6 @@
+ #endif // SERVER_MODE
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cuberr
+ {
+diff --git a/src/base/error_manager.c b/src/base/error_manager.c
+index 7ee371438..0f9d3f998 100644
+--- a/src/base/error_manager.c
++++ b/src/base/error_manager.c
+@@ -91,8 +91,6 @@
+ #endif /* !WINDOWS */
+ 
+ #include <mutex>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * Definition of error message structure. One structure is defined for each
+diff --git a/src/base/event_log.c b/src/base/event_log.c
+index 5b3c5cd2d..e5a36f352 100644
+--- a/src/base/event_log.c
++++ b/src/base/event_log.c
+@@ -51,8 +51,6 @@
+ #if !defined (WINDOWS)
+ #include <sys/time.h>
+ #endif /* WINDOWS */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define EVENT_LOG_FILE_DIR "server"
+ #define EVENT_LOG_FILE_SUFFIX ".event"
+diff --git a/src/base/fault_injection.c b/src/base/fault_injection.c
+index 9b5050536..7178dc3bb 100644
+--- a/src/base/fault_injection.c
++++ b/src/base/fault_injection.c
+@@ -35,8 +35,6 @@
+ #endif /* defined (SERVER_MODE) || defined (SA_MODE) */
+ 
+ #include <assert.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(NDEBUG)
+ 
+diff --git a/src/base/fileline_location.cpp b/src/base/fileline_location.cpp
+index 5b8fb37b6..467bc9255 100644
+--- a/src/base/fileline_location.cpp
++++ b/src/base/fileline_location.cpp
+@@ -25,8 +25,6 @@
+ #include "porting.h"
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubbase
+ {
+diff --git a/src/base/filesys_temp.cpp b/src/base/filesys_temp.cpp
+index c0d588b59..d305374b9 100644
+--- a/src/base/filesys_temp.cpp
++++ b/src/base/filesys_temp.cpp
+@@ -33,8 +33,6 @@
+ #endif
+ 
+ #include "environment_variable.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define	CUBRID_TMP_ENV	"TMP"
+ #define PREFIX_LEN      3
+diff --git a/src/base/fixed_alloc.c b/src/base/fixed_alloc.c
+index d0e44a5c4..6e7408432 100644
+--- a/src/base/fixed_alloc.c
++++ b/src/base/fixed_alloc.c
+@@ -34,8 +34,6 @@
+ #include "connection_defs.h"
+ #include "connection_error.h"
+ #endif /* SERVER_MODE */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ typedef struct rec_link REC_LINK;
+ struct rec_link
+diff --git a/src/base/get_clock_freq.c b/src/base/get_clock_freq.c
+index 91a5f145e..163052675 100644
+--- a/src/base/get_clock_freq.c
++++ b/src/base/get_clock_freq.c
+@@ -27,8 +27,6 @@
+ #include <fcntl.h>
+ #include <stdlib.h>
+ #include "tsc_timer.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * get_clock_freq() - get the CPU clock rate
+diff --git a/src/base/ini_parser.c b/src/base/ini_parser.c
+index d7f05fc5a..53c86f4fb 100644
+--- a/src/base/ini_parser.c
++++ b/src/base/ini_parser.c
+@@ -26,8 +26,6 @@
+ #include "porting.h"
+ #include "ini_parser.h"
+ #include "chartype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define INI_BUFSIZ         	(512)
+ #define INI_INVALID_KEY		((char*)-1)
+diff --git a/src/base/intl_support.c b/src/base/intl_support.c
+index a8ddafed3..acdfc6deb 100644
+--- a/src/base/intl_support.c
++++ b/src/base/intl_support.c
+@@ -38,8 +38,6 @@
+ #include "chartype.h"
+ #include "system_parameter.h"
+ #include "charset_converters.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/base/language_support.c b/src/base/language_support.c
+index 94029912b..7c2adf7af 100644
+--- a/src/base/language_support.c
++++ b/src/base/language_support.c
+@@ -50,8 +50,6 @@
+ #include "db.h"
+ #endif /* !defined (SERVER_MODE) */
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define PAD ' '			/* str_pad_char(INTL_CODESET_ISO88591, pad, &pad_size) */
+ #define SPACE PAD		/* smallest character in the collation sequence */
+diff --git a/src/base/locale_helper.cpp b/src/base/locale_helper.cpp
+index c80418aba..7d00574df 100644
+--- a/src/base/locale_helper.cpp
++++ b/src/base/locale_helper.cpp
+@@ -25,8 +25,6 @@
+ #include <locale>
+ #include <codecvt>
+ #include <string>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cublocale
+ {
+diff --git a/src/base/locale_support.c b/src/base/locale_support.c
+index a28ce87b2..b9ed64c03 100644
+--- a/src/base/locale_support.c
++++ b/src/base/locale_support.c
+@@ -46,8 +46,6 @@
+ #include <netinet/in.h>
+ #endif /* !WINDOWS */
+ #include "locale_support.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/base/lock_free.c b/src/base/lock_free.c
+index e909e3d12..4c510769c 100644
+--- a/src/base/lock_free.c
++++ b/src/base/lock_free.c
+@@ -30,8 +30,6 @@
+ #include "error_manager.h"
+ #include "error_code.h"
+ #include "memory_alloc.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/base/lockfree_bitmap.cpp b/src/base/lockfree_bitmap.cpp
+index dd34493ff..c9ec12716 100644
+--- a/src/base/lockfree_bitmap.cpp
++++ b/src/base/lockfree_bitmap.cpp
+@@ -21,8 +21,6 @@
+ #include "memory_alloc.h"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace lockfree
+ {
+diff --git a/src/base/lockfree_hashmap.cpp b/src/base/lockfree_hashmap.cpp
+index 1d72028f4..8ba175695 100644
+--- a/src/base/lockfree_hashmap.cpp
++++ b/src/base/lockfree_hashmap.cpp
+@@ -17,8 +17,6 @@
+  */
+ 
+ #include "lockfree_hashmap.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace lockfree
+ {
+diff --git a/src/base/lockfree_transaction_descriptor.cpp b/src/base/lockfree_transaction_descriptor.cpp
+index fb55d7080..39fa9fa89 100644
+--- a/src/base/lockfree_transaction_descriptor.cpp
++++ b/src/base/lockfree_transaction_descriptor.cpp
+@@ -22,8 +22,6 @@
+ #include "lockfree_transaction_table.hpp"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace lockfree
+ {
+diff --git a/src/base/lockfree_transaction_system.cpp b/src/base/lockfree_transaction_system.cpp
+index 4e60ac51a..28133a2a2 100644
+--- a/src/base/lockfree_transaction_system.cpp
++++ b/src/base/lockfree_transaction_system.cpp
+@@ -19,8 +19,6 @@
+ #include "lockfree_transaction_system.hpp"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace lockfree
+ {
+diff --git a/src/base/lockfree_transaction_table.cpp b/src/base/lockfree_transaction_table.cpp
+index 82beea440..31bace5da 100644
+--- a/src/base/lockfree_transaction_table.cpp
++++ b/src/base/lockfree_transaction_table.cpp
+@@ -23,8 +23,6 @@
+ #include "lockfree_transaction_system.hpp"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace lockfree
+ {
+diff --git a/src/base/mem_block.cpp b/src/base/mem_block.cpp
+index a2f0601d7..3f19aad42 100644
+--- a/src/base/mem_block.cpp
++++ b/src/base/mem_block.cpp
+@@ -25,8 +25,6 @@
+ #include <functional>
+ #include <cstring>
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmem
+ {
+diff --git a/src/base/memory_alloc.c b/src/base/memory_alloc.c
+index f9ab4fe0a..29bb164b2 100644
+--- a/src/base/memory_alloc.c
++++ b/src/base/memory_alloc.c
+@@ -46,8 +46,6 @@
+ #endif // SERVER_MODE
+ #if defined (SERVER_MODE)
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ #endif // SERVER_MODE
+ 
+ #define DEFAULT_OBSTACK_CHUNK_SIZE      32768	/* 1024 x 32 */
+diff --git a/src/base/memory_cwrapper.h b/src/base/memory_cwrapper.h
+index 4778a2675..e69de29bb 100644
+--- a/src/base/memory_cwrapper.h
++++ b/src/base/memory_cwrapper.h
+@@ -1,193 +0,0 @@
+-/*
+- *
+- * Copyright 2016 CUBRID Corporation
+- *
+- *  Licensed under the Apache License, Version 2.0 (the "License");
+- *  you may not use this file except in compliance with the License.
+- *  You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- *
+- */
+-
+-/*
+- * memory_cwrapper.h - managing memory with allocating wrapper functions
+- *                     and memory monitor
+- */
+-
+-#ifndef _MEMORY_CWRAPPER_H_
+-#define _MEMORY_CWRAPPER_H_
+-
+-/* ***IMPORTANT!!***
+- * memory_wrapper.hpp has a restriction that it must locate at the end of including section
+- * because the user-defined new for overloaded format can make build error in glibc
+- * when glibc header use "placement new" or another overloaded format of new.
+- * So memory_wrapper.hpp cannot be included in header file, but memory_cwrapper.h can be included.
+- * You can include memory_cwrapper.h in a header file when the header file use allocation function.
+- *                        HEADER FILE(.h/.hpp)    |   SOURCE FILE(.c/.cpp)    |   INCLUDE LOCATION
+- * memory_cwrapper.h          CAN INCLUDE         |     CAN INCLUDE           |       ANYWHERE
+- * memory_wrapper.hpp         CANNOT INCLUDE      |     CANNOT INCLUDE        |   END OF INCLUDE
+- */
+-
+-#if !defined(WINDOWS)
+-#ifdef SERVER_MODE
+-#include <string.h>
+-#include <stdlib.h>
+-#include <assert.h>
+-
+-#include "memory_monitor_sr.hpp"
+-
+-#if defined(__SVR4)
+-// *INDENT-OFF*
+-extern "C" size_t malloc_usable_size (void *);
+-// *INDENT-ON*
+-#elif defined(__APPLE__)
+-#include <malloc/malloc.h>
+-
+-#ifndef HAVE_USR_INCLUDE_MALLOC_H
+-#define HAVE_USR_INCLUDE_MALLOC_H
+-#endif
+-#elif defined(__linux__)
+-#include <malloc.h>
+-
+-#ifndef HAVE_USR_INCLUDE_MALLOC_H
+-#define HAVE_USR_INCLUDE_MALLOC_H
+-#endif
+-#endif
+-
+-inline size_t
+-get_allocated_size (void *ptr)
+-{
+-  if (ptr == NULL)
+-    {
+-      return 0;
+-    }
+-  else
+-    {
+-      return mmon_get_allocated_size ((char *) ptr);
+-    }
+-}
+-
+-inline void
+-cub_free (void *ptr)
+-{
+-  if (mmon_is_memory_monitor_enabled () && ptr != NULL)
+-    {
+-      assert (malloc_usable_size (ptr) != 0);
+-      mmon_sub_stat ((char *) ptr);
+-    }
+-  free (ptr);
+-}
+-
+-inline void *
+-cub_alloc (size_t size, const char *file, const int line)
+-{
+-  void *p = NULL;
+-
+-  if (mmon_is_memory_monitor_enabled ())
+-    {
+-      p = malloc (size + cubmem::MMON_METAINFO_SIZE);
+-      if (p != NULL)
+-	{
+-	  mmon_add_stat ((char *) p, malloc_usable_size (p), file, line);
+-	}
+-    }
+-  else
+-    {
+-      p = malloc (size);
+-    }
+-
+-  return p;
+-}
+-
+-inline void *
+-cub_calloc (size_t num, size_t size, const char *file, const int line)
+-{
+-  void *p = NULL;
+-
+-  if (mmon_is_memory_monitor_enabled ())
+-    {
+-      p = malloc (num * size + cubmem::MMON_METAINFO_SIZE);
+-      if (p != NULL)
+-	{
+-	  memset (p, 0, num * size + cubmem::MMON_METAINFO_SIZE);
+-	  mmon_add_stat ((char *) p, malloc_usable_size (p), file, line);
+-	}
+-    }
+-  else
+-    {
+-      p = calloc (num, size);
+-    }
+-
+-  return p;
+-}
+-
+-inline void *
+-cub_realloc (void *ptr, size_t size, const char *file, const int line)
+-{
+-  void *new_ptr = NULL;
+-
+-  if (mmon_is_memory_monitor_enabled ())
+-    {
+-      /* Realloc spec.: Realloc should work same as malloc if ptr == NULL */
+-      if (ptr == NULL)
+-	{
+-	  return cub_alloc (size, file, line);
+-	}
+-
+-      /* Realloc spec.: If input size is zero, just free ptr */
+-      if (size == 0)
+-	{
+-	  cub_free (ptr);
+-	}
+-      else
+-	{
+-	  new_ptr = malloc (size + cubmem::MMON_METAINFO_SIZE);
+-	  if (new_ptr != NULL)
+-	    {
+-	      mmon_add_stat ((char *) new_ptr, malloc_usable_size (new_ptr), file, line);
+-
+-	      size_t old_size = get_allocated_size (ptr);
+-	      size_t copy_size = old_size < size ? old_size : size;
+-	      memcpy (new_ptr, ptr, copy_size);
+-	      cub_free (ptr);
+-	    }
+-	}
+-    }
+-  else
+-    {
+-      new_ptr = realloc (ptr, size);
+-    }
+-
+-  return new_ptr;
+-}
+-
+-inline char *
+-cub_strdup (const char *str, const char *file, const int line)
+-{
+-  void *p = NULL;
+-
+-  p = cub_alloc (strlen (str) + 1, file, line);
+-  if (p != NULL)
+-    {
+-      memcpy (p, str, strlen (str) + 1);
+-    }
+-
+-  return (char *) p;
+-}
+-
+-#define malloc(sz) cub_alloc(sz, __FILE__, __LINE__)
+-#define calloc(num, sz) cub_calloc(num, sz, __FILE__, __LINE__)
+-#define realloc(ptr, sz) cub_realloc(ptr, sz, __FILE__, __LINE__)
+-#define strdup(str) cub_strdup(str, __FILE__, __LINE__)
+-#define free(ptr) cub_free(ptr)
+-#endif // SERVER_MODE
+-#endif // !WINDOWS
+-
+-#endif // _MEMORY_CWRAPPER_H_
+diff --git a/src/base/memory_hash.c b/src/base/memory_hash.c
+index a4956afff..872430bda 100644
+--- a/src/base/memory_hash.c
++++ b/src/base/memory_hash.c
+@@ -57,8 +57,6 @@
+ #include "object_primitive.h"
+ #include "object_representation.h"
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if __WORDSIZE == 32
+ #define GET_PTR_FOR_HASH(key) ((unsigned int)(key))
+diff --git a/src/base/memory_monitor_api.cpp b/src/base/memory_monitor_api.cpp
+index 1242f6e88..e69de29bb 100644
+--- a/src/base/memory_monitor_api.cpp
++++ b/src/base/memory_monitor_api.cpp
+@@ -1,83 +0,0 @@
+-/*
+- *
+- * Copyright 2016 CUBRID Corporation
+- *
+- *  Licensed under the Apache License, Version 2.0 (the "License");
+- *  you may not use this file except in compliance with the License.
+- *  You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- *
+- */
+-
+-/*
+- * memory_monitor_api.cpp - Implementation of memory monitor APIs
+- */
+-
+-#if !defined(WINDOWS)
+-#include <cassert>
+-
+-#include "error_manager.h"
+-#include "system_parameter.h"
+-#include "memory_monitor_sr.hpp"
+-
+-namespace cubmem
+-{
+-  memory_monitor *mmon_Gl = nullptr;
+-}
+-
+-using namespace cubmem;
+-
+-int mmon_initialize (const char *server_name)
+-{
+-  int error = NO_ERROR;
+-
+-  assert (mmon_Gl == nullptr && mmon_disabled == true);
+-  assert (server_name != nullptr);
+-
+-  if (prm_get_bool_value (PRM_ID_ENABLE_MEMORY_MONITORING))
+-    {
+-      mmon_Gl = new (std::nothrow) memory_monitor (server_name);
+-      if (mmon_Gl == nullptr)
+-	{
+-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sizeof (memory_monitor));
+-	  error = ER_OUT_OF_VIRTUAL_MEMORY;
+-	  return error;
+-	}
+-      mmon_disabled = false;
+-    }
+-  return error;
+-}
+-
+-void mmon_finalize ()
+-{
+-  if (mmon_Gl != nullptr)
+-    {
+-#if !defined (NDEBUG)
+-      mmon_Gl->finalize_dump ();
+-#endif
+-#if (MMON_DEBUG_LEVEL == 1) || (MMON_DEBUG_LEVEL == 3)
+-      mmon_Gl->print_debug_result ();
+-#endif
+-      delete mmon_Gl;
+-      mmon_Gl = nullptr;
+-      mmon_disabled = true;
+-    }
+-}
+-
+-size_t mmon_get_allocated_size (char *ptr)
+-{
+-  return mmon_Gl->get_allocated_size (ptr);
+-}
+-
+-void mmon_aggregate_server_info (MMON_SERVER_INFO &server_info)
+-{
+-  mmon_Gl->aggregate_server_info (server_info);
+-}
+-#endif // !WINDOWS
+diff --git a/src/base/memory_monitor_cl.cpp b/src/base/memory_monitor_cl.cpp
+index 7a861e306..e69de29bb 100644
+--- a/src/base/memory_monitor_cl.cpp
++++ b/src/base/memory_monitor_cl.cpp
+@@ -1,49 +0,0 @@
+-/*
+- *
+- * Copyright 2016 CUBRID Corporation
+- *
+- *  Licensed under the Apache License, Version 2.0 (the "License");
+- *  you may not use this file except in compliance with the License.
+- *  You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- *
+- */
+-
+-/*
+- * memory_monitor_cl.cpp - Implementation of client functions of memory monitor
+- */
+-
+-#include "memory_monitor_cl.hpp"
+-
+-void mmon_print_server_info (MMON_SERVER_INFO &server_info, FILE *outfile_fp)
+-{
+-  double mem_usage_ratio = 0.0;
+-
+-  fprintf (outfile_fp, "====================cubrid memmon====================\n");
+-  fprintf (outfile_fp, "Server Name: %s\n", server_info.server_name);
+-  fprintf (outfile_fp, "Total Memory Usage: %lu Bytes (for meta info: %lu Bytes)\n",
+-	   server_info.total_mem_usage, server_info.total_metainfo_mem_usage);
+-  fprintf (outfile_fp, "-----------------------------------------------------\n");
+-
+-  fprintf (outfile_fp, "\t%-100s | %17s(%s)\n", "File Name", "Memory Usage", "Ratio");
+-
+-  if (server_info.total_mem_usage != 0)
+-    {
+-      for (const auto &stat : server_info.stat_info)
+-	{
+-	  mem_usage_ratio = stat.second / (double) server_info.total_mem_usage;
+-	  mem_usage_ratio *= 100;
+-	  fprintf (outfile_fp, "\t%-100s | %17lu Bytes(%3d%%)\n",stat.first.c_str (), stat.second,
+-		   (int)mem_usage_ratio);
+-	}
+-    }
+-  fprintf (outfile_fp, "-----------------------------------------------------\n");
+-  fflush (outfile_fp);
+-}
+diff --git a/src/base/memory_monitor_cl.hpp b/src/base/memory_monitor_cl.hpp
+index 074b603d1..e69de29bb 100644
+--- a/src/base/memory_monitor_cl.hpp
++++ b/src/base/memory_monitor_cl.hpp
+@@ -1,30 +0,0 @@
+-/*
+- *
+- * Copyright 2016 CUBRID Corporation
+- *
+- *  Licensed under the Apache License, Version 2.0 (the "License");
+- *  you may not use this file except in compliance with the License.
+- *  You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- *
+- */
+-
+-/*
+- * memory_monitor_cl.hpp - Declaration of functions which is using client
+- */
+-
+-#ifndef _MEMORY_MONITOR_CL_HPP_
+-#define _MEMORY_MONITOR_CL_HPP_
+-
+-#include <cstdio>
+-#include "memory_monitor_common.hpp"
+-
+-void mmon_print_server_info (MMON_SERVER_INFO &server_info, FILE *outfile_fp);
+-#endif // _MEMORY_MONITOR_CL_HPP_
+diff --git a/src/base/memory_monitor_common.hpp b/src/base/memory_monitor_common.hpp
+index aa26da39c..e69de29bb 100644
+--- a/src/base/memory_monitor_common.hpp
++++ b/src/base/memory_monitor_common.hpp
+@@ -1,44 +0,0 @@
+-/*
+- *
+- * Copyright 2016 CUBRID Corporation
+- *
+- *  Licensed under the Apache License, Version 2.0 (the "License");
+- *  you may not use this file except in compliance with the License.
+- *  You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- *
+- */
+-
+-/*
+- * memory_monitor_common.hpp - Declaration of structures which is using
+- *                             both server and client
+- */
+-
+-#ifndef _MEMORY_MONITOR_COMMON_HPP_
+-#define _MEMORY_MONITOR_COMMON_HPP_
+-
+-#include <stdint.h>
+-#include <string>
+-#include <vector>
+-#include <algorithm>
+-
+-#define MMON_MAX_SERVER_NAME_LENGTH 32
+-#define MMON_CONVERT_TO_KB_SIZE(size) ((size) / 1024)
+-
+-typedef struct mmon_server_info MMON_SERVER_INFO;
+-struct mmon_server_info
+-{
+-  char server_name[MMON_MAX_SERVER_NAME_LENGTH];
+-  uint64_t total_mem_usage;
+-  uint64_t total_metainfo_mem_usage;
+-  int num_stat;
+-  std::vector<std::pair<std::string, uint64_t>> stat_info; // <stat name, memory usage>
+-};
+-#endif // _MEMORY_MONITOR_COMMON_HPP_
+diff --git a/src/base/memory_monitor_sr.cpp b/src/base/memory_monitor_sr.cpp
+index 1524aedbe..63084abb0 100644
+--- a/src/base/memory_monitor_sr.cpp
++++ b/src/base/memory_monitor_sr.cpp
+@@ -21,314 +21,11 @@
+  */
+ 
+ #if !defined(WINDOWS)
+-#include <cassert>
+-#include <cstring>
+-#include <algorithm>
+-
+-#include "environment_variable.h"
+ #include "memory_monitor_sr.hpp"
+ 
+-bool mmon_disabled = true;
+-
+-namespace cubmem
+-{
+-  std::atomic<uint64_t> m_stat_map[MMON_MAP_RESERVE_SIZE] = {};
+-
+-  memory_monitor::memory_monitor (const char *server_name)
+-    : m_stat_name_map {MMON_MAP_RESERVE_SIZE},
+-      m_server_name {server_name},
+-      m_magic_number {*reinterpret_cast <const int *> ("MMON")},
+-      m_total_mem_usage {0},
+-#if (MMON_DEBUG_LEVEL == 1) || (MMON_DEBUG_LEVEL == 3)
+-      m_stat_alloc_count {},
+-      m_stat_free_count {},
+-      m_total_alloc_count {0},
+-      m_total_free_count {0},
+-      m_stat_memory_peak {},
+-      m_total_memory_peak {0},
+-#endif
+-      m_meta_alloc_count {0}
+-  {
+-    std::string filecopy (__FILE__);
+-    std::string target ("/src/");
+-
+-    // Find the last occurrence of "src" in the path
+-    size_t pos = filecopy.rfind (target);
+-
+-    if (pos != std::string::npos)
+-      {
+-	m_target_pos = pos + target.length ();
+-      }
+-    else
+-      {
+-	m_target_pos = 0;
+-      }
+-  }
+-
+-  size_t memory_monitor::get_allocated_size (char *ptr)
+-  {
+-    size_t allocated_size = 0;
+-    allocated_size = malloc_usable_size ((void *)ptr);
+-
+-    if (allocated_size <= MMON_METAINFO_SIZE)
+-      {
+-	return allocated_size;
+-      }
+-
+-    char *meta_ptr = get_metainfo_pos (ptr, allocated_size);
+-
+-    const MMON_METAINFO *metainfo = (const MMON_METAINFO *) meta_ptr;
+-
+-    if (metainfo->magic_number == m_magic_number)
+-      {
+-	allocated_size = (size_t) metainfo->allocated_size - MMON_METAINFO_SIZE;
+-      }
+-
+-    return allocated_size;
+-  }
+-
+-#if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
+-  /* This section is for tracking errors of memory monitoring modules.
+-   *
+-   * The m_error_tracking_map uses the pointer address of metainfo as the key
+-   * and MMON_DEBUG_INFO containing necessary debugging information as the value,
+-   * and operates as follows:
+-   *
+-   * add_stat(): If the key exists, it checks the current usage status (is_exist)
+-   *             for that key. If the is_exist flag is set, it classifies it as
+-   *             an error case.
+-   *             If the key does not exist, it inserts the current information into
+-   *             MMON_DEBUG_INFO and adds it to the map.
+-   *
+-   * sub_stat(): If the key exists, it unset the is_exist flag for that key.
+-   *             If the key does not exist, it checks if the magic number matches.
+-   *             This is because even when memory allocated normally at the outside of the scope
+-   *             can come inside to the sub_stat() and go through this error check routine.
+-   *             If the magic number also matches, it considers the metadata to be corrupted.
+-   *
+-   * There are three cases of tracking error:
+-   *      1. Tracking hole
+-   *      2. Memory double allocation (unreachable)
+-   *      3. Metainfo corrupted
+-   * */
+-
+-  void memory_monitor::check_add_stat_tracking_error_is_exist (MMON_METAINFO *metainfo, const char *file, int line)
+-  {
+-    intptr_t ptr_key = reinterpret_cast <intptr_t> (metainfo);
+-    auto debug_search = m_error_tracking_map.find (ptr_key);
+-    if (debug_search != m_error_tracking_map.end ())
+-      {
+-	if (debug_search->second.is_exist)
+-	  {
+-	    // Case1. Reveal tracking hole
+-	    //    This case catch the tracking holes that can occur during tracking.
+-	    //    These holes can occur in the following situation:
+-	    //              cub_alloc() -> free() -> cub_alloc()
+-	    //    In sub_stat(), called from cub_free(), the is_exist flag
+-	    //    should be disabled, but if default free() is called,
+-	    //    the memory is deallocated without unset the flag.
+-	    //    If cub_alloc() is then called to reuse that memory, it is considered
+-	    //    an error in memory tracking.
+-	    fprintf (stderr, "metainfo pointer %p is already allocated by %s:%d "
+-		     "but %s:%d is the allocation request of this round\n", metainfo,
+-		     debug_search->second.filename, debug_search->second.line, file, line);
+-	    fflush (stderr);
+-	    assert (false);
+-	  }
+-	else
+-	  {
+-	    sprintf (debug_search->second.filename, "%s", file);
+-	    debug_search->second.line = line;
+-	    debug_search->second.is_exist = true;
+-	  }
+-      }
+-    else
+-      {
+-	MMON_DEBUG_INFO debug_info;
+-
+-	sprintf (debug_info.filename, "%s", file);
+-	debug_info.line = line;
+-	debug_info.is_exist = true;
+-
+-	std::pair<tbb::concurrent_unordered_map<intptr_t, MMON_DEBUG_INFO>::iterator, bool> debug_insert;
+-	debug_insert = m_error_tracking_map.insert (std::pair <intptr_t, MMON_DEBUG_INFO> (ptr_key, debug_info));
+-	if (!debug_insert.second)
+-	  {
+-	    // Case2. Double allocation (unreachable)
+-	    //    This case is not reached in normal memory allocation situations and
+-	    //    indicates a problem in the default allocation mechanism,
+-	    //    such as malloc(), if it is reached.
+-	    fprintf (stderr, "double memory allocation is occurred\n");
+-	    fflush (stderr);
+-	    assert (false);
+-	  }
+-      }
+-  }
+-
+-  void memory_monitor::check_sub_stat_tracking_error_is_exist (MMON_METAINFO *metainfo)
+-  {
+-    intptr_t ptr_key = reinterpret_cast <intptr_t> (metainfo);
+-    auto debug_search = m_error_tracking_map.find (ptr_key);
+-    if (debug_search != m_error_tracking_map.end())
+-      {
+-	if (debug_search->second.is_exist)
+-	  {
+-	    debug_search->second.is_exist = false;
+-	  }
+-	else
+-	  {
+-	    if (metainfo->magic_number == m_magic_number)
+-	      {
+-		// Case3. Metainfo corrupted
+-		//    This case indicates that the metadata information owned
+-		//    by the memory_monitor class for tracking has been corrupted.
+-		//    This can occur in two scenarios:
+-		//
+-		//      - Overflow occurring in the memory allocated through cub_alloc(),
+-		//      corrupting the metadata space.
+-		//      - Memory allocated through cub_alloc() is deallocated without
+-		//      erasing the metadata information via default free(), and then
+-		//      deallocated through cub_free after being reallocated through basic
+-		//      allocation functions like malloc().
+-		//
+-		//    In the second scenario, even if a different size is allocated compared
+-		//    to the first allocation, the position of the pointer storing the metadata
+-		//    information may not change. The position of the metadata is determined by
+-		//    malloc_usable_size(), which can return a larger value than the size
+-		//    requested by the user. This is because the OS allocates memory in chunks
+-		//    rather than exactly as much as the user requested. Thus, even if the user
+-		//    receives the same chunk through the basic allocation function,
+-		//    the amount of memory usable by the user can be larger, indicating
+-		//    potential corruption of the metadata space.
+-		fprintf (stderr, "Metainfo is corrupted by some reason.\n");
+-		fflush (stderr);
+-		assert (false);
+-	      }
+-	  }
+-      }
+-  }
+-#endif
+-
+-  void memory_monitor::aggregate_server_info (MMON_SERVER_INFO &server_info)
+-  {
+-    strncpy (server_info.server_name, m_server_name.c_str (), m_server_name.size () + 1);
+-    server_info.total_mem_usage = m_total_mem_usage.load ();
+-    server_info.total_metainfo_mem_usage = m_meta_alloc_count * MMON_METAINFO_SIZE;
+-
+-    server_info.num_stat = m_stat_name_map.size ();
+-
+-    for (const auto &[stat_name, stat_id] : m_stat_name_map)
+-      {
+-	// m_stat_map[stat_id] means memory usage
+-	server_info.stat_info.emplace_back (stat_name, m_stat_map[stat_id].load ());
+-      }
+-
+-    // This funciton is for sorting the vector in descending order by memory usage
+-    const auto &comp = [] (const auto &stat_pair1, const auto &stat_pair2)
+-    {
+-      return stat_pair1.second > stat_pair2.second;
+-    };
+-    std::sort (server_info.stat_info.begin (), server_info.stat_info.end (), comp);
+-  }
+-
+-  void memory_monitor::finalize_dump ()
+-  {
+-    double mem_usage_ratio = 0.0;
+-    FILE *outfile_fp = fopen ("finalize_dump.txt", "w+");
+-    MMON_SERVER_INFO server_info;
+-
+-    aggregate_server_info (server_info);
+-
+-    fprintf (outfile_fp, "====================cubrid memmon====================\n");
+-    fprintf (outfile_fp, "Server Name: %s\n", server_info.server_name);
+-    fprintf (outfile_fp, "Total Memory Usage(Bytes): %lu\n\n", server_info.total_mem_usage);
+-    fprintf (outfile_fp, "Total Metainfo Memory Usage(Bytes): %lu\n\n",
+-	     server_info.total_metainfo_mem_usage);
+-    fprintf (outfile_fp, "-----------------------------------------------------\n");
+-
+-    fprintf (outfile_fp, "\t%-100s | %17s(%s)\n", "File Name", "Memory Usage", "Ratio");
+-
+-    for (const auto &[stat_name, mem_usage] : server_info.stat_info)
+-      {
+-	if (server_info.total_mem_usage != 0)
+-	  {
+-	    mem_usage_ratio = mem_usage / (double) server_info.total_mem_usage;
+-	    mem_usage_ratio *= 100;
+-	  }
+-	fprintf (outfile_fp, "\t%-100s | %17lu(%3d%%)\n", stat_name.c_str (), mem_usage,
+-		 (int)mem_usage_ratio);
+-      }
+-    fprintf (outfile_fp, "-----------------------------------------------------\n");
+-    fflush (outfile_fp);
+-    fclose (outfile_fp);
+-  }
+-
+-#if (MMON_DEBUG_LEVEL == 1) || (MMON_DEBUG_LEVEL == 3)
+-  void memory_monitor::print_debug_result ()
+-  {
+-    double mem_usage_ratio = 0.0;
+-    MMON_SERVER_INFO server_info;
+-    std::vector<uint64_t> stat_alloc_count_vector;
+-    std::vector<uint64_t> stat_free_count_vector;
+-    std::vector<uint64_t> stat_peak_vector;
+-    char filename[MMON_MAX_NAME_LENGTH * 2];
+-    FILE *outfile_fp = NULL;
+-
+-    (void) envvar_logdir_file (filename, MMON_MAX_NAME_LENGTH * 2, "/server/mmon_debug_result.txt");
+-    outfile_fp = fopen (filename, "w+");
+-    if (outfile_fp == NULL)
+-      {
+-	fprintf (stdout, "fopen() error. Creating mmon_debug_result.txt failed\n");
+-	fflush (stdout);
+-	return;
+-      }
+-
+-    auto MMON_CONVERT_TO_KB_SIZE = [] (uint64_t size)
+-    {
+-      return ((size) / 1024);
+-    };
+-
+-    // get stat information of memory_monitor like aggregate_server_info ()
+-    strncpy (server_info.server_name, m_server_name.c_str (), m_server_name.size () + 1);
+-    server_info.total_mem_usage = m_total_mem_usage.load ();
+-    server_info.total_metainfo_mem_usage = m_meta_alloc_count * MMON_METAINFO_SIZE;
+-
+-    server_info.num_stat = m_stat_name_map.size ();
+-
+-    for (const auto &[stat_name, stat_id] : m_stat_name_map)
+-      {
+-	// m_stat_map[stat_id] means memory usage
+-	server_info.stat_info.emplace_back (stat_name, m_stat_map[stat_id].load ());
+-	// save debug result with the same order of server_info.stat_info
+-	stat_alloc_count_vector.emplace_back (m_stat_alloc_count[stat_id].load ());
+-	stat_free_count_vector.emplace_back (m_stat_free_count[stat_id].load ());
+-	stat_peak_vector.emplace_back (m_stat_memory_peak[stat_id]);
+-      }
+-
+-    fprintf (outfile_fp, "====================cubrid memmon====================\n");
+-    fprintf (outfile_fp, "Server Name: %s\n", server_info.server_name);
+-    fprintf (outfile_fp, "Total Memory Usage(KB): %lu\n\n", MMON_CONVERT_TO_KB_SIZE (server_info.total_mem_usage));
+-    fprintf (outfile_fp, "Total Metainfo Memory Usage(KB): %lu\n\n",
+-	     MMON_CONVERT_TO_KB_SIZE (server_info.total_metainfo_mem_usage));
+-    fprintf (outfile_fp, "Total Alloc Count: %lu\n", m_total_alloc_count.load ());
+-    fprintf (outfile_fp, "Total Dealloc Count: %lu\n", m_total_free_count.load ());
+-    fprintf (outfile_fp, "Total Peak Memory(KB): %lu\n", MMON_CONVERT_TO_KB_SIZE (m_total_memory_peak));
+-    fprintf (outfile_fp, "-----------------------------------------------------\n");
+-
+-    fprintf (outfile_fp, "\t%-50s | %10s | %10s | %10s\n", "File Name", "Alloc Cnt", "Free Cnt", "Peak Mem");
++// int dump_memory_usage (void)
++// {
++//   return 0;
++// }
+ 
+-    int cnt = 0;
+-    for (const auto &[stat_name, mem_usage] : server_info.stat_info)
+-      {
+-	fprintf (outfile_fp, "\t%-50s | %10lu | %10lu | %10lu\n",stat_name.c_str (),
+-		 stat_alloc_count_vector[cnt], stat_free_count_vector[cnt],
+-		 MMON_CONVERT_TO_KB_SIZE (stat_peak_vector[cnt]));
+-	cnt++;
+-      }
+-    fprintf (outfile_fp, "-----------------------------------------------------\n");
+-    fflush (outfile_fp);
+-    fclose (outfile_fp);
+-  }
+-#endif
+-}
+ #endif // !WINDOWS
+diff --git a/src/base/memory_monitor_sr.hpp b/src/base/memory_monitor_sr.hpp
+index 77dba65e9..b1301c2b4 100644
+--- a/src/base/memory_monitor_sr.hpp
++++ b/src/base/memory_monitor_sr.hpp
+@@ -25,261 +25,8 @@
+ #define _MEMORY_MONITOR_SR_HPP_
+ 
+ #if !defined(WINDOWS)
+-#include <cstdio>
+-#include <atomic>
+ 
+-#include "concurrent_unordered_map.h"
+-#include "memory_monitor_common.hpp"
++// extern int dump_memory_usage (void);
+ 
+-#ifndef MMON_DEBUG_LEVEL
+-/* 0: not debug
+- * 1: debug alloc count
+- * 2: debug tracking error
+- * 3: debug all
+- */
+-#define MMON_DEBUG_LEVEL 0
+-#endif
+-
+-#if defined(__SVR4)
+-extern "C" size_t malloc_usable_size (void *);
+-#elif defined(__APPLE__)
+-#include <malloc/malloc.h>
+-
+-#ifndef HAVE_USR_INCLUDE_MALLOC_H
+-#define HAVE_USR_INCLUDE_MALLOC_H
+-#endif
+-#elif defined(__linux__)
+-#include <malloc.h>
+-
+-#ifndef HAVE_USR_INCLUDE_MALLOC_H
+-#define HAVE_USR_INCLUDE_MALLOC_H
+-#endif
+-#endif
+-
+-#define MMON_MAX_NAME_LENGTH 255
+-
+-typedef struct mmon_metainfo MMON_METAINFO;
+-struct mmon_metainfo
+-{
+-  uint64_t allocated_size;
+-  int stat_id;
+-  int magic_number;
+-};
+-
+-#if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
+-typedef struct mmon_debug_info MMON_DEBUG_INFO;
+-struct mmon_debug_info
+-{
+-  char filename[255];
+-  int line;
+-  bool is_exist;
+-};
+-#endif
+-
+-extern bool mmon_disabled;
+-
+-namespace cubmem
+-{
+-  // IMPORTANT!!
+-  // This meta size is related with allocation byte align
+-  // Don't adjust it freely
+-  // 8 byte size + 4 byte stat + 4 byte magicnumber
+-  static constexpr int MMON_METAINFO_SIZE = 16;
+-
+-  // Because of performance optimization, we have to reserve the size of the map(or mapping array).
+-  // We think that the number of entry of map(or mapping array) cannot over 8K.
+-  static constexpr int MMON_MAP_RESERVE_SIZE = 8192;
+-
+-  extern std::atomic<uint64_t> m_stat_map[MMON_MAP_RESERVE_SIZE];
+-
+-  class memory_monitor
+-  {
+-    public:
+-      memory_monitor (const char *server_name);
+-      ~memory_monitor () {}
+-
+-      memory_monitor (const memory_monitor &) = delete;
+-      memory_monitor (memory_monitor &&) = delete;
+-
+-      memory_monitor &operator = (const memory_monitor &) = delete;
+-      memory_monitor &operator = (memory_monitor &&) = delete;
+-
+-    public:
+-      size_t get_allocated_size (char *ptr);
+-      inline int get_target_pos ();
+-      inline void add_stat (char *ptr, const size_t size, const char *file, const int line);
+-      inline void sub_stat (char *ptr);
+-      void aggregate_server_info (MMON_SERVER_INFO &server_info);
+-      void finalize_dump ();
+-#if (MMON_DEBUG_LEVEL == 1) || (MMON_DEBUG_LEVEL == 3)
+-      void print_debug_result ();
+-#endif
+-
+-    private:
+-      inline char *get_metainfo_pos (char *ptr, size_t size);
+-      inline void make_stat_name (char *buf, const char *file, const int line);
+-#if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
+-      void check_add_stat_tracking_error_is_exist (MMON_METAINFO *metainfo, const char *file, int line);
+-      void check_sub_stat_tracking_error_is_exist (MMON_METAINFO *metainfo);
+-#endif
+-
+-    private:
+-      std::string m_server_name;
+-      // Entries of m_stat_name_map and m_stat_map will not be deleted
+-      tbb::concurrent_unordered_map <std::string, int> m_stat_name_map;        // key: stat name, value: stat id
+-#if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
+-      tbb::concurrent_unordered_map <intptr_t, MMON_DEBUG_INFO> m_error_tracking_map;
+-#endif
+-#if (MMON_DEBUG_LEVEL == 1) || (MMON_DEBUG_LEVEL == 3)
+-      std::atomic <uint64_t> m_stat_alloc_count[MMON_MAP_RESERVE_SIZE];
+-      std::atomic <uint64_t> m_stat_free_count[MMON_MAP_RESERVE_SIZE];
+-      std::atomic <uint64_t> m_total_alloc_count;
+-      std::atomic <uint64_t> m_total_free_count;
+-      uint64_t m_stat_memory_peak[MMON_MAP_RESERVE_SIZE];
+-      uint64_t m_total_memory_peak;
+-#endif
+-      std::atomic <uint64_t> m_total_mem_usage;
+-      std::atomic <int> m_meta_alloc_count;                         // for checking occupancy of memory used by metainfo space
+-      int m_target_pos;
+-      // Magic number is for checking an allocated memory which is out-of-scope of memory_monitor.
+-      // It's because memory_monitor starts to manage information about heap memory allocation
+-      // not "right after cubrid server starts" but "after some allocations are occurred because of
+-      // memory_monitor has some dependencies to start (e.g. system parameter, error file initialize, etc..).
+-      // And memory_monitor also can't manage some allocations after it is started like allocations at C++ containers(STL),
+-      // and some C++ allocations occurred at header files.
+-      const int m_magic_number;
+-  };
+-
+-  extern memory_monitor *mmon_Gl;
+-
+-  inline int memory_monitor::get_target_pos ()
+-  {
+-    return m_target_pos;
+-  }
+-
+-  inline void memory_monitor::make_stat_name (char *buf, const char *file, const int line)
+-  {
+-    assert (strlen (file + m_target_pos) + std::to_string (line).length() + 1 <= MMON_MAX_NAME_LENGTH);
+-    snprintf (buf, MMON_MAX_NAME_LENGTH, "%s:%d", file + m_target_pos, line);
+-  }
+-
+-  inline char *memory_monitor::get_metainfo_pos (char *ptr, size_t size)
+-  {
+-    return ptr + size - MMON_METAINFO_SIZE;
+-  }
+-
+-  inline void memory_monitor::add_stat (char *ptr, const size_t size, const char *file, const int line)
+-  {
+-    char stat_name[MMON_MAX_NAME_LENGTH];
+-
+-    // size should not be 0 because of MMON_METAINFO_SIZE
+-    assert (size > 0);
+-
+-    MMON_METAINFO *metainfo = (MMON_METAINFO *) get_metainfo_pos (ptr, size);
+-
+-    metainfo->allocated_size = (uint64_t) size;
+-    m_total_mem_usage += metainfo->allocated_size;
+-#if (MMON_DEBUG_LEVEL == 1) || (MMON_DEBUG_LEVEL == 3)
+-    // check total allocated memory peak
+-    if (m_total_mem_usage.load () > m_total_memory_peak)
+-      {
+-	m_total_memory_peak = m_total_mem_usage.load ();
+-      }
+-#endif
+-
+-    make_stat_name (stat_name, file, line);
+-
+-retry:
+-    const auto search = m_stat_name_map.find (stat_name);
+-    if (search != m_stat_name_map.end ())
+-      {
+-	metainfo->stat_id = search->second;
+-      }
+-    else
+-      {
+-	std::pair<tbb::concurrent_unordered_map<std::string, int>::iterator, bool> insert_success;
+-	metainfo->stat_id = m_stat_name_map.size ();
+-	assert (metainfo->stat_id < MMON_MAP_RESERVE_SIZE);
+-	// stat_id starts with 0
+-	insert_success = m_stat_name_map.insert (std::pair <std::string, int> (stat_name, metainfo->stat_id));
+-	if (!insert_success.second)
+-	  {
+-	    goto retry;
+-	  }
+-      }
+-    m_stat_map[metainfo->stat_id] += metainfo->allocated_size;
+-#if (MMON_DEBUG_LEVEL == 1) || (MMON_DEBUG_LEVEL == 3)
+-    // check stat allocated memory peak
+-    uint64_t stat_size = m_stat_map[metainfo->stat_id].load ();
+-    if (stat_size > m_stat_memory_peak[metainfo->stat_id])
+-      {
+-	m_stat_memory_peak[metainfo->stat_id] = stat_size;
+-      }
+-    // add alloc count
+-    m_stat_alloc_count[metainfo->stat_id]++;
+-    m_total_alloc_count++;
+-#endif
+-
+-    // put meta info into the allocated chunk
+-    metainfo->magic_number = m_magic_number;
+-    m_meta_alloc_count++;
+-#if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
+-    check_add_stat_tracking_error_is_exist (metainfo, file, line);
+-#endif
+-  }
+-
+-  inline void memory_monitor::sub_stat (char *ptr)
+-  {
+-    size_t allocated_size = malloc_usable_size ((void *)ptr);
+-
+-    if (allocated_size >= MMON_METAINFO_SIZE)
+-      {
+-	MMON_METAINFO *metainfo = (MMON_METAINFO *) get_metainfo_pos (ptr, allocated_size);
+-
+-#if !defined (NDEBUG) && (MMON_DEBUG_LEVEL > 1)
+-	check_sub_stat_tracking_error_is_exist (metainfo);
+-#endif
+-	if (metainfo->magic_number == m_magic_number)
+-	  {
+-	    assert (metainfo->stat_id >= 0 && metainfo->stat_id < MMON_MAP_RESERVE_SIZE);
+-	    assert (m_total_mem_usage >= metainfo->allocated_size && m_stat_map[metainfo->stat_id] >= metainfo->allocated_size);
+-	    assert (metainfo->allocated_size == allocated_size);
+-
+-	    m_total_mem_usage -= metainfo->allocated_size;
+-	    m_stat_map[metainfo->stat_id] -= metainfo->allocated_size;
+-
+-	    metainfo->magic_number = 0;
+-	    m_meta_alloc_count--;
+-	    assert (m_meta_alloc_count >= 0);
+-#if (MMON_DEBUG_LEVEL == 1) || (MMON_DEBUG_LEVEL == 3)
+-	    m_stat_free_count[metainfo->stat_id]++;
+-	    m_total_free_count++;
+-#endif
+-	  }
+-      }
+-  }
+-} //namespace cubmem
+-
+-extern int mmon_initialize (const char *server_name);
+-extern void mmon_finalize ();
+-extern size_t mmon_get_allocated_size (char *ptr);
+-extern void mmon_aggregate_server_info (MMON_SERVER_INFO &server_info);
+-
+-inline bool mmon_is_memory_monitor_enabled ()
+-{
+-  return (!mmon_disabled);
+-}
+-
+-inline void mmon_add_stat (char *ptr, const size_t size, const char *file, const int line)
+-{
+-  cubmem::mmon_Gl->add_stat (ptr, size, file, line);
+-}
+-
+-inline void mmon_sub_stat (char *ptr)
+-{
+-  assert (ptr != NULL);
+-
+-  cubmem::mmon_Gl->sub_stat (ptr);
+-}
+ #endif // !WINDOWS
+ #endif // _MEMORY_MONITOR_SR_HPP_
+diff --git a/src/base/memory_private_allocator.cpp b/src/base/memory_private_allocator.cpp
+index dd5f66c85..f6ab1949e 100644
+--- a/src/base/memory_private_allocator.cpp
++++ b/src/base/memory_private_allocator.cpp
+@@ -25,8 +25,6 @@
+ #if defined (SERVER_MODE)
+ #include "thread_manager.hpp"
+ #endif // SERVER_MODE
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmem
+ {
+diff --git a/src/base/memory_wrapper.hpp b/src/base/memory_wrapper.hpp
+index 9ffe5b265..e69de29bb 100644
+--- a/src/base/memory_wrapper.hpp
++++ b/src/base/memory_wrapper.hpp
+@@ -1,84 +0,0 @@
+-/*
+- *
+- * Copyright 2016 CUBRID Corporation
+- *
+- *  Licensed under the Apache License, Version 2.0 (the "License");
+- *  you may not use this file except in compliance with the License.
+- *  You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- *
+- */
+-
+-/*
+- * memory_wrapper.hpp - Overloading operator new, delete with all wrapping allocation functions
+- */
+-
+-#ifndef _MEMORY_WRAPPER_HPP_
+-#define _MEMORY_WRAPPER_HPP_
+-
+-#if !defined(WINDOWS)
+-
+-#include "memory_cwrapper.h"
+-
+-/* ***IMPORTANT!!***
+- * memory_wrapper.hpp has a restriction that it must locate at the end of including section
+- * because the user-defined new for overloaded format can make build error in glibc
+- * when glibc header use "placement new" or another overloaded format of new.
+- * So memory_wrapper.hpp cannot be included in header file, but memory_cwrapper.h can be included.
+- * You can include memory_cwrapper.h in a header file when the header file use allocation function.
+- *                        HEADER FILE(.h/.hpp)    |   SOURCE FILE(.c/.cpp)    |   INCLUDE LOCATION
+- * memory_cwrapper.h          CAN INCLUDE         |     CAN INCLUDE           |       ANYWHERE
+- * memory_wrapper.hpp         CANNOT INCLUDE      |     CAN INCLUDE           |   END OF INCLUDE
+- */
+-
+-#ifdef SERVER_MODE
+-// TODO: The usage of operator new encompasses various additional methods beyond basic usage.
+-// However, as CUBRID does not currently utilize such additional methods, they are not overloaded.
+-// It has been decided that overloading will be undertaken should any issues arise from
+-// the discovery of the utilization of these additional methods.
+-inline void *operator new (size_t size, const char *file, const int line) noexcept
+-{
+-  return cub_alloc (size, file, line);
+-}
+-
+-inline void *operator new[] (size_t size, const char *file, const int line) noexcept
+-{
+-  return cub_alloc (size, file, line);
+-}
+-
+-/* Mainly delete (void *ptr, size_t sz) / delete [] (void *ptr, size_t sz) is called,
+- * but when deleting arrays of destructible class types, including incomplete types,
+- * either delete (void *ptr) / delete [] (void *ptr) or delete (void *ptr, size_t sz) /
+- * delete [] (void *ptr, size_t sz) can be called. */
+-inline void operator delete (void *ptr) noexcept
+-{
+-  cub_free (ptr);
+-}
+-
+-inline void operator delete (void *ptr, size_t sz) noexcept
+-{
+-  cub_free (ptr);
+-}
+-
+-inline void operator delete [] (void *ptr) noexcept
+-{
+-  cub_free (ptr);
+-}
+-
+-inline void operator delete [] (void *ptr, size_t sz) noexcept
+-{
+-  cub_free (ptr);
+-}
+-
+-#define new new(__FILE__, __LINE__)
+-#endif // SERVER_MODE
+-#endif // !WINDOWS
+-
+-#endif // _MEMORY_WRAPPER_HPP_
+diff --git a/src/base/message_catalog.c b/src/base/message_catalog.c
+index 766519562..8e91ddfb1 100644
+--- a/src/base/message_catalog.c
++++ b/src/base/message_catalog.c
+@@ -57,8 +57,6 @@
+ #if defined(WINDOWS)
+ #include "intl_support.h"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * MESSAGE CATALOG FILE FORMAT.
+diff --git a/src/base/misc_string.c b/src/base/misc_string.c
+index 52539fc86..45e12878c 100644
+--- a/src/base/misc_string.c
++++ b/src/base/misc_string.c
+@@ -30,8 +30,6 @@
+ #include <ctype.h>
+ 
+ #include "misc_string.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * ustr_casestr() - find a substring, case ignored
+diff --git a/src/base/mprec.c b/src/base/mprec.c
+index b11f71984..1ed67bb10 100644
+--- a/src/base/mprec.c
++++ b/src/base/mprec.c
+@@ -86,8 +86,6 @@
+ #include <string.h>
+ /* #include <reent.h> */
+ #include "mprec.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* reent.c knows this value */
+ /* #define _Kmax 15 */
+diff --git a/src/base/object_representation_sr.c b/src/base/object_representation_sr.c
+index e5fda14fe..c727cf133 100644
+--- a/src/base/object_representation_sr.c
++++ b/src/base/object_representation_sr.c
+@@ -39,8 +39,6 @@
+ #include <new>
+ #include <stdio.h>
+ #include <string.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define DATA_INIT(data, type) memset(data, 0, sizeof(DB_DATA))
+ #define OR_ARRAY_EXTENT 10
+diff --git a/src/base/packer.cpp b/src/base/packer.cpp
+index a5ec677b9..a14fbee9b 100644
+--- a/src/base/packer.cpp
++++ b/src/base/packer.cpp
+@@ -33,8 +33,6 @@
+ #include <cstring>
+ #include <vector>
+ #include <string>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubpacking
+ {
+diff --git a/src/base/perf.cpp b/src/base/perf.cpp
+index 25d58006a..1e678dc44 100644
+--- a/src/base/perf.cpp
++++ b/src/base/perf.cpp
+@@ -27,8 +27,6 @@
+ #include <stdexcept>
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubperf
+ {
+diff --git a/src/base/perf_monitor.c b/src/base/perf_monitor.c
+index 4cb6d1f7d..b46503d88 100644
+--- a/src/base/perf_monitor.c
++++ b/src/base/perf_monitor.c
+@@ -97,8 +97,6 @@ static int rv;
+ #if !defined (SERVER_MODE)
+ #include "network_interface_cl.h"
+ #endif /* !defined (SERVER_MODE) */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* Custom values. */
+ #define PSTAT_VALUE_CUSTOM	      0x00000001
+diff --git a/src/base/perf_monitor_trackers.cpp b/src/base/perf_monitor_trackers.cpp
+index b11a68f37..e401d6d0e 100644
+--- a/src/base/perf_monitor_trackers.cpp
++++ b/src/base/perf_monitor_trackers.cpp
+@@ -21,8 +21,6 @@
+ #include "thread_compat.hpp"
+ #include "thread_manager.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ perfmon_counter_timer_tracker::perfmon_counter_timer_tracker (PERF_STAT_ID a_stat_id)
+   : m_stat_id (a_stat_id)
+diff --git a/src/base/pinnable_buffer.cpp b/src/base/pinnable_buffer.cpp
+index 5ad223532..249a31f6e 100644
+--- a/src/base/pinnable_buffer.cpp
++++ b/src/base/pinnable_buffer.cpp
+@@ -24,8 +24,6 @@
+ 
+ #include "pinnable_buffer.hpp"
+ #include "pinning.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmem
+ {
+diff --git a/src/base/pinning.cpp b/src/base/pinning.cpp
+index b00b656be..1d7630fc0 100644
+--- a/src/base/pinning.cpp
++++ b/src/base/pinning.cpp
+@@ -23,8 +23,6 @@
+ #ident "$Id$"
+ 
+ #include "pinning.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubbase
+ {
+diff --git a/src/base/porting.c b/src/base/porting.c
+index f21b4cb93..8d5059ac4 100644
+--- a/src/base/porting.c
++++ b/src/base/porting.c
+@@ -58,8 +58,6 @@
+ #include <sys/types.h>
+ #include <string.h>
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined(AIX) && !defined(DONT_HOOK_MALLOC)
+ #undef malloc
+diff --git a/src/base/printer.cpp b/src/base/printer.cpp
+index 045b2f5aa..5466d8d36 100644
+--- a/src/base/printer.cpp
++++ b/src/base/printer.cpp
+@@ -21,8 +21,6 @@
+  */
+ 
+ #include "printer.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ void print_output::operator+= (const char ch)
+ {
+diff --git a/src/base/process_util.c b/src/base/process_util.c
+index 970f6503e..b2d8416f9 100644
+--- a/src/base/process_util.c
++++ b/src/base/process_util.c
+@@ -36,8 +36,6 @@
+ #include <sys/wait.h>
+ #include <signal.h>
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * create_child_process() - create a child process
+diff --git a/src/base/release_string.c b/src/base/release_string.c
+index 9ac93ce73..46f0df25a 100644
+--- a/src/base/release_string.c
++++ b/src/base/release_string.c
+@@ -37,8 +37,6 @@
+ #include "language_support.h"
+ #include "environment_variable.h"
+ #include "log_comm.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * COMPATIBILITY_RULE - Structure that encapsulates compatibility rules.
+diff --git a/src/base/resource_tracker.cpp b/src/base/resource_tracker.cpp
+index 02bc4dc24..a0b27076f 100644
+--- a/src/base/resource_tracker.cpp
++++ b/src/base/resource_tracker.cpp
+@@ -23,8 +23,6 @@
+ #include "resource_tracker.hpp"
+ 
+ #include "error_manager.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubbase
+ {
+diff --git a/src/base/sha1.c b/src/base/sha1.c
+index 7370483eb..a7f96345d 100644
+--- a/src/base/sha1.c
++++ b/src/base/sha1.c
+@@ -42,8 +42,6 @@
+ #include "error_manager.h"
+ 
+ #include <assert.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  *  Define the circular shift macro
+diff --git a/src/base/stack_dump.c b/src/base/stack_dump.c
+index c050cb49a..2f61a92dc 100644
+--- a/src/base/stack_dump.c
++++ b/src/base/stack_dump.c
+@@ -63,8 +63,6 @@
+ #include "stack_dump.h"
+ #endif // x86_SOLARIS, LINUX
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined(x86_SOLARIS)
+ #define FRAME_PTR_REGISTER      EBP
+diff --git a/src/base/string_buffer.cpp b/src/base/string_buffer.cpp
+index 5ab6e5c1b..c949b0ef4 100644
+--- a/src/base/string_buffer.cpp
++++ b/src/base/string_buffer.cpp
+@@ -24,8 +24,6 @@
+ 
+ #include <algorithm>  // for std::min
+ #include <memory.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ void string_buffer::add_bytes (size_t len, const char *bytes)
+ {
+diff --git a/src/base/system_parameter.c b/src/base/system_parameter.c
+index 0082839be..898d3174e 100644
+--- a/src/base/system_parameter.c
++++ b/src/base/system_parameter.c
+@@ -96,8 +96,6 @@
+ #endif
+ #include "host_lookup.h"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/base/tsc_timer.c b/src/base/tsc_timer.c
+index e73b1663c..9c9f12595 100644
+--- a/src/base/tsc_timer.c
++++ b/src/base/tsc_timer.c
+@@ -29,8 +29,6 @@
+ #if !defined(WINDOWS)
+ #include <sys/time.h>
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define CHECK_CPU_FREQ(v) \
+ do { \
+diff --git a/src/base/tz_support.c b/src/base/tz_support.c
+index 7b0e33011..561367c53 100644
+--- a/src/base/tz_support.c
++++ b/src/base/tz_support.c
+@@ -48,8 +48,6 @@
+ #if defined (SERVER_MODE)
+ #include "thread_manager.hpp"
+ #endif // SERVER_MODE
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/base/uca_support.c b/src/base/uca_support.c
+index 1fa3b3044..54e6f4902 100644
+--- a/src/base/uca_support.c
++++ b/src/base/uca_support.c
+@@ -31,8 +31,6 @@
+ #include "intl_support.h"
+ #include "uca_support.h"
+ #include "unicode_support.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/base/unicode_support.c b/src/base/unicode_support.c
+index 9f1b85921..f513b6df7 100644
+--- a/src/base/unicode_support.c
++++ b/src/base/unicode_support.c
+@@ -35,8 +35,6 @@
+ #include "environment_variable.h"
+ #include "system_parameter.h"
+ #include "unicode_support.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ 
+ #define UNICODEDATA_FILE "unicodedata.txt"
+diff --git a/src/base/util_func.c b/src/base/util_func.c
+index 4cfcf403a..222d81c06 100644
+--- a/src/base/util_func.c
++++ b/src/base/util_func.c
+@@ -43,8 +43,6 @@
+ #include "utility.h"
+ #include "system_parameter.h"
+ #include "environment_variable.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define UTIL_LOG_MAX_HEADER_LEN    (40)
+ #define UTIL_LOG_MAX_MSG_SIZE       (1024)
+diff --git a/src/base/variable_string.c b/src/base/variable_string.c
+index 361ee4900..606c47509 100644
+--- a/src/base/variable_string.c
++++ b/src/base/variable_string.c
+@@ -34,8 +34,6 @@
+ #include "variable_string.h"
+ #include "error_code.h"
+ #include "error_manager.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define FUDGE		16
+ #define PREFIX_CUSHION	 8
+diff --git a/src/base/xml_parser.c b/src/base/xml_parser.c
+index 849f0bcd9..6db05e7a3 100644
+--- a/src/base/xml_parser.c
++++ b/src/base/xml_parser.c
+@@ -31,8 +31,6 @@
+ 
+ #include "xml_parser.h"
+ #include "utility.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined(WINDOWS)
+ #define strtok_r	strtok_s
+diff --git a/src/communication/network.h b/src/communication/network.h
+index 8f5a80774..0b3624667 100644
+--- a/src/communication/network.h
++++ b/src/communication/network.h
+@@ -276,8 +276,8 @@ enum net_server_request
+   NET_SERVER_PLCSQL_TRANSFER_FILE,
+ 
+   /* memmon */
+-  NET_SERVER_MMON_GET_SERVER_INFO,
+   NET_SERVER_MMON_DISABLE_FORCE,
++  NET_SERVER_MMON_DUMP_MEMORY_USAGE,
+ 
+   /*
+    * This is the last entry. It is also used for the end of an
+diff --git a/src/communication/network_callback_sr.cpp b/src/communication/network_callback_sr.cpp
+index 54956b8c5..da2170b55 100644
+--- a/src/communication/network_callback_sr.cpp
++++ b/src/communication/network_callback_sr.cpp
+@@ -28,8 +28,6 @@
+ #include "method_callback.hpp"
+ #endif
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SERVER_MODE)
+ int xs_callback_send (cubthread::entry *thread_p, const cubmem::extensible_block &mem)
+diff --git a/src/communication/network_common.cpp b/src/communication/network_common.cpp
+index 104a983cb..a71d7262d 100644
+--- a/src/communication/network_common.cpp
++++ b/src/communication/network_common.cpp
+@@ -21,8 +21,6 @@
+  */
+ 
+ #include "network.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* The list should sync with net_server_request defined in network.h */
+ /* client: used to collect histogram, server: used to log an error */
+@@ -233,8 +231,8 @@ const char *net_server_request_name[NET_SERVER_REQUEST_END] =
+ 
+   "NET_SERVER_PLCSQL_TRANSFER_FILE",
+ 
+-  "NET_SERVER_MMON_GET_SERVER_INFO",
+   "NET_SERVER_MMON_DISABLE_FORCE"
++  "NET_SERVER_MMON_DUMP_MEMORY_USAGE"
+ };
+ 
+ /*
+diff --git a/src/communication/network_interface_cl.c b/src/communication/network_interface_cl.c
+index dafa57da5..b63a83a8d 100644
+--- a/src/communication/network_interface_cl.c
++++ b/src/communication/network_interface_cl.c
+@@ -11423,18 +11423,30 @@ error:
+ #endif /* !CS_MODE */
+ }
+ 
++
++
++
++
++
++
++
++
++
++
++
++
++
++
+ /*
+- * mmon_get_server_info - request to server to get server memory usage info
++ * mmon_disable_force - request to server to disable memory_monitor forcely
+  *
+  * return : cubrid error
+- *
+- *   server_info(in/out): save memory usage information of the server
+  */
+ int
+-mmon_get_server_info (MMON_SERVER_INFO & server_info)
++mmon_disable_force ()
+ {
+ #if defined(CS_MODE)
+-  char *buffer, *ptr, *temp_str;
++  char *buffer, *ptr;
+   int bufsize = 0;
+   OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
+   char *reply = OR_ALIGNED_BUF_START (a_reply);
+@@ -11442,7 +11454,7 @@ mmon_get_server_info (MMON_SERVER_INFO & server_info)
+   int error = NO_ERROR;
+ 
+   req_error =
+-    net_client_request2 (NET_SERVER_MMON_GET_SERVER_INFO, NULL, 0, reply,
++    net_client_request2 (NET_SERVER_MMON_DISABLE_FORCE, NULL, 0, reply,
+ 			 OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, &buffer, &bufsize);
+ 
+   if (req_error)
+@@ -11457,34 +11469,6 @@ mmon_get_server_info (MMON_SERVER_INFO & server_info)
+       ptr = or_unpack_int (ptr, &error);
+     }
+ 
+-  if (error == NO_ERROR)
+-    {
+-      // unpack server name
+-      ptr = or_unpack_string_nocopy (buffer, &temp_str);
+-      memcpy (server_info.server_name, temp_str, strlen (temp_str) + 1);
+-
+-      // unpack server total memory usage
+-      ptr = or_unpack_int64 (ptr, (int64_t *) & (server_info.total_mem_usage));
+-
+-      // unpack metainfo total memory usage
+-      ptr = or_unpack_int64 (ptr, (int64_t *) & (server_info.total_metainfo_mem_usage));
+-
+-      // unpack the number of stat
+-      ptr = or_unpack_int (ptr, (int *) &(server_info.num_stat));
+-
+-      // unpack file name and its memory usage
+-      server_info.stat_info.resize (server_info.num_stat);
+-
+-      // *INDENT-OFF*
+-      // unpack memory usage entry info
+-      for (auto &s_info : server_info.stat_info)
+-        {
+-          ptr = or_unpack_string_nocopy (ptr, &temp_str);
+-          s_info.first = temp_str;
+-          ptr = or_unpack_int64 (ptr, (int64_t *) &(s_info.second));
+-        }
+-      // *INDENT-ON*
+-    }
+   free_and_init (buffer);
+ 
+   return error;
+@@ -11495,24 +11479,26 @@ mmon_get_server_info (MMON_SERVER_INFO & server_info)
+ }
+ 
+ /*
+- * mmon_disable_force - request to server to disable memory_monitor forcely
+- *
++ * memmon_dump_memory_usage - request to server to dump memory usage info
++ *                           to the file
+  * return : cubrid error
+  */
+ int
+-mmon_disable_force ()
++memmon_dump_memory_usage ()
+ {
+ #if defined(CS_MODE)
+-  char *buffer, *ptr;
++  char *buffer = NULL;
++  char *ptr = NULL;
+   int bufsize = 0;
+-  OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
+-  char *reply = OR_ALIGNED_BUF_START (a_reply);
+-  int req_error, dummy;
++  int req_error = NO_ERROR;
+   int error = NO_ERROR;
+ 
++  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
++  char *reply = OR_ALIGNED_BUF_START (a_reply);
++
+   req_error =
+-    net_client_request2 (NET_SERVER_MMON_DISABLE_FORCE, NULL, 0, reply,
+-			 OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, &buffer, &bufsize);
++    net_client_request2 (NET_SERVER_MMON_DUMP_MEMORY_USAGE, NULL, 0, reply, OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0,
++			 &buffer, &bufsize);
+ 
+   if (req_error)
+     {
+@@ -11522,15 +11508,14 @@ mmon_disable_force ()
+   else
+     {
+       ptr = reply;
+-      ptr = or_unpack_int (ptr, &dummy);
+       ptr = or_unpack_int (ptr, &error);
+     }
+ 
+   free_and_init (buffer);
+ 
+   return error;
+-#else /* CS_MODE */
++#else
+   er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NOT_IN_STANDALONE, 1, "memmon");
+   return ER_NOT_IN_STANDALONE;
+-#endif /* !CS_MODE */
++#endif
+ }
+diff --git a/src/communication/network_interface_cl.h b/src/communication/network_interface_cl.h
+index d92797865..97c9a9a1a 100644
+--- a/src/communication/network_interface_cl.h
++++ b/src/communication/network_interface_cl.h
+@@ -462,6 +462,6 @@ EXPORT_IMPORT extern int pl_call (const cubpl::pl_signature & sig,
+ 				  std::vector < DB_VALUE > &out_args, DB_VALUE & result);
+ 
+ /* memmon */
+-extern int mmon_get_server_info (MMON_SERVER_INFO & server_info);
+ extern int mmon_disable_force ();
++extern int memmon_dump_memory_usage ();
+ #endif /* _NETWORK_INTERFACE_CL_H_ */
+diff --git a/src/communication/network_interface_sr.c b/src/communication/network_interface_sr.c
+index 52afd3f42..5a44943c1 100644
+--- a/src/communication/network_interface_sr.c
++++ b/src/communication/network_interface_sr.c
+@@ -93,9 +93,8 @@
+ #include "pl_compile_handler.hpp"
+ #include "pl_session.hpp"
+ #include "pl_executor.hpp"
+-
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
++#include "memory_monitor_sr.hpp"
++#include "memmon.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+@@ -11361,8 +11360,117 @@ splcsql_transfer_file (THREAD_ENTRY * thread_p, unsigned int rid, char *request,
+ 				     ext_blk.get_ptr (), (int) ext_blk.get_size ());
+ }
+ 
++// /*
++//  * smmon_get_server_info - get memory usage info from memory monitor
++//  *
++//  * return:
++//  *
++//  *  rid(in):
++//  *  request(in):
++//  *  reqlen(in):
++//  */
++// void
++// smmon_get_server_info (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen)
++// {
++//   char *buffer_a = NULL, *buffer, *ptr;
++//   int size = 0;
++//   OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
++//   char *reply = OR_ALIGNED_BUF_START (a_reply);
++//   int error = NO_ERROR;
++// #if !defined(WINDOWS)
++//   MMON_SERVER_INFO server_info;
++
++//   if (mmon_is_memory_monitor_enabled ())
++//     {
++//       mmon_aggregate_server_info (server_info);
++//     }
++//   else
++//     {
++//       _er_log_debug (ARG_FILE_LINE, "Memory monitor is already disabled by cubrid memmon --disable-force.\n");
++//       error = ER_FAILED;
++//       goto end;
++//     }
++
++//   // Size of server name
++//   size += or_packed_string_length (server_info.server_name, NULL);
++//   size = size % MAX_ALIGNMENT ? size + INT_ALIGNMENT : size;
++
++//   // Size of total_mem_usage
++//   size += OR_INT64_SIZE;
++
++//   // Size of total_metainfo_mem_usage
++//   size += OR_INT64_SIZE;
++
++//   // Size of num_stat
++//   size += OR_INT_SIZE;
++
++//   // Size of stat name and memory usage
++//   // *INDENT-OFF*
++//   for (const auto &s_info : server_info.stat_info)
++//     {
++//       // Size of filename
++//       size += or_packed_string_length (s_info.first.c_str (), NULL);
++//       size = size % MAX_ALIGNMENT ? size + INT_ALIGNMENT : size;
++
++//       // Size of memory usage
++//       size += OR_INT64_SIZE;
++//     }
++//   // *INDENT-ON*
++
++//   buffer_a = (char *) db_private_alloc (thread_p, size + MAX_ALIGNMENT);
++//   if (buffer_a == NULL)
++//     {
++//       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
++//       error = ER_OUT_OF_VIRTUAL_MEMORY;
++//     }
++//   else
++//     {
++//       buffer = PTR_ALIGN (buffer_a, MAX_ALIGNMENT);
++
++//       ptr = buffer;
++
++//       ptr = or_pack_string (ptr, server_info.server_name);
++//       ptr = or_pack_int64 (ptr, server_info.total_mem_usage);
++//       ptr = or_pack_int64 (ptr, server_info.total_metainfo_mem_usage);
++//       ptr = or_pack_int (ptr, server_info.num_stat);
++
++//       // *INDENT-OFF*
++//       for (const auto &s_info : server_info.stat_info)
++//         {
++//           ptr = or_pack_string (ptr, s_info.first.c_str ());
++//           ptr = or_pack_int64 (ptr, s_info.second);
++//         }
++//       // *INDENT-ON*
++//       assert (size == (int) (ptr - buffer));
++//     }
++
++// end:
++//   if (error != NO_ERROR)
++//     {
++//       ptr = or_pack_int (reply, 0);
++//       ptr = or_pack_int (ptr, error);
++//       css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
++//     }
++//   else
++//     {
++//       ptr = or_pack_int (reply, size);
++//       ptr = or_pack_int (ptr, error);
++//       css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), buffer, size);
++//     }
++//   db_private_free_and_init (thread_p, buffer_a);
++// #else // WINDOWS
++//   er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_INTERFACE_NOT_SUPPORTED_OPERATION, 0);
++//   error = ER_INTERFACE_NOT_SUPPORTED_OPERATION;
++
++//   // send error
++//   ptr = or_pack_int (reply, 0);
++//   ptr = or_pack_int (ptr, error);
++//   css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
++// #endif // !WINDOWS
++// }
++
+ /*
+- * smmon_get_server_info - get memory usage info from memory monitor
++ * smmon_disable_force - disable memory_monitor forcely
+  *
+  * return:
+  *
+@@ -11371,94 +11479,18 @@ splcsql_transfer_file (THREAD_ENTRY * thread_p, unsigned int rid, char *request,
+  *  reqlen(in):
+  */
+ void
+-smmon_get_server_info (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen)
++smmon_disable_force (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen)
+ {
+-  char *buffer_a = NULL, *buffer, *ptr;
+-  int size = 0;
++  char *ptr;
+   OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
+   char *reply = OR_ALIGNED_BUF_START (a_reply);
+   int error = NO_ERROR;
+ #if !defined(WINDOWS)
+-  MMON_SERVER_INFO server_info;
++  // mmon_disabled = true;
+ 
+-  if (mmon_is_memory_monitor_enabled ())
+-    {
+-      mmon_aggregate_server_info (server_info);
+-    }
+-  else
+-    {
+-      _er_log_debug (ARG_FILE_LINE, "Memory monitor is already disabled by cubrid memmon --disable-force.\n");
+-      error = ER_FAILED;
+-      goto end;
+-    }
+-
+-  // Size of server name
+-  size += or_packed_string_length (server_info.server_name, NULL);
+-  size = size % MAX_ALIGNMENT ? size + INT_ALIGNMENT : size;
+-
+-  // Size of total_mem_usage
+-  size += OR_INT64_SIZE;
+-
+-  // Size of total_metainfo_mem_usage
+-  size += OR_INT64_SIZE;
+-
+-  // Size of num_stat
+-  size += OR_INT_SIZE;
+-
+-  // Size of stat name and memory usage
+-  // *INDENT-OFF*
+-  for (const auto &s_info : server_info.stat_info)
+-    {
+-      // Size of filename
+-      size += or_packed_string_length (s_info.first.c_str (), NULL);
+-      size = size % MAX_ALIGNMENT ? size + INT_ALIGNMENT : size;
+-
+-      // Size of memory usage
+-      size += OR_INT64_SIZE;
+-    }
+-  // *INDENT-ON*
+-
+-  buffer_a = (char *) db_private_alloc (thread_p, size + MAX_ALIGNMENT);
+-  if (buffer_a == NULL)
+-    {
+-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
+-      error = ER_OUT_OF_VIRTUAL_MEMORY;
+-    }
+-  else
+-    {
+-      buffer = PTR_ALIGN (buffer_a, MAX_ALIGNMENT);
+-
+-      ptr = buffer;
+-
+-      ptr = or_pack_string (ptr, server_info.server_name);
+-      ptr = or_pack_int64 (ptr, server_info.total_mem_usage);
+-      ptr = or_pack_int64 (ptr, server_info.total_metainfo_mem_usage);
+-      ptr = or_pack_int (ptr, server_info.num_stat);
+-
+-      // *INDENT-OFF*
+-      for (const auto &s_info : server_info.stat_info)
+-        {
+-          ptr = or_pack_string (ptr, s_info.first.c_str ());
+-          ptr = or_pack_int64 (ptr, s_info.second);
+-        }
+-      // *INDENT-ON*
+-      assert (size == (int) (ptr - buffer));
+-    }
+-
+-end:
+-  if (error != NO_ERROR)
+-    {
+-      ptr = or_pack_int (reply, 0);
+-      ptr = or_pack_int (ptr, error);
+-      css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
+-    }
+-  else
+-    {
+-      ptr = or_pack_int (reply, size);
+-      ptr = or_pack_int (ptr, error);
+-      css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), buffer, size);
+-    }
+-  db_private_free_and_init (thread_p, buffer_a);
++  ptr = or_pack_int (reply, 0);
++  ptr = or_pack_int (ptr, error);
++  css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
+ #else // WINDOWS
+   er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_INTERFACE_NOT_SUPPORTED_OPERATION, 0);
+   error = ER_INTERFACE_NOT_SUPPORTED_OPERATION;
+@@ -11471,34 +11503,17 @@ end:
+ }
+ 
+ /*
+- * smmon_disable_force - disable memory_monitor forcely
+- *
+- * return:
+- *
+- *  rid(in):
+- *  request(in):
+- *  reqlen(in):
++ * smmon_dump_memory_usage - dump memory usage
+  */
+-void
+-smmon_disable_force (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen)
++void smemmon_dump_memory_usage (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen)
+ {
+   char *ptr;
+-  OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
++  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
+   char *reply = OR_ALIGNED_BUF_START (a_reply);
+   int error = NO_ERROR;
+-#if !defined(WINDOWS)
+-  mmon_disabled = true;
+ 
+-  ptr = or_pack_int (reply, 0);
+-  ptr = or_pack_int (ptr, error);
+-  css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
+-#else // WINDOWS
+-  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_INTERFACE_NOT_SUPPORTED_OPERATION, 0);
+-  error = ER_INTERFACE_NOT_SUPPORTED_OPERATION;
++  error = dump_memory_usage ();
+ 
+-  // send error
+-  ptr = or_pack_int (reply, 0);
+-  ptr = or_pack_int (ptr, error);
++  ptr = or_pack_int (reply, error);
+   css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
+-#endif // !WINDOWS
+ }
+diff --git a/src/communication/network_interface_sr.h b/src/communication/network_interface_sr.h
+index edcdc110f..39d424f49 100644
+--- a/src/communication/network_interface_sr.h
++++ b/src/communication/network_interface_sr.h
+@@ -259,6 +259,6 @@ extern void splcsql_transfer_file (THREAD_ENTRY * thread_p, unsigned int rid, ch
+ extern void spl_call (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
+ 
+ /* memmon */
+-extern void smmon_get_server_info (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
+ extern void smmon_disable_force (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
++extern void smemmon_dump_memory_usage (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
+ #endif /* _NETWORK_INTERFACE_SR_H_ */
+diff --git a/src/communication/network_sr.c b/src/communication/network_sr.c
+index 7eb5a64a2..3bc9e85a2 100644
+--- a/src/communication/network_sr.c
++++ b/src/communication/network_sr.c
+@@ -60,8 +60,6 @@
+ #include "thread_manager.hpp"
+ #include "session.h"
+ #include "network_request_def.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static void net_server_init (void);
+ static int net_server_request (THREAD_ENTRY * thread_p, unsigned int rid, int request, int size, char *buffer);
+@@ -747,11 +745,11 @@ net_server_init (void)
+   req_p->processing_function = splcsql_transfer_file;
+ 
+   /* memmon */
+-  req_p = &net_Requests[NET_SERVER_MMON_GET_SERVER_INFO];
+-  req_p->processing_function = smmon_get_server_info;
+-
+   req_p = &net_Requests[NET_SERVER_MMON_DISABLE_FORCE];
+   req_p->processing_function = smmon_disable_force;
++
++  req_p = &net_Requests[NET_SERVER_MMON_DUMP_MEMORY_USAGE];
++  req_p->processing_function = smemmon_dump_memory_usage;
+ }
+ 
+ /*
+@@ -1144,15 +1142,6 @@ net_server_start (const char *server_name)
+       goto end;
+     }
+ 
+-#if !defined(WINDOWS)
+-  if (mmon_initialize (server_name) != NO_ERROR)
+-    {
+-      PRINT_AND_LOG_ERR_MSG ("Failed to initialize memory_monitor\n");
+-      status = -1;
+-      goto end;
+-    }
+-#endif /* !WINDOWS */
+-
+   net_server_init ();
+   css_initialize_server_interfaces (net_server_request, net_server_conn_down);
+ 
+@@ -1199,9 +1188,7 @@ net_server_start (const char *server_name)
+ 
+   cubthread::finalize ();
+   cubthread::internal_tasks_worker_pool::finalize ();
+-#if !defined(WINDOWS)
+-  mmon_finalize ();
+-#endif /* !WINDOWS */
++
+   er_final (ER_ALL_FINAL);
+   csect_finalize_static_critical_sections ();
+   (void) sync_finalize_sync_stats ();
+diff --git a/src/compat/cnv.c b/src/compat/cnv.c
+index 340fec5b9..1787f0ec4 100644
+--- a/src/compat/cnv.c
++++ b/src/compat/cnv.c
+@@ -54,8 +54,6 @@
+ #if defined (SERVER_MODE)
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info
+ #endif // SERVER_MODE
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/compat/cnvlex.c b/src/compat/cnvlex.c
+index c8b311169..28181cdd4 100644
+--- a/src/compat/cnvlex.c
++++ b/src/compat/cnvlex.c
+@@ -171,8 +171,6 @@ typedef struct yy_buffer_state *YY_BUFFER_STATE;
+ #define YY_PREFIX dbcnv
+ #include "cnvlex.h"
+ #include "util_func.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static int cnv_fmt_lex_start (FMT_LEX_MODE mode);
+ 
+diff --git a/src/compat/db_date.c b/src/compat/db_date.c
+index 4206539d2..d2bd62268 100644
+--- a/src/compat/db_date.c
++++ b/src/compat/db_date.c
+@@ -39,8 +39,6 @@
+ #include "numeric_opfunc.h"
+ #include "object_representation.h"
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/compat/db_elo.c b/src/compat/db_elo.c
+index b636f67b2..b9d6fdba1 100644
+--- a/src/compat/db_elo.c
++++ b/src/compat/db_elo.c
+@@ -32,8 +32,6 @@
+ #include "elo.h"
+ #include "db_elo.h"
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * db_elo.c - DB_API for ELO layer
+diff --git a/src/compat/db_function.cpp b/src/compat/db_function.cpp
+index dd5d9acc1..5c4d9cdb8 100644
+--- a/src/compat/db_function.cpp
++++ b/src/compat/db_function.cpp
+@@ -17,8 +17,6 @@
+  */
+ 
+ #include "db_function.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ const char *
+ fcode_get_uppercase_name (FUNC_CODE ftype)
+diff --git a/src/compat/db_json.cpp b/src/compat/db_json.cpp
+index b705f9867..076a9f586 100644
+--- a/src/compat/db_json.cpp
++++ b/src/compat/db_json.cpp
+@@ -71,8 +71,6 @@
+ #include <algorithm>
+ #include <sstream>
+ #include <stack>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define TODO_OPTIMIZE_JSON_BODY_STRING true
+ 
+diff --git a/src/compat/db_json_allocator.cpp b/src/compat/db_json_allocator.cpp
+index 61ed704e2..402cd9ef9 100644
+--- a/src/compat/db_json_allocator.cpp
++++ b/src/compat/db_json_allocator.cpp
+@@ -21,8 +21,6 @@
+ #include "error_manager.h"
+ #include "memory_alloc.h"
+ #include "system_parameter.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ void *
+ JSON_PRIVATE_ALLOCATOR::Malloc (size_t size)
+diff --git a/src/compat/db_json_path.cpp b/src/compat/db_json_path.cpp
+index 1e46a6c8f..84af095ba 100644
+--- a/src/compat/db_json_path.cpp
++++ b/src/compat/db_json_path.cpp
+@@ -32,8 +32,6 @@
+ #include <string>
+ #include <unordered_set>
+ #include <vector>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ enum class JSON_PATH_TYPE
+ {
+diff --git a/src/compat/db_json_types_internal.cpp b/src/compat/db_json_types_internal.cpp
+index b6dfb3907..19426290a 100644
+--- a/src/compat/db_json_types_internal.cpp
++++ b/src/compat/db_json_types_internal.cpp
+@@ -17,8 +17,6 @@
+  */
+ 
+ #include "db_json_types_internal.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ bool
+ JSON_DOC::IsLeaf ()
+diff --git a/src/compat/db_macro.c b/src/compat/db_macro.c
+index 7126ff1fa..ac3a50498 100644
+--- a/src/compat/db_macro.c
++++ b/src/compat/db_macro.c
+@@ -56,8 +56,6 @@
+ #endif /* defined (SUPPRESS_STRLEN_WARNING) */
+ 
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define DB_NUMBER_ZERO	    0
+ 
+diff --git a/src/compat/db_set.c b/src/compat/db_set.c
+index db60bd5bf..be3cd43c3 100644
+--- a/src/compat/db_set.c
++++ b/src/compat/db_set.c
+@@ -40,8 +40,6 @@
+ #include <stdarg.h>
+ #include <ctype.h>
+ #include <string.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define ERROR_SET(error, code) \
+   do {                     \
+diff --git a/src/compat/db_value_printer.cpp b/src/compat/db_value_printer.cpp
+index 38ee3e8d9..0068c2f63 100644
+--- a/src/compat/db_value_printer.cpp
++++ b/src/compat/db_value_printer.cpp
+@@ -35,8 +35,6 @@
+ #if !defined(SERVER_MODE)
+ #include "virtual_object.h"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ const char db_value_printer::DECIMAL_FORMAT[] = "%#.*g";
+ 
+diff --git a/src/connection/connection_globals.c b/src/connection/connection_globals.c
+index b54621022..4204f5263 100644
+--- a/src/connection/connection_globals.c
++++ b/src/connection/connection_globals.c
+@@ -37,8 +37,6 @@
+ #include "connection_globals.h"
+ #include "utility.h"
+ #include "system_parameter.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ const char *css_Service_name = "cubrid";
+ int css_Service_id = 1523;
+diff --git a/src/connection/connection_list_sr.c b/src/connection/connection_list_sr.c
+index 3ca9514a9..aae58d190 100644
+--- a/src/connection/connection_list_sr.c
++++ b/src/connection/connection_list_sr.c
+@@ -37,8 +37,6 @@
+ 
+ #include "connection_list_sr.h"
+ #include "connection_error.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #ifdef TRACE_LIST
+ static int css_check_list (CSS_LIST * ptr);
+diff --git a/src/connection/connection_sr.c b/src/connection/connection_sr.c
+index f91c0e08f..c03069f04 100644
+--- a/src/connection/connection_sr.c
++++ b/src/connection/connection_sr.c
+@@ -81,8 +81,6 @@
+ #include "connection_sr.h"
+ #include "server_support.h"
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #ifdef PACKET_TRACE
+ #define TRACE(string, arg)					\
+diff --git a/src/connection/connection_support.c b/src/connection/connection_support.c
+index ae10be0c5..3414d5eca 100644
+--- a/src/connection/connection_support.c
++++ b/src/connection/connection_support.c
+@@ -84,8 +84,6 @@
+ #include "tz_support.h"
+ #include "db_date.h"
+ #include "show_scan.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined(CS_MODE)
+ extern bool tran_is_in_libcas (void);
+diff --git a/src/connection/host_lookup.c b/src/connection/host_lookup.c
+index 1112ec6ff..3303da471 100644
+--- a/src/connection/host_lookup.c
++++ b/src/connection/host_lookup.c
+@@ -45,8 +45,6 @@
+ #include "system_parameter.h"
+ #include "environment_variable.h"
+ #include "message_catalog.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define LINE_BUF_SIZE                (512)
+ #define HOSTNAME_LEN                 (256)
+diff --git a/src/connection/server_support.c b/src/connection/server_support.c
+index 64ddbb0e3..7c7fcb6e2 100644
+--- a/src/connection/server_support.c
++++ b/src/connection/server_support.c
+@@ -81,8 +81,6 @@
+ #include "heartbeat.h"
+ #endif
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define CSS_WAIT_COUNT 5	/* # of retry to connect to master */
+ #define CSS_GOING_DOWN_IMMEDIATELY "Server going down immediately"
+diff --git a/src/connection/tcp.c b/src/connection/tcp.c
+index 2dfe5c856..e9fda6205 100644
+--- a/src/connection/tcp.c
++++ b/src/connection/tcp.c
+@@ -83,8 +83,6 @@
+ 
+ static pthread_mutex_t gethostbyname_lock = PTHREAD_MUTEX_INITIALIZER;
+ #endif /* HAVE_GETHOSTBYNAME_R */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define HOST_ID_ARRAY_SIZE 8	/* size of the host_id string */
+ #define TCP_MIN_NUM_RETRIES 3
+diff --git a/src/executables/util_common.c b/src/executables/util_common.c
+index b3ec4f5db..1f8fa5b4a 100644
+--- a/src/executables/util_common.c
++++ b/src/executables/util_common.c
+@@ -45,8 +45,6 @@
+ #else
+ #include "tcp.h"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ typedef enum
+ {
+diff --git a/src/executables/util_cs.c b/src/executables/util_cs.c
+index 7c661833a..84bda125c 100644
+--- a/src/executables/util_cs.c
++++ b/src/executables/util_cs.c
+@@ -4592,7 +4592,6 @@ memmon (UTIL_FUNCTION_ARG * arg)
+   bool disable_force = false;
+   FILE *outfile_fp = NULL;
+   int error_code = NO_ERROR;
+-  MMON_SERVER_INFO server_info;
+ 
+   outfile_name = utility_get_option_string_value (arg_map, MEMMON_OUTPUT_S, 0);
+   disable_force = utility_get_option_bool_value (arg_map, MEMMON_DISABLE_FORCE_S);
+@@ -4608,13 +4607,13 @@ memmon (UTIL_FUNCTION_ARG * arg)
+       goto error_exit;
+     }
+ 
+-  if (outfile_name && disable_force)
+-    {
+-      PRINT_AND_LOG_ERR_MSG (msgcat_message
+-			     (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON,
+-			      MEMMON_MSG_CANNOT_USE_DISABLE_FORCE_WITH_OTHER_OPTION));
+-      goto error_exit;
+-    }
++  // if (outfile_name && disable_force)
++  //   {
++  //     PRINT_AND_LOG_ERR_MSG (msgcat_message
++	// 		     (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON,
++	// 		      MEMMON_MSG_CANNOT_USE_DISABLE_FORCE_WITH_OTHER_OPTION));
++  //     goto error_exit;
++  //   }
+ 
+   if (outfile_name)
+     {
+@@ -4646,54 +4645,31 @@ memmon (UTIL_FUNCTION_ARG * arg)
+       goto error_exit;
+     }
+   need_shutdown = true;
+-
+-  if (!prm_get_bool_value (PRM_ID_ENABLE_MEMORY_MONITORING))
+-    {
+-      PRINT_AND_LOG_ERR_MSG (msgcat_message (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON, MEMMON_MSG_NOT_SUPPORTED));
+-      goto error_exit;
+-    }
+-
+-  if (disable_force)
+-    {
+-      error_code = mmon_disable_force ();
+-      if (error_code != NO_ERROR)
+-	{
+-	  switch (error_code)
+-	    {
+-	    case ER_INTERFACE_NOT_SUPPORTED_OPERATION:
+-	      PRINT_AND_LOG_ERR_MSG (msgcat_message (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON,
+-						     MEMMON_MSG_NOT_SUPPORTED_OS));
+-	      break;
+-	    default:
+-	      break;
+-	    }
+-	  goto error_exit;
+-	}
+-      fprintf (stdout, msgcat_message (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON, MEMMON_MSG_DISABLE_SUCCESS));
+-      goto success_exit;
+-    }
+-
+-  /* execute phase */
+-  error_code = mmon_get_server_info (server_info);
+-  if (error_code != NO_ERROR)
++  
++  if (memmon_dump_memory_usage () != NO_ERROR)
+     {
+-      switch (error_code)
+-	{
+-	case ER_FAILED:
+-	  PRINT_AND_LOG_ERR_MSG (msgcat_message (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON,
+-						 MEMMON_MSG_MEMORY_MONITOR_IS_DISABLED));
+-	  break;
+-	case ER_INTERFACE_NOT_SUPPORTED_OPERATION:
+-	  PRINT_AND_LOG_ERR_MSG (msgcat_message (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON,
+-						 MEMMON_MSG_NOT_SUPPORTED_OS));
+-	  break;
+-	default:
+-	  break;
+-	}
+       goto error_exit;
+     }
+ 
+-  mmon_print_server_info (server_info, outfile_fp);
++  // if (disable_force)
++  //   {
++  //     error_code = mmon_disable_force ();
++  //     if (error_code != NO_ERROR)
++	// {
++	//   switch (error_code)
++	//     {
++	//     case ER_INTERFACE_NOT_SUPPORTED_OPERATION:
++	//       PRINT_AND_LOG_ERR_MSG (msgcat_message (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON,
++	// 					     MEMMON_MSG_NOT_SUPPORTED_OS));
++	//       break;
++	//     default:
++	//       break;
++	//     }
++	//   goto error_exit;
++	// }
++  //     fprintf (stdout, msgcat_message (MSGCAT_CATALOG_UTILS, MSGCAT_UTIL_SET_MEMMON, MEMMON_MSG_DISABLE_SUCCESS));
++  //     goto success_exit;
++  //   }
+ 
+ success_exit:
+   fclose (outfile_fp);
+diff --git a/src/heaplayers/customheaps.cpp b/src/heaplayers/customheaps.cpp
+index abd3bf18d..0558f2138 100644
+--- a/src/heaplayers/customheaps.cpp
++++ b/src/heaplayers/customheaps.cpp
+@@ -25,8 +25,6 @@
+ #include "porting_inline.hpp"
+ #include "system.h"
+ #include "heaplayers.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #undef malloc
+ #undef free
+diff --git a/src/heaplayers/heaps/top/mallocheap.h b/src/heaplayers/heaps/top/mallocheap.h
+index de829424f..e396cee9b 100644
+--- a/src/heaplayers/heaps/top/mallocheap.h
++++ b/src/heaplayers/heaps/top/mallocheap.h
+@@ -39,7 +39,6 @@ extern "C" size_t malloc_usable_size (void *) throw ();
+ 
+ #include "wrappers/mallocinfo.h"
+ #if defined(SERVER_MODE)
+-#include "memory_monitor_sr.hpp"
+ #endif /* SERVER_MODE */
+ 
+ namespace HL
+@@ -54,33 +53,11 @@ namespace HL
+ 
+     inline void *malloc (size_t sz)
+     {
+-#if defined(SERVER_MODE) && !defined(_MSC_VER)
+-      if (mmon_is_memory_monitor_enabled ())
+-	{
+-	  void *ptr =::malloc (sz + cubmem::MMON_METAINFO_SIZE);
+-	  if (ptr != NULL)
+-	    {
+-	      mmon_add_stat ((char *) ptr, malloc_usable_size (ptr), __FILE__, __LINE__);
+-	    }
+-	  return ptr;
+-	}
+-      else
+-	{
+-#endif
+-	  return::malloc (sz);
+-#if defined(SERVER_MODE) && !defined(_MSC_VER)
+-	}
+-#endif
++      return::malloc (sz);
+     }
+ 
+     inline void free (void *ptr)
+     {
+-#if defined(SERVER_MODE) && !defined(_MSC_VER)
+-      if (mmon_is_memory_monitor_enabled () && ptr != NULL)
+-	{
+-	  mmon_sub_stat ((char *) ptr);
+-	}
+-#endif
+       ::free (ptr);
+     }
+ 
+diff --git a/src/heaplayers/lea_heap.c b/src/heaplayers/lea_heap.c
+index 1b5c349e3..826c8841f 100644
+--- a/src/heaplayers/lea_heap.c
++++ b/src/heaplayers/lea_heap.c
+@@ -36,8 +36,6 @@
+ #include "customheaps.h"
+ #include "error_manager.h"
+ #include "system_parameter.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* -------------------------------------------------------------------------- */
+ /* DL MALLOC ADAPTATION AND MODIFICATION LAYER */
+diff --git a/src/loaddb/load_class_registry.cpp b/src/loaddb/load_class_registry.cpp
+index 9643d67ca..be97e55b4 100644
+--- a/src/loaddb/load_class_registry.cpp
++++ b/src/loaddb/load_class_registry.cpp
+@@ -24,8 +24,6 @@
+ 
+ #include <algorithm>
+ #include <iterator>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubload
+ {
+diff --git a/src/loaddb/load_common.cpp b/src/loaddb/load_common.cpp
+index 58fcd2c9e..9172d5853 100644
+--- a/src/loaddb/load_common.cpp
++++ b/src/loaddb/load_common.cpp
+@@ -27,8 +27,6 @@
+ #include "intl_support.h"
+ 
+ #include <fstream>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ ///////////////////// Function declarations /////////////////////
+ namespace cubload
+diff --git a/src/loaddb/load_db_value_converter.cpp b/src/loaddb/load_db_value_converter.cpp
+index 60d08939c..ee7a3f77c 100644
+--- a/src/loaddb/load_db_value_converter.cpp
++++ b/src/loaddb/load_db_value_converter.cpp
+@@ -37,8 +37,6 @@
+ #include <cassert>
+ #include <cmath>
+ #include <cstring> // for std::memcpy
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ const std::size_t MAX_DIGITS_FOR_SHORT = 5;   // default for 16 bit signed shorts: 32767 (0x7FFF)
+ const std::size_t MAX_DIGITS_FOR_INT = 10;    // default for 32 bit signed integers: 2147483647 (0x7FFFFFFF)
+diff --git a/src/loaddb/load_driver.cpp b/src/loaddb/load_driver.cpp
+index 52bd5ccce..f4bd916c9 100644
+--- a/src/loaddb/load_driver.cpp
++++ b/src/loaddb/load_driver.cpp
+@@ -23,8 +23,6 @@
+ #include "load_driver.hpp"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubload
+ {
+diff --git a/src/loaddb/load_error_handler.cpp b/src/loaddb/load_error_handler.cpp
+index 836e63acd..5f5c3e91d 100644
+--- a/src/loaddb/load_error_handler.cpp
++++ b/src/loaddb/load_error_handler.cpp
+@@ -32,8 +32,6 @@
+ #include "error_manager.h"
+ 
+ #include <algorithm>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubload
+ {
+diff --git a/src/loaddb/load_semantic_helper.cpp b/src/loaddb/load_semantic_helper.cpp
+index 3f9275756..a0a696d0e 100644
+--- a/src/loaddb/load_semantic_helper.cpp
++++ b/src/loaddb/load_semantic_helper.cpp
+@@ -27,8 +27,6 @@
+ 
+ #include <algorithm>
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubload
+ {
+diff --git a/src/loaddb/load_server_loader.cpp b/src/loaddb/load_server_loader.cpp
+index ec5be9862..2c9e429f3 100644
+--- a/src/loaddb/load_server_loader.cpp
++++ b/src/loaddb/load_server_loader.cpp
+@@ -40,8 +40,6 @@
+ #include "xserver_interface.h"
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubload
+ {
+diff --git a/src/loaddb/load_session.cpp b/src/loaddb/load_session.cpp
+index 90e0c0b7b..504a71fc1 100644
+--- a/src/loaddb/load_session.cpp
++++ b/src/loaddb/load_session.cpp
+@@ -29,8 +29,6 @@
+ #include "xserver_interface.h"
+ 
+ #include <sstream>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubload
+ {
+diff --git a/src/loaddb/load_worker_manager.cpp b/src/loaddb/load_worker_manager.cpp
+index bc6b98380..c25f1c203 100644
+--- a/src/loaddb/load_worker_manager.cpp
++++ b/src/loaddb/load_worker_manager.cpp
+@@ -32,8 +32,6 @@
+ #include <condition_variable>
+ #include <mutex>
+ #include <set>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubload
+ {
+diff --git a/src/memmon/memmon.cpp b/src/memmon/memmon.cpp
+new file mode 100644
+index 000000000..222053e64
+--- /dev/null
++++ b/src/memmon/memmon.cpp
+@@ -0,0 +1,657 @@
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <dlfcn.h>
++#include <execinfo.h>
++#include <new>
++#include <cstdint>
++#include <malloc.h>
++#include <cassert>
++// #include <tbb/concurrent_unordered_map.h>
++#include <atomic>
++#include <string>
++#include <vector>
++#include <algorithm>
++#include <ctime>
++#include "memmon.hpp"
++#include "error_manager.h"
++
++#define CALC_RATIO(numerator, denominator) (((denominator) != 0) ? (((double)(numerator) / (denominator)) * 100) : 0.0)
++#define MAX_FNAME_LENGTH 255
++
++// -----------------------------
++// glibc 내부 함수 포인터 초기화
++extern "C" {
++  void *__libc_malloc (size_t);
++  void *__libc_calloc (size_t, size_t);
++  void *__libc_realloc (void *, size_t);
++  void __libc_free (void *);
++}
++static void * (*real_malloc) (size_t) = __libc_malloc;
++static void * (*real_calloc) (size_t, size_t) = __libc_calloc;
++static void * (*real_realloc) (void *, size_t) = __libc_realloc;
++static void (*real_free) (void *) = __libc_free;
++
++// 재진입 방지를 위한 thread_local 변수
++thread_local bool malloc_in_hook = false;
++thread_local bool calloc_in_hook = false;
++thread_local bool realloc_in_hook = false;
++thread_local bool free_in_hook = false;
++
++// -----------------------------
++// RealAllocator: TBB map 내부 할당 시 후킹 영향을 받지 않도록 함
++template <typename T>
++struct RealAllocator
++{
++  using value_type = T;
++  RealAllocator() noexcept {}
++  template <class U>
++  RealAllocator (const RealAllocator<U> &) noexcept {}
++  T *allocate (std::size_t n)
++  {
++    void *p = real_malloc (n * sizeof (T));
++    if (!p)
++      {
++	throw std::bad_alloc();
++      }
++    return static_cast<T *> (p);
++  }
++  void deallocate (T *p, std::size_t) noexcept
++  {
++    real_free (p);
++  }
++};
++
++template <class T, class U>
++bool operator== (const RealAllocator<T> &, const RealAllocator<U> &)
++{
++  return true;
++}
++template <class T, class U>
++bool operator!= (const RealAllocator<T> &, const RealAllocator<U> &)
++{
++  return false;
++}
++
++// -----------------------------
++// AtomicSize 래퍼 (원자적 업데이트를 지원)
++struct AtomicSize
++{
++  std::atomic<size_t> value;
++  AtomicSize() : value (0) {}
++  AtomicSize (size_t v) : value (v) {}
++  AtomicSize (const AtomicSize &other) : value (other.value.load (std::memory_order_relaxed)) {}
++  AtomicSize &operator= (const AtomicSize &other)
++  {
++    value.store (other.value.load (std::memory_order_relaxed), std::memory_order_relaxed);
++    return *this;
++  }
++  AtomicSize &operator+= (size_t delta)
++  {
++    value.fetch_add (delta, std::memory_order_relaxed);
++    return *this;
++  }
++  AtomicSize &operator-= (size_t delta)
++  {
++    value.fetch_sub (delta, std::memory_order_relaxed);
++    return *this;
++  }
++  operator size_t() const
++  {
++    return value.load (std::memory_order_relaxed);
++  }
++};
++
++// -----------------------------
++// TBB map 타입 및 lazy 초기화 함수
++using MemStatMap = tbb::concurrent_unordered_map<
++		   uintptr_t,
++		   AtomicSize,
++		   std::hash<uintptr_t>,
++		   std::equal_to<uintptr_t>,
++		   RealAllocator<std::pair<const uintptr_t, AtomicSize>>
++		   >;
++
++// rehash를 한 번만 호출하도록 lambda 초기화를 사용
++MemStatMap &get_mem_stat_map()
++{
++  static MemStatMap instance;
++  static bool initialized = []()
++  {
++    instance.rehash (MEMMON_MAP_RESERVE_SIZE);
++    return true;
++  }
++  ();
++  (void)initialized; // 사용하지 않는 변수 경고 제거
++  return instance;
++}
++
++// -----------------------------
++// 메타정보 관련 함수
++char *memmon_get_metainfo_pos (void *ptr, size_t size)
++{
++  return reinterpret_cast<char *> (ptr) + size - METAINFO_SIZE;
++}
++
++size_t memmon_get_allocated_size (void *ptr)
++{
++  size_t allocated_size = malloc_usable_size (ptr);
++  if (allocated_size <= METAINFO_SIZE)
++    {
++      return allocated_size;
++    }
++  const MEMMON_METAINFO *metainfo = reinterpret_cast<const MEMMON_METAINFO *> (memmon_get_metainfo_pos (ptr,
++				    allocated_size));
++  if (metainfo->magic_number == MAGIC_NUMBER)
++    {
++      allocated_size = metainfo->allocated_size - METAINFO_SIZE;
++    }
++  return allocated_size;
++}
++
++void *memmon_get_initial_mem_call_addr (uintptr_t *caller_addr)
++{
++  void *return_addr[MAX_TRACE];
++  void *func_addr_p = nullptr;
++  int trace_count = backtrace (return_addr, MAX_TRACE);
++
++  for (int i = 0; i < trace_count; i++)
++    {
++      Dl_info dl_info;
++      if (dladdr (return_addr[i], &dl_info) == 0 || dl_info.dli_fname == nullptr)
++	{
++	  continue;
++	}
++
++      // 문자열의 길이를 검사하여, 최대 길이 내에 '\0'이 있는지 확인
++      if (strnlen (dl_info.dli_fname, MAX_FNAME_LENGTH) == MAX_FNAME_LENGTH)
++	{
++	  continue;
++	}
++
++      if (strstr (dl_info.dli_fname, "libcubrid.") == nullptr)
++	{
++	  continue;
++	}
++
++      // 주소 계산: 기준 주소가 0x40000000 이상이면 상대 주소로 계산
++      if (dl_info.dli_fbase >= reinterpret_cast<const void *> (0x40000000))
++	{
++	  func_addr_p = reinterpret_cast<void *> ( reinterpret_cast<size_t> (return_addr[i]) - reinterpret_cast<size_t>
++			(dl_info.dli_fbase));
++	}
++      else
++	{
++	  func_addr_p = return_addr[i];
++	}
++      break;
++    }
++
++  *caller_addr = uintptr_t (func_addr_p);
++  return func_addr_p;
++}
++
++void add_stat (void *ptr, const size_t size, uintptr_t caller_addr)
++{
++  assert (size > METAINFO_SIZE);
++
++  MEMMON_METAINFO *metainfo = reinterpret_cast<MEMMON_METAINFO *> (memmon_get_metainfo_pos (ptr, size));
++
++  metainfo->magic_number = MAGIC_NUMBER;
++  metainfo->allocated_size = size;
++  metainfo->caller_addr = caller_addr;
++
++  MemStatMap &map_ref = get_mem_stat_map();
++
++  // emplace를 시도하고, 실패하면 기존 값에 누적
++  auto result = map_ref.emplace (metainfo->caller_addr, AtomicSize (metainfo->allocated_size));
++  if (!result.second)
++    {
++      result.first->second += metainfo->allocated_size;
++      // printf ("[add_stat] Updated existing entry: Key 0x%016lx, New Value %zu\n",
++      //   static_cast<unsigned long> (metainfo->caller_addr),
++      //   static_cast<size_t> (result.first->second));
++    }
++}
++
++#if 0
++void sub_stat (void *ptr)
++{
++  if (!ptr)
++    {
++      return;
++    }
++  size_t size = malloc_usable_size (ptr);
++  if (size <= METAINFO_SIZE)
++    {
++      return;
++    }
++  MEMMON_METAINFO *metainfo = reinterpret_cast<MEMMON_METAINFO *> (memmon_get_metainfo_pos (ptr, size));
++  if (metainfo->magic_number != MAGIC_NUMBER)
++    {
++      return;
++    }
++  assert (metainfo->allocated_size == size);
++  auto &map_ref = get_mem_stat_map();
++  auto it = map_ref.find (metainfo->caller_addr);
++  if (it != map_ref.end())
++    {
++      it->second -= metainfo->allocated_size;
++    }
++  metainfo->magic_number = 0;
++}
++#else
++void sub_stat (void *ptr)
++{
++  if (!ptr)
++    {
++      return;
++    }
++  size_t size = malloc_usable_size (ptr);
++  if (size <= METAINFO_SIZE)
++    {
++      return;
++    }
++  MEMMON_METAINFO *metainfo = reinterpret_cast<MEMMON_METAINFO *> (memmon_get_metainfo_pos (ptr, size));
++  if (metainfo->magic_number != MAGIC_NUMBER)
++    {
++      return;
++    }
++  assert (metainfo->allocated_size == size);
++  auto &map_ref = get_mem_stat_map();
++  auto result = map_ref.find (metainfo->caller_addr);
++  if (result != map_ref.end())
++    {
++      // printf ("[sub_stat] Before removal: Key 0x%016lx, Value: %zu\n",
++      //   static_cast<unsigned long> (metainfo->caller_addr), static_cast<size_t> (it->second));
++      result->second -= metainfo->allocated_size;
++    }
++  metainfo->magic_number = 0;
++}
++#endif
++
++// -----------------------------
++// 메모리 후킹 함수들
++extern "C" {
++
++  void *malloc (size_t size)
++  {
++    uintptr_t caller_addr = 0;
++    void *ptr = nullptr;
++
++    if (malloc_in_hook)
++      {
++	return real_malloc (size);
++      }
++
++    malloc_in_hook = true;
++
++    if (memmon_get_initial_mem_call_addr (&caller_addr) != nullptr)
++      {
++	size_t total_size = size + METAINFO_SIZE;
++
++	ptr = real_malloc (total_size);
++	if (!ptr)
++	  {
++	    malloc_in_hook = false;
++	    return nullptr;
++	  }
++
++	add_stat (ptr, total_size, caller_addr);
++	// printf("\t[hooked] malloc (ptr:%p, size:%zu, total_size:%zu)\n", ptr, size, total_size);
++      }
++    else
++      {
++	ptr = real_malloc (size);
++      }
++
++    malloc_in_hook = false;
++    return ptr;
++  }
++
++  void *calloc (size_t nmemb, size_t size)
++  {
++    uintptr_t caller_addr = 0;
++    void *ptr = nullptr;
++
++    if (calloc_in_hook)
++      {
++	return real_calloc (nmemb, size);
++      }
++
++    calloc_in_hook = true;
++
++    if (memmon_get_initial_mem_call_addr (&caller_addr) != nullptr)
++      {
++	size_t user_size = nmemb * size;
++	size_t total_size = user_size + METAINFO_SIZE;
++
++	ptr = real_calloc (1, total_size);
++	if (!ptr)
++	  {
++	    calloc_in_hook = false;
++	    return nullptr;
++	  }
++
++	add_stat (ptr, total_size, caller_addr);
++	// printf("\t[hooked] calloc (ptr:%p, nmemb:%zu, size:%zu, total_size:%zu)\n", ptr, nmemb, size, total_size);
++      }
++    else
++      {
++	ptr = real_calloc (nmemb, size);
++      }
++
++    calloc_in_hook = false;
++
++    return ptr;
++  }
++
++  void *realloc (void *ptr, size_t size)
++  {
++    void *new_ptr = nullptr;
++    size_t total_size = size + METAINFO_SIZE;
++
++    if (realloc_in_hook)
++      {
++	return real_realloc (ptr, size);
++      }
++
++    realloc_in_hook = true;
++
++    if (ptr == nullptr)
++      {
++	realloc_in_hook = false;
++	return malloc (size);
++      }
++
++    if (size == 0)
++      {
++	free (ptr);
++	realloc_in_hook = false;
++	return nullptr;
++      }
++    else
++      {
++	new_ptr = malloc (size);
++	if (new_ptr != nullptr)
++	  {
++	    size_t old_size = memmon_get_allocated_size (ptr);
++	    size_t copy_size = (old_size < size) ? old_size : size;
++	    memcpy (new_ptr, ptr, copy_size);
++	    free (ptr);
++	  }
++      }
++
++    // printf("\t[hooked] realloc (ptr:%p, new_ptr:%p, size:%zu, total_size:%zu)\n", ptr, new_ptr, size, total_size);
++
++    realloc_in_hook = false;
++    return new_ptr;
++  }
++
++  void free (void *ptr)
++  {
++    if (!ptr)
++      {
++	return;
++      }
++
++    if (free_in_hook)
++      {
++	real_free (ptr);
++	return;
++      }
++
++    free_in_hook = true;
++    sub_stat (ptr);
++    // printf("\t[hooked] free (ptr:%p, size:%zu)\n", ptr, memmon_get_allocated_size(ptr));
++    real_free (ptr);
++    ptr = nullptr;
++    free_in_hook = false;
++  }
++}
++
++// -----------------------------
++// operator new / delete 후킹
++// void *operator new (std::size_t size)
++// {
++//   void *ptr = malloc (size);
++//   if (!ptr)
++//     {
++//       throw std::bad_alloc();
++//     }
++//   return ptr;
++// }
++
++// void *operator new[] (std::size_t size)
++// {
++//   void *ptr = malloc (size);
++//   if (!ptr)
++//     {
++//       throw std::bad_alloc();
++//     }
++//   return ptr;
++// }
++
++// void operator delete (void *ptr) noexcept
++// {
++//   if (ptr)
++//     {
++//       free (ptr);
++//     }
++// }
++
++// void operator delete[] (void *ptr) noexcept
++// {
++//   if (ptr)
++//     {
++//       free (ptr);
++//     }
++// }
++
++// void operator delete (void *ptr, std::size_t) noexcept
++// {
++//   if (ptr)
++//     {
++//       free (ptr);
++//     }
++// }
++
++// void operator delete[] (void *ptr, std::size_t) noexcept
++// {
++//   if (ptr)
++//     {
++//       free (ptr);
++//     }
++// }
++
++// trim_function_name: 경로 문자열에서 마지막에서 두 번째 '/'부터 시작하는 부분을 반환하고,
++//                    문자열 끝의 개행 문자('\n')도 제거한다.
++// 예) "/home/heexoo/workspace/cubrid/src/transaction/log_compress.c:206\n" → "/src/transaction/log_compress.c:206"
++static const char *trim_function_name (char *path)
++{
++  size_t len = strlen(path);
++  if (len > 0 && path[len - 1] == '\n')
++    {
++      path[len - 1] = '\0';
++    }
++
++  const char *last_slash = strrchr(path, '/');
++  if (!last_slash)
++    {
++      last_slash = path;
++    }
++  else
++    {
++      // 마지막 슬래시보다 앞쪽부터 역순으로 두 번째 슬래시를 찾음
++      const char *second_last = nullptr;
++      for (const char *p = last_slash - 1; p >= path; p--)
++	{
++	  if (*p == '/')
++	    {
++	      second_last = p;
++	      break;
++	    }
++	}
++      last_slash = second_last ? second_last : path;
++    }
++
++  // 마지막에서 두 번째 '/'부터 시작하는 부분에서 첫 번째 공백 찾기
++  char *result = (char *)last_slash;
++  char *space_ptr = strchr(result, ' ');
++  if (space_ptr)
++    {
++      *space_ptr = '\0';
++    }
++
++  return result;
++}
++
++
++
++const char *er_resolve_function_name (const void *address, char *buffer)
++{
++  FILE *output = nullptr;
++  char cmd_line[BUFFER_SIZE] = {0};
++  const char *func_name_p = nullptr;
++  const char *fixed_lib = "/home/heexoo/CUBRID/lib/libcubrid.so.11.4";
++
++  snprintf (cmd_line, sizeof (cmd_line), "addr2line -e %s %p 2> /dev/null", fixed_lib, address);
++
++  // unsetenv ("LD_PRELOAD"); // LD_PRELOAD 끄기
++
++  output = popen (cmd_line, "r");
++  if (output == nullptr)
++    {
++      return nullptr;
++    }
++
++  func_name_p = fgets (buffer, BUFFER_SIZE - 1, output);
++  pclose (output);
++
++  // printf ("\tfunc_name_p : %s\n", func_name_p);
++  // printf ("\tbuffer : %s\n", buffer);
++  if (!func_name_p || !func_name_p[0])
++    {
++      return nullptr;
++    }
++
++  return trim_function_name (buffer);
++  // return buffer;
++}
++
++
++
++// -----------------------------
++// 파일명을 "memory_dump_YYYYMMDD_HHMMSS.txt" 형식으로 생성하여 파일을 여는 함수
++FILE *open_dump_file (void)
++{
++  char filename[256] = {0};
++  time_t now = time (nullptr);
++  struct tm tm_now;
++  localtime_r (&now, &tm_now);
++  strftime (filename, sizeof (filename), "memory_dump_%Y%m%d_%H%M%S.txt", &tm_now);
++  FILE *fp = fopen (filename, "w");
++  if (!fp)
++    {
++      perror ("fopen");
++    }
++  return fp;
++}
++
++// -----------------------------
++// dump_memory_usage 함수를 C 방식으로 내보내기
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int dump_memory_usage (void)
++{
++  int error = NO_ERROR;
++  double ratio = 0;
++  char buffer[BUFFER_SIZE] = {0};
++  size_t usage = 0;
++  size_t total_usage = 0;
++  int count = 0;
++
++  const char *func_name = nullptr;
++  FILE *outfile_fp = nullptr;
++
++  MemStatMap &map_ref = get_mem_stat_map();
++  tbb::concurrent_unordered_map<std::string, size_t> func_usage;
++
++  // 각 항목마다 caller address를 함수 이름으로 해석 후 누적
++  for (const auto &entry : map_ref)
++    {
++      memset (buffer, 0, sizeof (buffer));
++
++      if (reinterpret_cast<const void *> (entry.first) == NULL)
++	{
++	  continue;
++	}
++
++      func_name = er_resolve_function_name (reinterpret_cast<const void *> (entry.first), buffer);
++      if (!func_name || !func_name[0])
++	{
++	  continue;
++	}
++      // std::string으로 변환하여 key로 사용
++      std::string key (func_name);
++
++      usage = entry.second; // AtomicSize가 size_t로 변환됨
++
++      // 누적합산
++      func_usage[key] += usage;
++      total_usage += usage;
++      count++;
++      // 디버깅 출력
++      // printf ("[dump] Caller Address: 0x%016lx -> Func: %s, Value: %zu\n", entry.first, key.c_str(), usage);
++    }
++
++  // map의 결과를 벡터로 옮겨서 정렬 (메모리 사용량 내림차순)
++  std::vector<std::pair<std::string, size_t>> stats (func_usage.begin(), func_usage.end());
++  std::sort (stats.begin(), stats.end(), [] (const std::pair<std::string, size_t> &a,
++	     const std::pair<std::string, size_t> &b)
++  {
++    return a.second > b.second;
++  });
++
++  outfile_fp = open_dump_file();
++  if (!outfile_fp)
++    {
++      return ER_FAILED;
++    }
++
++
++  // 3) 헤더 출력
++  fprintf (outfile_fp, "==================== Memory Usage Dump ====================\n");
++  fprintf (outfile_fp, "Total Memory Usage: %lu Bytes (%lu MB)\n", total_usage, total_usage/1024/1024);
++  fprintf (outfile_fp, "MetaInfo Size: %d Bytes\n\n", count*METAINFO_SIZE);
++  // 컬럼 폭을 보기 좋게 조정 (예: 함수 이름 최대 50자로)
++  fprintf (outfile_fp, "%-60s | %-15s | %s\n",
++	   "Function Name", "Memory Usage", "Ratio (%)");
++  fprintf (outfile_fp, "---------------------------------------------------------------------\n");
++
++  // 4) 실제 데이터 출력
++  for (const auto &stat : stats)
++    {
++      ratio = CALC_RATIO (stat.second, total_usage);
++
++      // %-50s: 왼쪽 정렬, 50칸 확보
++      // %-15zu: 왼쪽 정렬, 15칸 확보
++      // %7.2f%%: 소수점 둘째 자리까지, 총 7칸 폭
++      fprintf (outfile_fp, "%-60s | %-15zu | %7.2f%%\n",
++	       stat.first.c_str(), stat.second, ratio);
++    }
++
++  fprintf (outfile_fp, "=====================================================================\n");
++  fflush (outfile_fp);
++  fclose (outfile_fp);
++  printf ("Memory usage dump written to file.\n");
++
++  return error;
++}
++
++
++#ifdef __cplusplus
++}
++#endif
+\ No newline at end of file
+diff --git a/src/memmon/memmon.hpp b/src/memmon/memmon.hpp
+new file mode 100644
+index 000000000..39070db81
+--- /dev/null
++++ b/src/memmon/memmon.hpp
+@@ -0,0 +1,38 @@
++/*
++ * memory_monitor_sr.hpp - Declaration of APIs and structures, classes
++ *                         for memory monitoring module
++ */
++
++#if !defined(WINDOWS)
++#include <cstdio>
++#include <atomic>
++#include <cassert>
++#include <malloc.h>
++#include "concurrent_unordered_map.h"
++
++#define MAX_TRACE 64
++#define MEMMON_MAX_NAME_LENGTH 255
++#define BUFFER_SIZE MEMMON_MAX_NAME_LENGTH
++#define METAINFO_SIZE sizeof(MEMMON_METAINFO)
++#define MAGIC_NUMBER 0x12345678
++#define MEMMON_MAP_RESERVE_SIZE 8192
++
++typedef struct memmon_metainfo MEMMON_METAINFO;
++struct memmon_metainfo
++{
++  int magic_number;
++  uint64_t allocated_size;
++  uintptr_t caller_addr;
++};
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++extern int dump_memory_usage (void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // !WINDOWS
+diff --git a/src/method/method_error.cpp b/src/method/method_error.cpp
+index ebb67753a..f433c6562 100644
+--- a/src/method/method_error.cpp
++++ b/src/method/method_error.cpp
+@@ -19,8 +19,6 @@
+ #include "method_error.hpp"
+ 
+ #include "error_manager.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/method/method_query_util.cpp b/src/method/method_query_util.cpp
+index 1f0a8602c..9dbab238b 100644
+--- a/src/method/method_query_util.cpp
++++ b/src/method/method_query_util.cpp
+@@ -29,8 +29,6 @@
+ #include "object_domain.h"
+ #include "object_primitive.h"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/method/method_scan.cpp b/src/method/method_scan.cpp
+index 965d90983..33ffed0d9 100644
+--- a/src/method/method_scan.cpp
++++ b/src/method/method_scan.cpp
+@@ -25,8 +25,6 @@
+ #include "pl_session.hpp"
+ #include "pl_signature.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubscan
+ {
+diff --git a/src/method/method_schema_info.cpp b/src/method/method_schema_info.cpp
+index 467e95e26..07cf77e51 100644
+--- a/src/method/method_schema_info.cpp
++++ b/src/method/method_schema_info.cpp
+@@ -32,8 +32,6 @@
+ 
+ #include "language_support.h"
+ #include "deduplicate_key.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/method/method_struct_invoke.cpp b/src/method/method_struct_invoke.cpp
+index efea0d341..700ba2527 100644
+--- a/src/method/method_struct_invoke.cpp
++++ b/src/method/method_struct_invoke.cpp
+@@ -29,8 +29,6 @@
+ #include "server_support.h"	/* css_send_reply_and_data_to_client(), css_get_comm_request_id() */
+ #include "thread_manager.hpp"
+ #include "log_impl.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ #endif
+ 
+ namespace cubmethod
+diff --git a/src/method/method_struct_oid_info.cpp b/src/method/method_struct_oid_info.cpp
+index 6684d7af1..5ddc1e71f 100644
+--- a/src/method/method_struct_oid_info.cpp
++++ b/src/method/method_struct_oid_info.cpp
+@@ -21,8 +21,6 @@
+ #include "oid.h"
+ #include "dbtype.h"
+ #include "method_struct_value.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/method/method_struct_parameter_info.cpp b/src/method/method_struct_parameter_info.cpp
+index 52494c77f..115ba420c 100644
+--- a/src/method/method_struct_parameter_info.cpp
++++ b/src/method/method_struct_parameter_info.cpp
+@@ -20,8 +20,6 @@
+ 
+ #include "dbtran_def.h"
+ #include "language_support.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/method/method_struct_query.cpp b/src/method/method_struct_query.cpp
+index 252b707b4..7ae32814b 100644
+--- a/src/method/method_struct_query.cpp
++++ b/src/method/method_struct_query.cpp
+@@ -26,8 +26,6 @@
+ #if defined (CS_MODE)
+ #include "method_schema_info.hpp"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/method/method_struct_schema_info.cpp b/src/method/method_struct_schema_info.cpp
+index 2d68553b3..bd4155c4b 100644
+--- a/src/method/method_struct_schema_info.cpp
++++ b/src/method/method_struct_schema_info.cpp
+@@ -19,8 +19,6 @@
+ #include "method_struct_schema_info.hpp"
+ 
+ #include "language_support.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/method/method_struct_value.cpp b/src/method/method_struct_value.cpp
+index 97f218d2c..1174217d6 100644
+--- a/src/method/method_struct_value.cpp
++++ b/src/method/method_struct_value.cpp
+@@ -34,8 +34,6 @@
+ #endif
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/method/query_method.cpp b/src/method/query_method.cpp
+index 91d4b8caf..f690c6f67 100644
+--- a/src/method/query_method.cpp
++++ b/src/method/query_method.cpp
+@@ -55,8 +55,6 @@
+ #include "method_invoke_group.hpp"
+ #include "thread_compat.hpp"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SA_MODE)
+ int method_Num_method_jsp_calls = 0;
+diff --git a/src/monitor/monitor_collect.cpp b/src/monitor/monitor_collect.cpp
+index d3fadd3d1..e82c539b7 100644
+--- a/src/monitor/monitor_collect.cpp
++++ b/src/monitor/monitor_collect.cpp
+@@ -17,8 +17,6 @@
+  */
+ 
+ #include "monitor_collect.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmonitor
+ {
+diff --git a/src/monitor/monitor_registration.cpp b/src/monitor/monitor_registration.cpp
+index 30d825022..228fe5edc 100644
+--- a/src/monitor/monitor_registration.cpp
++++ b/src/monitor/monitor_registration.cpp
+@@ -24,8 +24,6 @@
+ 
+ #include <string>
+ #include <vector>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmonitor
+ {
+diff --git a/src/monitor/monitor_statistic.cpp b/src/monitor/monitor_statistic.cpp
+index b792990f5..b3554d700 100644
+--- a/src/monitor/monitor_statistic.cpp
++++ b/src/monitor/monitor_statistic.cpp
+@@ -24,8 +24,6 @@
+ 
+ #include <cassert>
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmonitor
+ {
+diff --git a/src/monitor/monitor_transaction.cpp b/src/monitor/monitor_transaction.cpp
+index 21a72ebc3..966282783 100644
+--- a/src/monitor/monitor_transaction.cpp
++++ b/src/monitor/monitor_transaction.cpp
+@@ -26,8 +26,6 @@
+ #include "system_parameter.h"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmonitor
+ {
+diff --git a/src/monitor/monitor_vacuum_ovfp_threshold.cpp b/src/monitor/monitor_vacuum_ovfp_threshold.cpp
+index a788f884f..37f6918c8 100644
+--- a/src/monitor/monitor_vacuum_ovfp_threshold.cpp
++++ b/src/monitor/monitor_vacuum_ovfp_threshold.cpp
+@@ -30,8 +30,6 @@
+ #include <assert.h>
+ #include "heap_file.h"
+ #include "monitor_vacuum_ovfp_threshold.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* *INDENT-OFF* */
+ #define OID_COMPARE(a, b)  (((a)->volid != (b)->volid) ? ((a)->volid - (b)->volid) : \
+diff --git a/src/object/deduplicate_key.c b/src/object/deduplicate_key.c
+index 3d96cfd86..2c9dd8b06 100644
+--- a/src/object/deduplicate_key.c
++++ b/src/object/deduplicate_key.c
+@@ -36,8 +36,6 @@
+ #endif
+ 
+ #include "deduplicate_key.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* support for SUPPORT_DEDUPLICATE_KEY_MODE */
+ 
+diff --git a/src/object/elo.c b/src/object/elo.c
+index b0b9ca4a4..438947dce 100644
+--- a/src/object/elo.c
++++ b/src/object/elo.c
+@@ -63,8 +63,6 @@
+ #include "object_primitive.h"
+ #include "object_representation.h"
+ #include "storage_common.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static const DB_ELO elo_Initializer = { -1LL, NULL, NULL, ELO_NULL, ES_NONE };
+ 
+diff --git a/src/object/identifier_store.cpp b/src/object/identifier_store.cpp
+index 8fa2159a0..621a52d22 100644
+--- a/src/object/identifier_store.cpp
++++ b/src/object/identifier_store.cpp
+@@ -20,8 +20,6 @@
+ 
+ #include "language_support.h"
+ #include "chartype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubbase
+ {
+diff --git a/src/object/lob_locator.cpp b/src/object/lob_locator.cpp
+index bbc4b7b93..c9ca6c297 100644
+--- a/src/object/lob_locator.cpp
++++ b/src/object/lob_locator.cpp
+@@ -32,8 +32,6 @@
+ 
+ #include <cstring>
+ #include <string>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ bool
+ lob_locator_is_valid (const char *locator)
+diff --git a/src/object/object_domain.c b/src/object/object_domain.c
+index f3373e982..c67619a32 100644
+--- a/src/object/object_domain.c
++++ b/src/object/object_domain.c
+@@ -63,8 +63,6 @@
+ 
+ #include "dbtype.h"
+ #include "error_manager.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/object/object_primitive.c b/src/object/object_primitive.c
+index 1ca94ab7a..a8993f50a 100644
+--- a/src/object/object_primitive.c
++++ b/src/object/object_primitive.c
+@@ -58,8 +58,6 @@
+ 
+ #include "dbtype.h"
+ #include "memory_private_allocator.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/object/object_representation.c b/src/object/object_representation.c
+index 56b908335..c5c0984f0 100644
+--- a/src/object/object_representation.c
++++ b/src/object/object_representation.c
+@@ -45,8 +45,6 @@
+ #include "query_list.h"
+ #include "set_object.h"
+ #include "access_spec.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/object/schema_system_catalog.cpp b/src/object/schema_system_catalog.cpp
+index 4a560c8cb..e71390349 100644
+--- a/src/object/schema_system_catalog.cpp
++++ b/src/object/schema_system_catalog.cpp
+@@ -23,8 +23,6 @@
+ #include "identifier_store.hpp"
+ #include "oid.h"
+ #include "schema_system_catalog_constants.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ using namespace cubbase;
+ 
+diff --git a/src/object/set_object.c b/src/object/set_object.c
+index f16b53712..1afc30798 100644
+--- a/src/object/set_object.c
++++ b/src/object/set_object.c
+@@ -48,8 +48,6 @@
+ #include "parser.h"
+ #else /* !SERVER_MODE */
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ 
+ /* If this is the server stub out ws_pin.
+diff --git a/src/object/transform.c b/src/object/transform.c
+index 6a2169c5e..f0e8402f3 100644
+--- a/src/object/transform.c
++++ b/src/object/transform.c
+@@ -38,8 +38,6 @@
+ #include "language_support.h"
+ #include "system_catalog.h"
+ #endif /* !CS_MODE */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * These define the structure of the meta class objects
+diff --git a/src/query/arithmetic.c b/src/query/arithmetic.c
+index 608c78550..5cf172040 100644
+--- a/src/query/arithmetic.c
++++ b/src/query/arithmetic.c
+@@ -50,8 +50,6 @@
+ #if defined(SOLARIS)
+ #include <ieeefp.h>
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+diff --git a/src/query/crypt_opfunc.c b/src/query/crypt_opfunc.c
+index e1b024d95..557aa5ca8 100644
+--- a/src/query/crypt_opfunc.c
++++ b/src/query/crypt_opfunc.c
+@@ -55,8 +55,6 @@
+ #include <openssl/evp.h>
+ #include <openssl/sha.h>
+ #include <openssl/rand.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define AES128_BLOCK_LEN (128/8)
+ #define AES128_KEY_LEN (128/8)
+diff --git a/src/query/dblink_scan.c b/src/query/dblink_scan.c
+index 0b6c3a03b..f578778a0 100644
+--- a/src/query/dblink_scan.c
++++ b/src/query/dblink_scan.c
+@@ -39,8 +39,6 @@
+ #include <cas_cci.h>
+ 
+ #include <db_json.hpp>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define MAX_LEN_CONNECTION_URL    512
+ 
+diff --git a/src/query/fetch.c b/src/query/fetch.c
+index f6072f070..821dd50d0 100644
+--- a/src/query/fetch.c
++++ b/src/query/fetch.c
+@@ -57,8 +57,6 @@
+ #include "pl_executor.hpp"
+ 
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ static int fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * obj_oid,
+ 			     QFILE_TUPLE tpl, DB_VALUE ** peek_dbval);
+ static int fetch_peek_dbval_pos (REGU_VARIABLE * regu_var, QFILE_TUPLE tpl, int pos, DB_VALUE ** peek_dbval,
+diff --git a/src/query/filter_pred_cache.c b/src/query/filter_pred_cache.c
+index ec26c144d..480abe931 100644
+--- a/src/query/filter_pred_cache.c
++++ b/src/query/filter_pred_cache.c
+@@ -34,8 +34,6 @@
+ #include "xasl_unpack_info.hpp"
+ 
+ #include <algorithm>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ typedef struct fpcache_ent FPCACHE_ENTRY;
+ struct fpcache_ent
+diff --git a/src/query/list_file.c b/src/query/list_file.c
+index dc6368e87..4b8abc770 100644
+--- a/src/query/list_file.c
++++ b/src/query/list_file.c
+@@ -47,8 +47,6 @@
+ #include "thread_manager.hpp"	// for thread_sleep
+ #include "xasl.h"
+ #include "xasl_cache.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* TODO */
+ #if !defined (SERVER_MODE)
+diff --git a/src/query/numeric_opfunc.c b/src/query/numeric_opfunc.c
+index 6fe7bac1c..3ce7f47c4 100644
+--- a/src/query/numeric_opfunc.c
++++ b/src/query/numeric_opfunc.c
+@@ -47,8 +47,6 @@
+ #endif
+ 
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/query/partition.c b/src/query/partition.c
+index a031c2317..c3800df3d 100644
+--- a/src/query/partition.c
++++ b/src/query/partition.c
+@@ -35,8 +35,6 @@
+ #include "xasl.h"
+ #include "xasl_predicate.hpp"
+ #include "xasl_unpack_info.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ typedef enum match_status
+ {
+diff --git a/src/query/query_aggregate.cpp b/src/query/query_aggregate.cpp
+index 87db9a733..ccbca8367 100644
+--- a/src/query/query_aggregate.cpp
++++ b/src/query/query_aggregate.cpp
+@@ -41,8 +41,6 @@
+ #include "statistics.h"
+ 
+ #include <cmath>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ using namespace cubquery;
+ 
+diff --git a/src/query/query_analytic.cpp b/src/query/query_analytic.cpp
+index 336e3e8cd..9779cd009 100644
+--- a/src/query/query_analytic.cpp
++++ b/src/query/query_analytic.cpp
+@@ -33,8 +33,6 @@
+ #include "xasl_analytic.hpp"
+ 
+ #include <cmath>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static int qdata_analytic_interpolation (cubthread::entry *thread_p, cubxasl::analytic_list_node *ana_p,
+     QFILE_LIST_SCAN_ID *scan_id);
+diff --git a/src/query/query_dump.c b/src/query/query_dump.c
+index e98265465..dfea27e45 100644
+--- a/src/query/query_dump.c
++++ b/src/query/query_dump.c
+@@ -37,8 +37,6 @@
+ #include "xasl_aggregate.hpp"
+ #include "xasl_predicate.hpp"
+ #include "subquery_cache.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define foutput stdout
+ 
+diff --git a/src/query/query_evaluator.c b/src/query/query_evaluator.c
+index 829062cc9..fc31f39a4 100644
+--- a/src/query/query_evaluator.c
++++ b/src/query/query_evaluator.c
+@@ -43,8 +43,6 @@
+ #include "dbtype.h"
+ #include "thread_entry.hpp"
+ #include "xasl_predicate.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define UNKNOWN_CARD   -2	/* Unknown cardinality of a set member */
+ 
+diff --git a/src/query/query_executor.c b/src/query/query_executor.c
+index 363b95a7a..f0bd8df89 100644
+--- a/src/query/query_executor.c
++++ b/src/query/query_executor.c
+@@ -83,8 +83,6 @@
+ #include "subquery_cache.h"
+ 
+ #include <vector>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ // XASL_STATE
+ typedef struct xasl_state XASL_STATE;
+diff --git a/src/query/query_hash_scan.c b/src/query/query_hash_scan.c
+index 8c2b4321a..cccd12651 100644
+--- a/src/query/query_hash_scan.c
++++ b/src/query/query_hash_scan.c
+@@ -49,8 +49,6 @@
+ #include "db_date.h"
+ #include "thread_compat.hpp"
+ #include "oid.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ 
+ static bool safe_memcpy (void *data, void *source, int size);
+diff --git a/src/query/query_manager.c b/src/query/query_manager.c
+index ba6ce514a..111ddd7e4 100644
+--- a/src/query/query_manager.c
++++ b/src/query/query_manager.c
+@@ -47,8 +47,6 @@
+ #include "thread_entry.hpp"
+ #include "xasl_cache.h"
+ #include "xasl_unpack_info.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined (SERVER_MODE)
+ 
+diff --git a/src/query/query_opfunc.c b/src/query/query_opfunc.c
+index 7b3668de1..7fa2e8c35 100644
+--- a/src/query/query_opfunc.c
++++ b/src/query/query_opfunc.c
+@@ -60,8 +60,6 @@
+ 
+ #include <chrono>
+ #include <regex>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define NOT_NULL_VALUE(a, b)	((a) ? (a) : (b))
+ #define INITIAL_OID_STACK_SIZE  1
+diff --git a/src/query/query_reevaluation.cpp b/src/query/query_reevaluation.cpp
+index 078abdcf3..b2365b3f8 100644
+--- a/src/query/query_reevaluation.cpp
++++ b/src/query/query_reevaluation.cpp
+@@ -23,8 +23,6 @@
+ #include "query_reevaluation.hpp"
+ 
+ #include "scan_manager.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubquery
+ {
+diff --git a/src/query/regu_var.cpp b/src/query/regu_var.cpp
+index c0a86fabe..e1141590f 100644
+--- a/src/query/regu_var.cpp
++++ b/src/query/regu_var.cpp
+@@ -25,8 +25,6 @@
+ #include "memory_alloc.h"
+ #include "object_primitive.h"
+ #include "xasl_predicate.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ using namespace cubxasl;    // it should belong to cubxasl namespace
+ 
+diff --git a/src/query/scan_json_table.cpp b/src/query/scan_json_table.cpp
+index 522456c28..c2734dc6f 100644
+--- a/src/query/scan_json_table.cpp
++++ b/src/query/scan_json_table.cpp
+@@ -27,8 +27,6 @@
+ #include "storage_common.h"
+ 
+ #include <algorithm>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubscan
+ {
+diff --git a/src/query/scan_manager.c b/src/query/scan_manager.c
+index 59825007c..95be1c377 100644
+--- a/src/query/scan_manager.c
++++ b/src/query/scan_manager.c
+@@ -51,8 +51,6 @@
+ #include "xasl.h"
+ #include "query_hash_scan.h"
+ #include "statistics.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/query/serial.c b/src/query/serial.c
+index 404cba80c..38d92a38b 100644
+--- a/src/query/serial.c
++++ b/src/query/serial.c
+@@ -40,8 +40,6 @@
+ #include "slotted_page.h"
+ #include "dbtype.h"
+ #include "xasl_cache.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/query/set_scan.c b/src/query/set_scan.c
+index a1d6b9c9c..a719eec92 100644
+--- a/src/query/set_scan.c
++++ b/src/query/set_scan.c
+@@ -31,8 +31,6 @@
+ #include "dbtype.h"
+ #include "fetch.h"
+ #include "xasl.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * qproc_next_set_scan () -
+diff --git a/src/query/show_scan.c b/src/query/show_scan.c
+index 0febb347b..c635dd70e 100644
+--- a/src/query/show_scan.c
++++ b/src/query/show_scan.c
+@@ -60,8 +60,6 @@
+ #include "server_support.h"
+ #include "dbtype.h"
+ #include "thread_manager.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ typedef SCAN_CODE (*NEXT_SCAN_FUNC) (THREAD_ENTRY * thread_p, int cursor, DB_VALUE ** out_values, int out_cnt,
+ 				     void *ctx);
+diff --git a/src/query/stream_to_xasl.c b/src/query/stream_to_xasl.c
+index 070c5add5..4e57c224e 100644
+--- a/src/query/stream_to_xasl.c
++++ b/src/query/stream_to_xasl.c
+@@ -44,8 +44,6 @@
+ #include "xasl_unpack_info.hpp"
+ #include "pl_signature.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static ACCESS_SPEC_TYPE *stx_restore_access_spec_type (THREAD_ENTRY * thread_p, char **ptr, void *arg);
+ static AGGREGATE_TYPE *stx_restore_aggregate_type (THREAD_ENTRY * thread_p, char *ptr);
+diff --git a/src/query/string_opfunc.c b/src/query/string_opfunc.c
+index c6f3a244a..3485e9ccc 100644
+--- a/src/query/string_opfunc.c
++++ b/src/query/string_opfunc.c
+@@ -67,8 +67,6 @@
+ #endif /* !defined (SERVER_MODE) */
+ 
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SUPPRESS_STRLEN_WARNING)
+ #define strlen(s1)  ((int) strlen(s1))
+diff --git a/src/query/string_regex.cpp b/src/query/string_regex.cpp
+index b8608a68f..d1c241109 100644
+--- a/src/query/string_regex.cpp
++++ b/src/query/string_regex.cpp
+@@ -31,8 +31,6 @@
+ 
+ #include <algorithm>
+ #include <string>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubregex
+ {
+diff --git a/src/query/string_regex_re2.cpp b/src/query/string_regex_re2.cpp
+index 99c9c1a4f..62d66562a 100644
+--- a/src/query/string_regex_re2.cpp
++++ b/src/query/string_regex_re2.cpp
+@@ -26,8 +26,6 @@
+ #include "intl_support.h"
+ 
+ #include <iostream>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubregex
+ {
+diff --git a/src/query/string_regex_std.cpp b/src/query/string_regex_std.cpp
+index 2eee20cae..58dc1b247 100644
+--- a/src/query/string_regex_std.cpp
++++ b/src/query/string_regex_std.cpp
+@@ -23,8 +23,6 @@
+ 
+ #include "error_manager.h"
+ #include "locale_helper.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubregex
+ {
+diff --git a/src/query/vacuum.c b/src/query/vacuum.c
+index f8b0bba40..17e65351a 100644
+--- a/src/query/vacuum.c
++++ b/src/query/vacuum.c
+@@ -60,8 +60,6 @@
+ #include <stack>
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* The maximum number of slots in a page if all of them are empty.
+  * IO_MAX_PAGE_SIZE is used for page size and any headers are ignored (it
+diff --git a/src/query/xasl_cache.c b/src/query/xasl_cache.c
+index 492dbb740..2a5942e00 100644
+--- a/src/query/xasl_cache.c
++++ b/src/query/xasl_cache.c
+@@ -42,8 +42,6 @@
+ 
+ #include <algorithm>
+ #include <assert.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define XCACHE_ENTRY_MARK_DELETED	    ((INT32) 0x80000000)
+ #define XCACHE_ENTRY_TO_BE_RECOMPILED	    ((INT32) 0x40000000)
+diff --git a/src/session/session.c b/src/session/session.c
+index 90901d62a..0779a79f7 100644
+--- a/src/session/session.c
++++ b/src/session/session.c
+@@ -55,8 +55,6 @@
+ #include "xasl_cache.h"
+ #include "pl_session.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/session/session_sr.c b/src/session/session_sr.c
+index 3fedb474b..219155795 100644
+--- a/src/session/session_sr.c
++++ b/src/session/session_sr.c
+@@ -26,8 +26,6 @@
+ #include "xasl.h"
+ #include "xasl_cache.h"
+ #include "xserver_interface.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  *  xsession_create_new () - create a new session
+diff --git a/src/sp/method_invoke_group.cpp b/src/sp/method_invoke_group.cpp
+index 016c5889c..c554e0f99 100644
+--- a/src/sp/method_invoke_group.cpp
++++ b/src/sp/method_invoke_group.cpp
+@@ -37,8 +37,6 @@
+ #if defined (SA_MODE)
+ #include "query_method.hpp"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubmethod
+ {
+diff --git a/src/sp/pl_comm.c b/src/sp/pl_comm.c
+index 156e74870..6a2af941b 100644
+--- a/src/sp/pl_comm.c
++++ b/src/sp/pl_comm.c
+@@ -60,8 +60,6 @@
+ #else
+ #include "boot_sr.h"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static int pl_connect_server_tcp (int server_port, SOCKET & out);
+ #if !defined (WINDOWS)
+diff --git a/src/sp/pl_compile_handler.cpp b/src/sp/pl_compile_handler.cpp
+index 848d49019..ef863e0aa 100644
+--- a/src/sp/pl_compile_handler.cpp
++++ b/src/sp/pl_compile_handler.cpp
+@@ -23,8 +23,6 @@
+ #include "pl_comm.h"
+ #include "pl_execution_stack_context.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubpl
+ {
+diff --git a/src/sp/pl_connection.cpp b/src/sp/pl_connection.cpp
+index 61d1a3265..fe2b811ab 100644
+--- a/src/sp/pl_connection.cpp
++++ b/src/sp/pl_connection.cpp
+@@ -29,8 +29,6 @@
+ #include "pl_comm.h" /* pl_disconnect_server (), pl_ping () */
+ #include "object_representation.h" /* OR_ */
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubpl
+ {
+diff --git a/src/sp/pl_execution_stack_context.cpp b/src/sp/pl_execution_stack_context.cpp
+index 60e528f50..cc9f3a7f5 100644
+--- a/src/sp/pl_execution_stack_context.cpp
++++ b/src/sp/pl_execution_stack_context.cpp
+@@ -26,8 +26,6 @@
+ 
+ #include "log_impl.h"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ namespace cubpl
+ {
+   execution_stack::execution_stack (cubthread::entry *thread_p)
+diff --git a/src/sp/pl_executor.cpp b/src/sp/pl_executor.cpp
+index 8f9bd6011..8979dd23d 100644
+--- a/src/sp/pl_executor.cpp
++++ b/src/sp/pl_executor.cpp
+@@ -35,8 +35,6 @@
+ #include "pl_query_cursor.hpp"
+ #include "sp_code.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ namespace cubpl
+ {
+   using namespace cubmethod;
+diff --git a/src/sp/pl_file.c b/src/sp/pl_file.c
+index 5ee8856ff..5ff82dc23 100644
+--- a/src/sp/pl_file.c
++++ b/src/sp/pl_file.c
+@@ -36,8 +36,6 @@
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ bool
+ pl_open_info_dir ()
+diff --git a/src/sp/pl_query_cursor.cpp b/src/sp/pl_query_cursor.cpp
+index 87fd3ecde..175937636 100644
+--- a/src/sp/pl_query_cursor.cpp
++++ b/src/sp/pl_query_cursor.cpp
+@@ -25,8 +25,6 @@
+ #include "object_representation.h"
+ #include "xserver_interface.h"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubpl
+ {
+diff --git a/src/sp/pl_session.cpp b/src/sp/pl_session.cpp
+index 52626fcc7..52e253cd9 100644
+--- a/src/sp/pl_session.cpp
++++ b/src/sp/pl_session.cpp
+@@ -29,8 +29,6 @@
+ 
+ #include "method_struct_parameter_info.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubpl
+ {
+diff --git a/src/sp/pl_signature.cpp b/src/sp/pl_signature.cpp
+index c36356908..3a19c0a05 100644
+--- a/src/sp/pl_signature.cpp
++++ b/src/sp/pl_signature.cpp
+@@ -28,8 +28,6 @@
+ #endif
+ 
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ #define CHECK_NULL_AND_FREE(owner, val)                        \
+     do {                                                  \
+       if (val != nullptr)                                 \
+diff --git a/src/sp/pl_sr.cpp b/src/sp/pl_sr.cpp
+index 0ce635d78..dbc2c6f2d 100644
+--- a/src/sp/pl_sr.cpp
++++ b/src/sp/pl_sr.cpp
+@@ -56,8 +56,6 @@
+ #include "method_struct_value.hpp"
+ #include "pl_session.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ namespace cubpl
+ {
+ //////////////////////////////////////////////////////////////////////////
+@@ -359,6 +357,8 @@ namespace cubpl
+ 	int status;
+ 
+ 	pl_reset_info (m_db_name.c_str ());
++        
++	unsetenv ("LD_PRELOAD");
+ 	int pid = create_child_process (m_executable_path.c_str (), m_argv, 0 /* do not wait */, nullptr, nullptr, nullptr,
+ 					&status);
+ 	if (pid > 1) // parent
+diff --git a/src/sp/pl_struct_compile.cpp b/src/sp/pl_struct_compile.cpp
+index 97282f752..e613ee7b2 100644
+--- a/src/sp/pl_struct_compile.cpp
++++ b/src/sp/pl_struct_compile.cpp
+@@ -25,8 +25,6 @@
+ #include "method_struct_value.hpp"
+ #include "sp_constants.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubpl
+ {
+diff --git a/src/sp/sp_catalog.cpp b/src/sp/sp_catalog.cpp
+index f8d3ff99c..f9ae2178f 100644
+--- a/src/sp/sp_catalog.cpp
++++ b/src/sp/sp_catalog.cpp
+@@ -37,8 +37,6 @@
+ #include "schema_manager.h"
+ #include "dbtype.h"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ // memory representation of built-in stored procedures
+ static std::vector <sp_info> sp_builtin_definition;
+diff --git a/src/sp/sp_code.cpp b/src/sp/sp_code.cpp
+index 28de0a724..eae214845 100644
+--- a/src/sp/sp_code.cpp
++++ b/src/sp/sp_code.cpp
+@@ -30,8 +30,6 @@
+ #include "object_representation_sr.h"
+ #include "sp_constants.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ ATTR_ID spcode_Attrs_id[SPC_ATTR_MAX_INDEX];
+ int spcode_Num_attrs = -1;
+diff --git a/src/storage/btree.c b/src/storage/btree.c
+index 29947be04..969740bbe 100644
+--- a/src/storage/btree.c
++++ b/src/storage/btree.c
+@@ -58,8 +58,6 @@
+ #include <cinttypes>
+ #include <stdlib.h>
+ #include <string.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define BTREE_HEALTH_CHECK
+ 
+diff --git a/src/storage/btree_load.c b/src/storage/btree_load.c
+index 380a3062c..ee8330e6f 100644
+--- a/src/storage/btree_load.c
++++ b/src/storage/btree_load.c
+@@ -57,8 +57,6 @@
+ #ifndef NDEBUG
+ #include "db_value_printer.hpp"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ typedef struct sort_args SORT_ARGS;
+ struct sort_args
+diff --git a/src/storage/btree_unique.cpp b/src/storage/btree_unique.cpp
+index f9732e2ac..e17e720bd 100644
+--- a/src/storage/btree_unique.cpp
++++ b/src/storage/btree_unique.cpp
+@@ -34,8 +34,6 @@
+ // To bring this file into the scope of memory monitoring, the usage of
+ // `placement new` needs to be removed.
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ #endif
+ 
+ btree_unique_stats::btree_unique_stats (stat_type keys, stat_type nulls /* = 0 */)
+diff --git a/src/storage/byte_order.c b/src/storage/byte_order.c
+index 39ba98a06..945291a8c 100644
+--- a/src/storage/byte_order.c
++++ b/src/storage/byte_order.c
+@@ -23,8 +23,6 @@
+ #ident "$Id$"
+ 
+ #include "byte_order.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * LITTLE ENDIAN TRANSFORMATION FUNCTIONS
+diff --git a/src/storage/catalog_class.c b/src/storage/catalog_class.c
+index 9d8df92ce..7e18e1d58 100644
+--- a/src/storage/catalog_class.c
++++ b/src/storage/catalog_class.c
+@@ -45,8 +45,6 @@
+ #include "dbtype.h"
+ #include "string_opfunc.h"
+ #include "thread_manager.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define IS_SUBSET(value)        (value).sub.count >= 0
+ 
+diff --git a/src/storage/compactdb_sr.c b/src/storage/compactdb_sr.c
+index 71fc4302b..705c69332 100644
+--- a/src/storage/compactdb_sr.c
++++ b/src/storage/compactdb_sr.c
+@@ -40,8 +40,6 @@
+ #include "set_object.h"
+ #include "xserver_interface.h"
+ #include "server_interface.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static bool compact_started = false;
+ static int last_tran_index = -1;
+diff --git a/src/storage/disk_manager.c b/src/storage/disk_manager.c
+index bcd647a69..5029e5c9f 100644
+--- a/src/storage/disk_manager.c
++++ b/src/storage/disk_manager.c
+@@ -63,8 +63,6 @@
+ #include "thread_entry_task.hpp"
+ #include "thread_manager.hpp"
+ #include "double_write_buffer.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /************************************************************************/
+ /* Define structures, globals, and macro's                              */
+diff --git a/src/storage/double_write_buffer.c b/src/storage/double_write_buffer.c
+index c1d187458..0a3f919bb 100644
+--- a/src/storage/double_write_buffer.c
++++ b/src/storage/double_write_buffer.c
+@@ -38,8 +38,6 @@
+ #include "boot_sr.h"
+ #include "perf_monitor.h"
+ #include "porting_inline.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ 
+ #define DWB_SLOTS_HASH_SIZE		    1000
+diff --git a/src/storage/es.c b/src/storage/es.c
+index 74fecc0dd..7742d71f0 100644
+--- a/src/storage/es.c
++++ b/src/storage/es.c
+@@ -34,8 +34,6 @@
+ #if !defined (SERVER_MODE)
+ #include "network_interface_cl.h"
+ #endif /* !defined (SERVER_MODE) */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /************************************************************************/
+ /* TODO: why is this on client?                                         */
+diff --git a/src/storage/es_common.c b/src/storage/es_common.c
+index d83e2ad70..034c2bfca 100644
+--- a/src/storage/es_common.c
++++ b/src/storage/es_common.c
+@@ -32,8 +32,6 @@
+ #include "porting.h"
+ #include "memory_hash.h"
+ #include "es_common.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * es_get_type -
+diff --git a/src/storage/es_owfs.c b/src/storage/es_owfs.c
+index f883e1a57..d082ba349 100644
+--- a/src/storage/es_owfs.c
++++ b/src/storage/es_owfs.c
+@@ -37,8 +37,6 @@
+ #include <owfs/owfs_errno.h>
+ #include "thread_compat.hpp"
+ #endif // CUBRID_OWFS
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined(CUBRID_OWFS) && !defined(WINDOWS)
+ #define ES_OWFS_HASH		(786433)
+diff --git a/src/storage/es_posix.c b/src/storage/es_posix.c
+index fd5a69d99..fe2cee1be 100644
+--- a/src/storage/es_posix.c
++++ b/src/storage/es_posix.c
+@@ -48,8 +48,6 @@ typedef int mode_t;
+ #include "thread_entry.hpp"
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info
+ #endif // SERVER_MODE
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if defined (SA_MODE) || defined (SERVER_MODE)
+ /* es_posix_base_dir - */
+diff --git a/src/storage/extendible_hash.c b/src/storage/extendible_hash.c
+index 0918da141..fd00b8181 100644
+--- a/src/storage/extendible_hash.c
++++ b/src/storage/extendible_hash.c
+@@ -52,8 +52,6 @@
+ #include "tz_support.h"
+ #include "db_date.h"
+ #include "thread_compat.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #ifdef EHASH_DEBUG
+ #define EHASH_BALANCE_FACTOR     4	/* Threshold rate of no. of directory pointers over no. of bucket pages. If
+diff --git a/src/storage/external_sort.c b/src/storage/external_sort.c
+index 06e17f083..cd7726520 100644
+--- a/src/storage/external_sort.c
++++ b/src/storage/external_sort.c
+@@ -52,8 +52,6 @@
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info and thread_sleep
+ 
+ #include <functional>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* Estimate on number of pages in the multipage temporary file */
+ #define SORT_MULTIPAGE_FILE_SIZE_ESTIMATE  20
+diff --git a/src/storage/file_io.c b/src/storage/file_io.c
+index 777c54385..6fc9df91b 100644
+--- a/src/storage/file_io.c
++++ b/src/storage/file_io.c
+@@ -119,8 +119,6 @@
+ #if defined (SERVER_MODE)
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info and thread_sleep
+ #endif // SERVER_MODE
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /************************************************************************/
+ /* TODO: why is this in client module?                                  */
+diff --git a/src/storage/file_manager.c b/src/storage/file_manager.c
+index 39fa648de..e9f85dddc 100644
+--- a/src/storage/file_manager.c
++++ b/src/storage/file_manager.c
+@@ -64,8 +64,6 @@
+ #include "fault_injection.h"
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info
+ #include "partition_sr.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /************************************************************************/
+ /* Define structures, globals, and macro's                              */
+diff --git a/src/storage/heap_file.c b/src/storage/heap_file.c
+index 4d425cbed..cef480e0e 100644
+--- a/src/storage/heap_file.c
++++ b/src/storage/heap_file.c
+@@ -75,8 +75,6 @@
+ #include "tde.h"
+ 
+ #include <set>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/storage/oid.c b/src/storage/oid.c
+index fd43aa2c0..ad1b28e00 100644
+--- a/src/storage/oid.c
++++ b/src/storage/oid.c
+@@ -28,8 +28,6 @@
+ 
+ #include "oid.h"
+ #include "schema_system_catalog_constants.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ typedef struct oid_cache_entry OID_CACHE_ENTRY;
+ struct oid_cache_entry
+diff --git a/src/storage/overflow_file.c b/src/storage/overflow_file.c
+index 59b96a012..a6bf11195 100644
+--- a/src/storage/overflow_file.c
++++ b/src/storage/overflow_file.c
+@@ -37,8 +37,6 @@
+ #include "storage_common.h"
+ 
+ #include <string.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define OVERFLOW_ALLOCVPID_ARRAY_SIZE 64
+ 
+diff --git a/src/storage/page_buffer.c b/src/storage/page_buffer.c
+index fea7e8f9b..e1918a9d9 100644
+--- a/src/storage/page_buffer.c
++++ b/src/storage/page_buffer.c
+@@ -70,8 +70,6 @@
+ #include "probes.h"
+ #endif /* ENABLE_SYSTEMTAP */
+ #include "thread_entry.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ const VPID vpid_Null_vpid = { NULL_PAGEID, NULL_VOLID };
+ 
+diff --git a/src/storage/record_descriptor.cpp b/src/storage/record_descriptor.cpp
+index 7f79c8e32..631310c86 100644
+--- a/src/storage/record_descriptor.cpp
++++ b/src/storage/record_descriptor.cpp
+@@ -28,8 +28,6 @@
+ #include "slotted_page.h"
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ //  record_descriptor extends functionality for recdes:
+ //
+diff --git a/src/storage/slotted_page.c b/src/storage/slotted_page.c
+index fc593a107..ea02a2b31 100644
+--- a/src/storage/slotted_page.c
++++ b/src/storage/slotted_page.c
+@@ -50,8 +50,6 @@
+ #include "thread_entry.hpp"
+ #include "thread_lockfree_hash_map.hpp"
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/storage/statistics_sr.c b/src/storage/statistics_sr.c
+index e3af5dba1..33cca9052 100644
+--- a/src/storage/statistics_sr.c
++++ b/src/storage/statistics_sr.c
+@@ -38,8 +38,6 @@
+ #include "object_representation.h"
+ #include "thread_entry.hpp"
+ #include "system_parameter.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define SQUARE(n) ((n)*(n))
+ 
+diff --git a/src/storage/storage_common.c b/src/storage/storage_common.c
+index 9d89bbb11..830319327 100644
+--- a/src/storage/storage_common.c
++++ b/src/storage/storage_common.c
+@@ -37,8 +37,6 @@
+ #include "tz_support.h"
+ #include "db_date.h"
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* RESERVED_SIZE_IN_PAGE should be aligned */
+ #define RESERVED_SIZE_IN_PAGE   (sizeof (FILEIO_PAGE_RESERVED) + sizeof (FILEIO_PAGE_WATERMARK))
+diff --git a/src/storage/system_catalog.c b/src/storage/system_catalog.c
+index 834f6a1ab..ad3d0c9a1 100644
+--- a/src/storage/system_catalog.c
++++ b/src/storage/system_catalog.c
+@@ -44,8 +44,6 @@
+ #include "object_representation.h"
+ #include "thread_lockfree_hash_map.hpp"
+ #include "thread_manager.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/storage/tde.c b/src/storage/tde.c
+index 774eabbf8..1fd91326a 100644
+--- a/src/storage/tde.c
++++ b/src/storage/tde.c
+@@ -52,8 +52,6 @@
+ #include "log_storage.hpp"
+ #include "log_volids.hpp"
+ #include "tde.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define off_signals(new_mask, old_mask) \
+   do {  \
+diff --git a/src/thread/critical_section.c b/src/thread/critical_section.c
+index aec825778..8347ebe92 100644
+--- a/src/thread/critical_section.c
++++ b/src/thread/critical_section.c
+@@ -41,8 +41,6 @@
+ 
+ #include <stdio.h>
+ #include <assert.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ // belongs to cubsync
+ using namespace cubsync;
+diff --git a/src/thread/critical_section_tracker.cpp b/src/thread/critical_section_tracker.cpp
+index bbcb036a7..08d110b8e 100644
+--- a/src/thread/critical_section_tracker.cpp
++++ b/src/thread/critical_section_tracker.cpp
+@@ -25,8 +25,6 @@
+ #include "resource_tracker.hpp"
+ 
+ #include <iostream>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubsync
+ {
+diff --git a/src/thread/internal_tasks_worker_pool.cpp b/src/thread/internal_tasks_worker_pool.cpp
+index 473912a83..218534ae3 100644
+--- a/src/thread/internal_tasks_worker_pool.cpp
++++ b/src/thread/internal_tasks_worker_pool.cpp
+@@ -22,8 +22,6 @@
+ 
+ #include "internal_tasks_worker_pool.hpp"
+ #include "thread_worker_pool.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubthread
+ {
+diff --git a/src/thread/thread_daemon.cpp b/src/thread/thread_daemon.cpp
+index dc239874a..275924c6d 100644
+--- a/src/thread/thread_daemon.cpp
++++ b/src/thread/thread_daemon.cpp
+@@ -28,8 +28,6 @@
+ 
+ // cubrid headers
+ #include "perf.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubthread
+ {
+diff --git a/src/thread/thread_entry.cpp b/src/thread/thread_entry.cpp
+index 55d4c6e17..f40a2b349 100644
+--- a/src/thread/thread_entry.cpp
++++ b/src/thread/thread_entry.cpp
+@@ -42,8 +42,6 @@
+ #if !defined (WINDOWS)
+ #include <pthread.h>
+ #endif // WINDOWS
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubthread
+ {
+diff --git a/src/thread/thread_entry_task.cpp b/src/thread/thread_entry_task.cpp
+index a28d93439..0af5276a8 100644
+--- a/src/thread/thread_entry_task.cpp
++++ b/src/thread/thread_entry_task.cpp
+@@ -29,8 +29,6 @@
+ #include "thread_manager.hpp"
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubthread
+ {
+diff --git a/src/thread/thread_lockfree_hash_map.cpp b/src/thread/thread_lockfree_hash_map.cpp
+index 227cb32de..dbe0d08d8 100644
+--- a/src/thread/thread_lockfree_hash_map.cpp
++++ b/src/thread/thread_lockfree_hash_map.cpp
+@@ -19,8 +19,6 @@
+ #include "thread_lockfree_hash_map.hpp"
+ 
+ #include "thread_manager.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubthread
+ {
+diff --git a/src/thread/thread_looper.cpp b/src/thread/thread_looper.cpp
+index 791587892..d32b387e8 100644
+--- a/src/thread/thread_looper.cpp
++++ b/src/thread/thread_looper.cpp
+@@ -24,8 +24,6 @@
+ #include "thread_waiter.hpp"
+ 
+ #include "perf.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubthread
+ {
+diff --git a/src/thread/thread_manager.cpp b/src/thread/thread_manager.cpp
+index e26e0b98b..72d3564bc 100644
+--- a/src/thread/thread_manager.cpp
++++ b/src/thread/thread_manager.cpp
+@@ -41,8 +41,6 @@
+ #include "system_parameter.h"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubthread
+ {
+diff --git a/src/thread/thread_waiter.cpp b/src/thread/thread_waiter.cpp
+index 95427ad26..a878d3b5a 100644
+--- a/src/thread/thread_waiter.cpp
++++ b/src/thread/thread_waiter.cpp
+@@ -24,8 +24,6 @@
+ #include "perf.hpp"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ // todo: fix time unit
+ 
+diff --git a/src/thread/thread_worker_pool.cpp b/src/thread/thread_worker_pool.cpp
+index 5a3e2ba26..ceb31bece 100644
+--- a/src/thread/thread_worker_pool.cpp
++++ b/src/thread/thread_worker_pool.cpp
+@@ -28,8 +28,6 @@
+ #include <sstream>
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubthread
+ {
+diff --git a/src/transaction/boot_sr.c b/src/transaction/boot_sr.c
+index a0ac2be00..95dcbab48 100644
+--- a/src/transaction/boot_sr.c
++++ b/src/transaction/boot_sr.c
+@@ -99,8 +99,6 @@
+ #if defined(ENABLE_SYSTEMTAP)
+ #include "probes.h"
+ #endif /* ENABLE_SYSTEMTAP */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define BOOT_LEAVE_SAFE_OSDISK_PARTITION_FREE_SPACE  \
+   (1250 * (IO_DEFAULT_PAGE_SIZE / IO_PAGESIZE))	/* 5 Mbytes */
+diff --git a/src/transaction/client_credentials.cpp b/src/transaction/client_credentials.cpp
+index 3ef3db8dd..5ab71c975 100644
+--- a/src/transaction/client_credentials.cpp
++++ b/src/transaction/client_credentials.cpp
+@@ -21,8 +21,6 @@
+ #include "porting.h"
+ 
+ #include <algorithm>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static void
+ string_ncopy (std::string &dest, const char *src, size_t max_size)
+diff --git a/src/transaction/flashback.c b/src/transaction/flashback.c
+index b64fb632c..d9cb016f3 100644
+--- a/src/transaction/flashback.c
++++ b/src/transaction/flashback.c
+@@ -56,8 +56,6 @@
+ #include "storage_common.h"
+ #include "system_parameter.h"
+ #include "object_representation.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static volatile LOG_PAGEID flashback_Min_log_pageid = NULL_LOG_PAGEID;	// Minumun log pageid to keep archive log volume from being removed
+ 
+diff --git a/src/transaction/locator.c b/src/transaction/locator.c
+index 1d495be90..019d51905 100644
+--- a/src/transaction/locator.c
++++ b/src/transaction/locator.c
+@@ -42,8 +42,6 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <assert.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/transaction/locator_sr.c b/src/transaction/locator_sr.c
+index b53acc5a3..56dab4226 100644
+--- a/src/transaction/locator_sr.c
++++ b/src/transaction/locator_sr.c
+@@ -65,8 +65,6 @@
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info
+ #include "transaction_transient.hpp"
+ #include "xserver_interface.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* TODO : remove */
+ extern bool catcls_Enable;
+diff --git a/src/transaction/lock_manager.c b/src/transaction/lock_manager.c
+index 4de65b93e..8f7fd61c6 100644
+--- a/src/transaction/lock_manager.c
++++ b/src/transaction/lock_manager.c
+@@ -69,8 +69,6 @@
+ #include "xasl.h"
+ 
+ #include <array>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ extern LOCK_COMPATIBILITY lock_Comp[12][12];
+ 
+diff --git a/src/transaction/lock_table.c b/src/transaction/lock_table.c
+index 957d76297..57cc77f4d 100644
+--- a/src/transaction/lock_table.c
++++ b/src/transaction/lock_table.c
+@@ -26,8 +26,6 @@
+ #include "config.h"
+ 
+ #include "storage_common.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  *
+diff --git a/src/transaction/log_2pc.c b/src/transaction/log_2pc.c
+index fcd31dac9..c61a7d464 100644
+--- a/src/transaction/log_2pc.c
++++ b/src/transaction/log_2pc.c
+@@ -55,8 +55,6 @@
+ 
+ /* The following two are for getpid */
+ #include <sys/types.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define	CSS_ENABLE_INTERRUPTS
+diff --git a/src/transaction/log_append.cpp b/src/transaction/log_append.cpp
+index 4b6ef72f6..511228d57 100644
+--- a/src/transaction/log_append.cpp
++++ b/src/transaction/log_append.cpp
+@@ -28,8 +28,6 @@
+ #include "thread_entry.hpp"
+ #include "thread_manager.hpp"
+ #include "vacuum.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ static LOG_ZIP *log_zip_undo = NULL;
+diff --git a/src/transaction/log_comm.c b/src/transaction/log_comm.c
+index 311562944..d7af0f5b8 100644
+--- a/src/transaction/log_comm.c
++++ b/src/transaction/log_comm.c
+@@ -55,8 +55,6 @@
+ #if defined (SERVER_MODE)
+ #include "thread_manager.hpp"
+ #endif // SERVER_MODE
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ struct tran_state_name
+ {
+diff --git a/src/transaction/log_compress.c b/src/transaction/log_compress.c
+index 5f3db9d86..4a65102ed 100644
+--- a/src/transaction/log_compress.c
++++ b/src/transaction/log_compress.c
+@@ -31,8 +31,6 @@
+ #include "error_manager.h"
+ #include "memory_alloc.h"
+ #include "perf_monitor.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * log_zip - compress(zip) log data into LOG_ZIP
+diff --git a/src/transaction/log_global.c b/src/transaction/log_global.c
+index d79932c14..bf5f14a97 100644
+--- a/src/transaction/log_global.c
++++ b/src/transaction/log_global.c
+@@ -36,8 +36,6 @@
+ #include <limits.h>
+ #include <stddef.h>
+ #include <stdlib.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* Variables */
+ #if !defined(SERVER_MODE)
+diff --git a/src/transaction/log_lsa.cpp b/src/transaction/log_lsa.cpp
+index cb962a3e4..bc809447b 100644
+--- a/src/transaction/log_lsa.cpp
++++ b/src/transaction/log_lsa.cpp
+@@ -23,8 +23,6 @@
+ #include "log_lsa.hpp"
+ 
+ #include <cstdio>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ void
+ lsa_to_string (char *buf, int buf_size, const log_lsa *lsa)
+diff --git a/src/transaction/log_manager.c b/src/transaction/log_manager.c
+index fc5de3ed1..dc85512f9 100644
+--- a/src/transaction/log_manager.c
++++ b/src/transaction/log_manager.c
+@@ -95,8 +95,6 @@
+ #include "dbtype.h"
+ #include "cnv.h"
+ #include "flashback.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ 
+diff --git a/src/transaction/log_page_buffer.c b/src/transaction/log_page_buffer.c
+index b2bd5fdc0..e033ee5c9 100644
+--- a/src/transaction/log_page_buffer.c
++++ b/src/transaction/log_page_buffer.c
+@@ -106,8 +106,6 @@
+ #include "crypt_opfunc.h"
+ #include "object_representation.h"
+ #include "flashback.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ #define pthread_mutex_init(a, b)
+diff --git a/src/transaction/log_postpone_cache.cpp b/src/transaction/log_postpone_cache.cpp
+index 4110c245a..49b468e2f 100644
+--- a/src/transaction/log_postpone_cache.cpp
++++ b/src/transaction/log_postpone_cache.cpp
+@@ -28,8 +28,6 @@
+ #include "log_manager.h"
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ void
+ log_postpone_cache::reset ()
+diff --git a/src/transaction/log_recovery.c b/src/transaction/log_recovery.c
+index 4524a6743..ee210ea6e 100644
+--- a/src/transaction/log_recovery.c
++++ b/src/transaction/log_recovery.c
+@@ -43,8 +43,6 @@
+ #include "slotted_page.h"
+ #include "system_parameter.h"
+ #include "thread_manager.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ static void log_rv_undo_record (THREAD_ENTRY * thread_p, LOG_LSA * log_lsa, LOG_PAGE * log_page_p,
+ 				LOG_RCVINDEX rcvindex, const VPID * rcv_vpid, LOG_RCV * rcv,
+diff --git a/src/transaction/log_recovery_redo.cpp b/src/transaction/log_recovery_redo.cpp
+index 3694aec94..3f57ef731 100644
+--- a/src/transaction/log_recovery_redo.cpp
++++ b/src/transaction/log_recovery_redo.cpp
+@@ -20,8 +20,6 @@
+ 
+ #include "log_impl.h"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(NDEBUG)
+ void
+diff --git a/src/transaction/log_recovery_redo_parallel.cpp b/src/transaction/log_recovery_redo_parallel.cpp
+index d7e55e55e..6c0772d89 100644
+--- a/src/transaction/log_recovery_redo_parallel.cpp
++++ b/src/transaction/log_recovery_redo_parallel.cpp
+@@ -21,8 +21,6 @@
+ #include "log_manager.h"
+ #include "vpid.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cublog
+ {
+diff --git a/src/transaction/log_system_tran.cpp b/src/transaction/log_system_tran.cpp
+index c160114fd..d32da5898 100644
+--- a/src/transaction/log_system_tran.cpp
++++ b/src/transaction/log_system_tran.cpp
+@@ -28,8 +28,6 @@
+ 
+ #include <forward_list>
+ #include <mutex>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ std::mutex systb_Mutex;
+ std::forward_list<log_tdes *> systb_Free_tdes_list;
+diff --git a/src/transaction/log_tran_table.c b/src/transaction/log_tran_table.c
+index 72fddf82c..031ea44b6 100644
+--- a/src/transaction/log_tran_table.c
++++ b/src/transaction/log_tran_table.c
+@@ -80,8 +80,6 @@
+ #include "session.h"
+ #include "pl_session.hpp"
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define RMUTEX_NAME_TDES_TOPOP "TDES_TOPOP"
+ 
+diff --git a/src/transaction/log_writer.c b/src/transaction/log_writer.c
+index 465063216..47faca99b 100644
+--- a/src/transaction/log_writer.c
++++ b/src/transaction/log_writer.c
+@@ -62,8 +62,6 @@
+ #include "heartbeat.h"
+ #endif
+ #include "string_buffer.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #define LOGWR_THREAD_SUSPEND_TIMEOUT 	10
+ 
+diff --git a/src/transaction/mvcc.c b/src/transaction/mvcc.c
+index 6bf74701a..0ac1de3e7 100644
+--- a/src/transaction/mvcc.c
++++ b/src/transaction/mvcc.c
+@@ -39,8 +39,6 @@
+ // To bring this file into the scope of memory monitoring, the usage of
+ // `placement new` needs to be removed.
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ #endif
+ 
+ #define MVCC_IS_REC_INSERTER_ACTIVE(thread_p, rec_header_p) \
+diff --git a/src/transaction/mvcc_active_tran.cpp b/src/transaction/mvcc_active_tran.cpp
+index 4840e2ac2..86731a7a9 100644
+--- a/src/transaction/mvcc_active_tran.cpp
++++ b/src/transaction/mvcc_active_tran.cpp
+@@ -25,8 +25,6 @@
+ #include "log_impl.h"
+ 
+ #include <cstring>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ mvcc_active_tran::mvcc_active_tran ()
+   : m_bit_area (NULL)
+diff --git a/src/transaction/mvcc_table.cpp b/src/transaction/mvcc_table.cpp
+index 2c30c473f..f24f3b8f2 100644
+--- a/src/transaction/mvcc_table.cpp
++++ b/src/transaction/mvcc_table.cpp
+@@ -29,8 +29,6 @@
+ #include "thread_manager.hpp"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ // help debugging oldest active by following all changes
+ struct oldest_active_event
+diff --git a/src/transaction/recovery.c b/src/transaction/recovery.c
+index bcec7d13c..89e97e05f 100644
+--- a/src/transaction/recovery.c
++++ b/src/transaction/recovery.c
+@@ -39,8 +39,6 @@
+ 
+ #include <stdio.h>
+ 
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  *
+diff --git a/src/transaction/replication.c b/src/transaction/replication.c
+index 719f4245c..8a32126dc 100644
+--- a/src/transaction/replication.c
++++ b/src/transaction/replication.c
+@@ -33,8 +33,6 @@
+ 
+ #include <assert.h>
+ #include <stdio.h>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * EXTERN TO ALL SERVER RECOVERY FUNCTION CODED SOMEWHERE ELSE
+diff --git a/src/transaction/transaction_sr.c b/src/transaction/transaction_sr.c
+index 2ada34480..84b077b71 100644
+--- a/src/transaction/transaction_sr.c
++++ b/src/transaction/transaction_sr.c
+@@ -41,8 +41,6 @@
+ #include "server_support.h"
+ #include "dbtype.h"
+ #include "thread_manager.hpp"	// for thread_get_thread_entry_info and thread_sleep
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /*
+  * xtran_server_commit - Commit the current transaction
+diff --git a/src/transaction/transaction_transient.cpp b/src/transaction/transaction_transient.cpp
+index 0c143b396..b82d8b7ed 100644
+--- a/src/transaction/transaction_transient.cpp
++++ b/src/transaction/transaction_transient.cpp
+@@ -29,8 +29,6 @@
+ #include "vacuum.h"
+ 
+ #include <cstring>  // for std::strcpy
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ //
+ // TODO: Create a "transaction transient" abstract interface and split this into multiple files
+ //
+diff --git a/src/transaction/wait_for_graph.c b/src/transaction/wait_for_graph.c
+index 83978f18f..b112114eb 100644
+--- a/src/transaction/wait_for_graph.c
++++ b/src/transaction/wait_for_graph.c
+@@ -35,8 +35,6 @@
+ #if defined(SERVER_MODE)
+ #include "connection_error.h"
+ #endif /* SERVER_MODE */
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ /* Prune the number of found cycles in a cycle group */
+ static const int WFG_PRUNE_CYCLES_IN_CYCLE_GROUP = 10;
+diff --git a/src/xasl/access_json_table.cpp b/src/xasl/access_json_table.cpp
+index d014307df..167143614 100644
+--- a/src/xasl/access_json_table.cpp
++++ b/src/xasl/access_json_table.cpp
+@@ -31,8 +31,6 @@
+ #include "object_primitive.h"
+ 
+ #include <cassert>
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubxasl
+ {
+diff --git a/src/xasl/xasl_analytic.cpp b/src/xasl/xasl_analytic.cpp
+index 2730557e3..87b2f3900 100644
+--- a/src/xasl/xasl_analytic.cpp
++++ b/src/xasl/xasl_analytic.cpp
+@@ -23,8 +23,6 @@
+ #include "xasl_analytic.hpp"
+ 
+ #include "dbtype.h"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubxasl
+ {
+diff --git a/src/xasl/xasl_predicate.cpp b/src/xasl/xasl_predicate.cpp
+index b1e68e2cc..a9171bb08 100644
+--- a/src/xasl/xasl_predicate.cpp
++++ b/src/xasl/xasl_predicate.cpp
+@@ -24,8 +24,6 @@
+ 
+ #include "memory_alloc.h"
+ #include "regu_var.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ namespace cubxasl
+ {
+diff --git a/src/xasl/xasl_stream.cpp b/src/xasl/xasl_stream.cpp
+index e75444730..19af33ad8 100644
+--- a/src/xasl/xasl_stream.cpp
++++ b/src/xasl/xasl_stream.cpp
+@@ -26,8 +26,6 @@
+ #include "object_representation.h"
+ #include "xasl.h"
+ #include "xasl_unpack_info.hpp"
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ static int stx_Xasl_errcode = NO_ERROR;
+diff --git a/src/xasl/xasl_unpack_info.cpp b/src/xasl/xasl_unpack_info.cpp
+index b0e88f78a..4e34c5116 100644
+--- a/src/xasl/xasl_unpack_info.cpp
++++ b/src/xasl/xasl_unpack_info.cpp
+@@ -22,8 +22,6 @@
+ #if defined (SERVER_MODE)
+ #include "thread_entry.hpp"
+ #endif
+-// XXX: SHOULD BE THE LAST INCLUDE HEADER
+-#include "memory_wrapper.hpp"
+ 
+ #if !defined(SERVER_MODE)
+ static XASL_UNPACK_INFO *xasl_Unpack_info = NULL;

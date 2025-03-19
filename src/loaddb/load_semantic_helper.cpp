@@ -27,8 +27,6 @@
 
 #include <algorithm>
 #include <cstring>
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubload
 {

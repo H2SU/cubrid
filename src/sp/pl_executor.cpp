@@ -35,8 +35,6 @@
 #include "pl_query_cursor.hpp"
 #include "sp_code.hpp"
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 namespace cubpl
 {
   using namespace cubmethod;

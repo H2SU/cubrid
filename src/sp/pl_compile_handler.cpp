@@ -23,8 +23,6 @@
 #include "pl_comm.h"
 #include "pl_execution_stack_context.hpp"
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubpl
 {

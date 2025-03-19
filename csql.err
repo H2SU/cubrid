@@ -1,0 +1,42 @@
+
+Time: 03/19/25 18:07:01.227 - DEBUG *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1641
+trying to connect 'testdb@localhost'
+
+Time: 03/19/25 18:07:01.227 - ERROR *** file /home/heexoo/workspace/cubrid/src/connection/connection_cl.c, line 771 ERROR CODE = -353, Tran = -1, EID = 1
+Cannot make connection to master server on host "localhost".... No such file or directory
+
+Time: 03/19/25 18:07:01.228 - DEBUG *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1693
+error -353. try to connect to next host
+
+Time: 03/19/25 18:07:01.228 - ERROR *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1725 ERROR CODE = -677, Tran = -1, EID = 2
+Failed to connect to database server, 'testdb', on the following host(s): localhost
+
+Time: 03/19/25 18:07:01.228 - DEBUG *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1078
+boot_restart_client: boot_client_initialize_css () error -353
+
+Time: 03/19/25 18:07:03.237 - DEBUG *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1641
+trying to connect 'testdb@localhost'
+
+Time: 03/19/25 18:07:03.237 - ERROR *** file /home/heexoo/workspace/cubrid/src/connection/connection_cl.c, line 771 ERROR CODE = -353, Tran = -1, EID = 1
+Cannot make connection to master server on host "localhost".... No such file or directory
+
+Time: 03/19/25 18:07:03.237 - DEBUG *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1693
+error -353. try to connect to next host
+
+Time: 03/19/25 18:07:03.237 - ERROR *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1725 ERROR CODE = -677, Tran = -1, EID = 2
+Failed to connect to database server, 'testdb', on the following host(s): localhost
+
+Time: 03/19/25 18:07:03.237 - DEBUG *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1078
+boot_restart_client: boot_client_initialize_css () error -353
+
+Time: 04/07/25 13:18:30.593 - NOTIFICATION *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1082  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 192500) connected to database server 'testdb' on the host 'localhost' (port 1822).
+
+*** The previous error message is the last one. ***
+
+
+Time: 04/07/25 13:21:57.563 - NOTIFICATION *** file /home/heexoo/workspace/cubrid/src/transaction/boot_cl.c, line 1082  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 193555) connected to database server 'testdb' on the host 'localhost' (port 1822).
+
+*** The previous error message is the last one. ***
+

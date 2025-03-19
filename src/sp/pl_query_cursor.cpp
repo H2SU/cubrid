@@ -25,8 +25,6 @@
 #include "object_representation.h"
 #include "xserver_interface.h"
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubpl
 {

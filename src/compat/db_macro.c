@@ -56,8 +56,6 @@
 #endif /* defined (SUPPRESS_STRLEN_WARNING) */
 
 #include "dbtype.h"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #define DB_NUMBER_ZERO	    0
 

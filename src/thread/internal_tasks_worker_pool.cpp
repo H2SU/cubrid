@@ -22,8 +22,6 @@
 
 #include "internal_tasks_worker_pool.hpp"
 #include "thread_worker_pool.hpp"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubthread
 {

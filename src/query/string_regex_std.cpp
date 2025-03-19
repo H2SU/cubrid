@@ -23,8 +23,6 @@
 
 #include "error_manager.h"
 #include "locale_helper.hpp"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cubregex
 {

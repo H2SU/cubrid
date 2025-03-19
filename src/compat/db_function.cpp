@@ -17,8 +17,6 @@
  */
 
 #include "db_function.hpp"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 const char *
 fcode_get_uppercase_name (FUNC_CODE ftype)

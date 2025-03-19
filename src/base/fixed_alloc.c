@@ -34,8 +34,6 @@
 #include "connection_defs.h"
 #include "connection_error.h"
 #endif /* SERVER_MODE */
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 typedef struct rec_link REC_LINK;
 struct rec_link

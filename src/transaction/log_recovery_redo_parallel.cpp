@@ -21,8 +21,6 @@
 #include "log_manager.h"
 #include "vpid.hpp"
 
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 namespace cublog
 {

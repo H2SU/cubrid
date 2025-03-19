@@ -55,8 +55,6 @@
 #if defined (SERVER_MODE)
 #include "thread_manager.hpp"
 #endif // SERVER_MODE
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 struct tran_state_name
 {

@@ -37,8 +37,6 @@
 #include <owfs/owfs_errno.h>
 #include "thread_compat.hpp"
 #endif // CUBRID_OWFS
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 #if defined(CUBRID_OWFS) && !defined(WINDOWS)
 #define ES_OWFS_HASH		(786433)

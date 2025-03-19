@@ -26,8 +26,6 @@
 #include "config.h"
 
 #include "storage_common.h"
-// XXX: SHOULD BE THE LAST INCLUDE HEADER
-#include "memory_wrapper.hpp"
 
 /*
  *
