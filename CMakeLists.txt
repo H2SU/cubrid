@@ -411,6 +411,7 @@ set(SP_DIR                   ${CMAKE_SOURCE_DIR}/src/sp)
 set(LOADDB_DIR               ${CMAKE_SOURCE_DIR}/src/loaddb)
 set(METHOD_DIR               ${CMAKE_SOURCE_DIR}/src/method)
 set(MONITOR_DIR              ${CMAKE_SOURCE_DIR}/src/monitor)
+set(MEMMON_DIR               ${CMAKE_SOURCE_DIR}/src/memmon)
 set(OBJECT_DIR               ${CMAKE_SOURCE_DIR}/src/object)
 set(ODBC_DIR                 ${CMAKE_SOURCE_DIR}/src/odbc)
 set(OLEDB_DIR                ${CMAKE_SOURCE_DIR}/src/oledb)
@@ -452,6 +453,7 @@ include_directories(
   src/thread
   src/transaction
   src/xasl
+  src/memmon
   )
 if(WITH_CCI)
   include_directories(
@@ -853,6 +855,7 @@ add_subdirectory(sa)
 add_subdirectory(cs)
 add_subdirectory(cubrid)
 add_subdirectory(util)
+add_subdirectory(memmon)
 if(WITH_CCI)
   add_subdirectory(cubrid-cci)
 endif(WITH_CCI)
