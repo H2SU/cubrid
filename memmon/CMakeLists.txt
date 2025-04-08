@@ -19,3 +19,4 @@ target_include_directories(memmon PRIVATE ${EP_INCLUDES})
 target_include_directories(memmon PRIVATE ${CUBRID_INCLUDES})
 
 target_link_libraries (memmon LINK_PRIVATE cubrid)
+target_link_libraries(memmon PRIVATE ${TBB_LIBS})
