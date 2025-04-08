@@ -358,6 +358,22 @@ namespace cubpl
 	int status;
 
 	pl_reset_info (m_db_name.c_str ());
+
+#if !defined (WINDOWS)
+	//unsetenv LD_PRELOAD
+	// unsetenv ("LD_PRELOAD");
+	if (prm_get_bool_value (PRM_ID_ENABLE_MEMORY_MONITORING))
+	  {
+	    char *ld_preload = getenv ("LD_PRELOAD");
+	    if (ld_preload!=NULL)
+	      {
+		if (strstr (ld_preload, "libmemmon.so") != NULL)
+		  {
+		    unsetenv ("LD_PRELOAD");
+		  }
+	      }
+	  }
+#endif
 	int pid = create_child_process (m_executable_path.c_str (), m_argv, 0 /* do not wait */, nullptr, nullptr, nullptr,
 					&status);
 	if (pid > 1) // parent
