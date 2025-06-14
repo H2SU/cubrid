@@ -905,7 +905,27 @@ proc_execute_internal (const char *file, const char *args[], bool wait_child, bo
       signal (SIGCHLD, SIG_IGN);
     }
 
+#if !defined (WINDOWS)
+  //setenv LD_PRELOAD
+  if (strcmp (file, UTIL_CUBRID_NAME) == 0 && prm_get_bool_value (PRM_ID_ENABLE_MEMORY_MONITORING))
+    {
+      char *ld_preload = getenv ("LD_PRELOAD");
+      if (!ld_preload || strstr (ld_preload, "libmemmon.so") == NULL)
+	{
+	  char *cubrid_path = getenv ("CUBRID");
+	  char new_ld_preload[1024];
+	  snprintf (new_ld_preload, sizeof (new_ld_preload), "%s/lib/libmemmon.so", cubrid_path);
+	  setenv ("LD_PRELOAD", new_ld_preload, 1);
+	}
+    }
+  else if (strcmp (file, UTIL_CUBRID_NAME) == 0 && !(prm_get_bool_value (PRM_ID_ENABLE_MEMORY_MONITORING)))
+    {
+      printf ("Memory monitoring is not active.\n");
+    }
+#endif
+
   pid = fork ();
+
   if (pid == -1)
     {
       perror ("fork");
@@ -933,6 +953,13 @@ proc_execute_internal (const char *file, const char *args[], bool wait_child, bo
     }
   else
     {
+#if !defined (WINDOWS)
+      // unset LD_PRELOAD
+      if (strcmp (file, UTIL_CUBRID_NAME) == 0 && prm_get_bool_value (PRM_ID_ENABLE_MEMORY_MONITORING))
+	{
+	  unsetenv ("LD_PRELOAD");
+	}
+#endif
       int status = 0;
 
       if (hide_cmd_args == true)

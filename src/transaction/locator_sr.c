@@ -10726,6 +10726,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
     }
 
   lockhint = *lockhint_subclasses;
+  if (lockhint != NULL)
+    {
+      assert (lockhint->packed == NULL);
+    }
 
   /*
    * Let's assume a number of subclasses for allocation purposes of the stack.
@@ -10741,6 +10745,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
   max_oid_list = max_stack;
 
   stack = (int *) malloc (sizeof (*stack) * max_stack);
+  if (lockhint != NULL)
+    {
+      assert (lockhint->packed == NULL);
+    }
   if (stack == NULL)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sizeof (*stack) * max_stack);
@@ -10748,6 +10756,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
       goto error;
     }
   oid_list = (OID *) malloc (sizeof (*oid_list) * max_oid_list);
+  if (lockhint != NULL)
+    {
+      assert (lockhint->packed == NULL);
+    }
   if (oid_list == NULL)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sizeof (*oid_list) * max_oid_list);
@@ -10792,7 +10804,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
 	  OID_SET_NULL (&lockhint->classes[i].oid);
 	  continue;
 	}
-
+      if (lockhint != NULL)
+	{
+	  assert (lockhint->packed == NULL);
+	}
       /*
        * Add the class to the stack and indicate that it has not been visited.
        */
@@ -10815,6 +10830,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
 	   */
 
 	  scan = heap_get_class_record (thread_p, &lockhint->classes[ref_num].oid, &peek_recdes, &scan_cache, PEEK);
+	  if (lockhint != NULL)
+	    {
+	      assert (lockhint->packed == NULL);
+	    }
 	  if (scan != S_SUCCESS)
 	    {
 	      if (scan != S_DOESNT_EXIST && (lockhint->quit_on_errors == (int) true || er_errid () == ER_INTERRUPTED))
@@ -10839,6 +10858,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
 		  OID_SET_NULL (&lockhint->classes[ref_num].oid);
 		}
 	      er_clear ();
+	      if (lockhint != NULL)
+		{
+		  assert (lockhint->packed == NULL);
+		}
 	      continue;
 	    }
 
@@ -10869,6 +10892,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
 	  OID_SET_NULL (&oid_list[0]);
 
 	  error_code = orc_subclasses_from_record (&peek_recdes, &max_oid_list, &oid_list);
+	  if (lockhint != NULL)
+	    {
+	      assert (lockhint->packed == NULL);
+	    }
 	  if (error_code != NO_ERROR)
 	    {
 	      if (lockhint->quit_on_errors == (int) true)
@@ -10914,6 +10941,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
 		      /* Expand the stack by two */
 		      max_stack = max_stack * 2;
 		      new_ptr = realloc (stack, sizeof (*stack) * max_stack);
+		      if (lockhint != NULL)
+			{
+			  assert (lockhint->packed == NULL);
+			}
 		      if (new_ptr == NULL)
 			{
 			  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
@@ -10932,6 +10963,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
 		    {
 		      /* Expand the lockhint area by two */
 		      new_ptr = locator_reallocate_lockhint (lockhint, (lockhint->max_classes * 2));
+		      if (lockhint != NULL)
+			{
+			  assert (lockhint->packed == NULL);
+			}
 		      if (new_ptr == NULL)
 			{
 			  if (lockhint->quit_on_errors == false)
@@ -10943,6 +10978,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
 			  goto error;
 			}
 		      lockhint = *lockhint_subclasses = (LC_LOCKHINT *) new_ptr;
+		      if (lockhint != NULL)
+			{
+			  assert (lockhint->packed == NULL);
+			}
 		    }
 
 		  /*
@@ -11011,6 +11050,10 @@ locator_guess_sub_classes (THREAD_ENTRY * thread_p, LC_LOCKHINT ** lockhint_subc
   free_and_init (stack);
   free_and_init (oid_list);
   error_code = heap_scancache_end (thread_p, &scan_cache);
+  if (lockhint != NULL)
+    {
+      assert (lockhint->packed == NULL);
+    }
   if (error_code != NO_ERROR)
     {
       return error_code;
@@ -11038,7 +11081,10 @@ error:
       free_and_init (oid_list);
     }
   (void) heap_scancache_end (thread_p, &scan_cache);
-
+  if (lockhint != NULL)
+    {
+      assert (lockhint->packed == NULL);
+    }
   return error_code;
 }
 
@@ -11115,6 +11161,10 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
       return LC_CLASSNAME_ERROR;
     }
 
+  if (*hlock != NULL)
+    {
+      assert ((*hlock)->packed == NULL);
+    }
   /*
    * Find the class oids of the given classnames.
    */
@@ -11137,7 +11187,10 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
       n = (*hlock)->num_classes;
       find = LC_CLASSNAME_EXIST;
       retry = 1;
-
+      if (*hlock != NULL)
+	{
+	  assert ((*hlock)->packed == NULL);
+	}
       while (retry)
 	{
 	  retry = 0;
@@ -11170,7 +11223,10 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
 	      else
 		{
 		  assert (entry->e_current.action != LC_CLASSNAME_EXIST);
-
+		  if (*hlock != NULL)
+		    {
+		      assert ((*hlock)->packed == NULL);
+		    }
 		  /*
 		   * We can only proceed if the entry belongs to the current
 		   * transaction, otherwise, we must lock the class associated
@@ -11226,7 +11282,10 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
 			  lock_unlock_object (thread_p, &(*hlock)->classes[n].oid, oid_Root_class_oid, tmp_lock, true);
 			  retry = 1;
 			}
-
+		      if (*hlock != NULL)
+			{
+			  assert ((*hlock)->packed == NULL);
+			}
 		      /* already exit cset */
 		      continue;
 		    }
@@ -11247,7 +11306,10 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
 	  csect_exit (thread_p, CSECT_LOCATOR_SR_CLASSNAME_TABLE);
 
 	}			/* while (retry) */
-
+      if (*hlock != NULL)
+	{
+	  assert ((*hlock)->packed == NULL);
+	}
       if (find == LC_CLASSNAME_EXIST)
 	{
 	  /*
@@ -11274,7 +11336,10 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
 	    }
 	}
     }				/* for (i = 0; ... ) */
-
+  if (*hlock != NULL)
+    {
+      assert ((*hlock)->packed == NULL);
+    }
   /*
    * Eliminate any duplicates. Note that we did not want to do above since
    * we did not want to modify the original arrays.
@@ -11306,12 +11371,26 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
 	      /* Now eliminate the entry */
 	      OID_SET_NULL (&(*hlock)->classes[j].oid);
 	    }
+
+	  if (*hlock != NULL)
+	    {
+	      assert ((*hlock)->packed == NULL);
+	    }
+	}
+
+      if (*hlock != NULL)
+	{
+	  assert ((*hlock)->packed == NULL);
 	}
     }
 
   /*
    * Do we need to get subclasses ?
    */
+  if (*hlock != NULL)
+    {
+      assert ((*hlock)->packed == NULL);
+    }
 
   if (allneed_subclasses == true && (allfind == LC_CLASSNAME_EXIST || quit_on_errors == false))
     {
@@ -11319,6 +11398,11 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
 	{
 	  allfind = LC_CLASSNAME_ERROR;
 	}
+    }
+
+  if (*hlock != NULL)
+    {
+      assert ((*hlock)->packed == NULL);
     }
 
   if (allfind == LC_CLASSNAME_EXIST || quit_on_errors == false)
@@ -11332,18 +11416,28 @@ xlocator_find_lockhint_class_oids (THREAD_ENTRY * thread_p, int num_classes, con
 	      *hlock = NULL;
 	    }
 	}
+      if (*hlock != NULL)
+	{
+	  assert ((*hlock)->packed == NULL);
+	}
     }
   else
     {
       locator_free_lockhint ((*hlock));
       *hlock = NULL;
     }
-
+  if (*hlock != NULL)
+    {
+      assert ((*hlock)->packed == NULL);
+    }
   if (logtb_tran_prepare_count_optim_classes (thread_p, many_classnames, many_flags, num_classes) != NO_ERROR)
     {
       allfind = LC_CLASSNAME_ERROR;
     }
-
+  if ((*hlock) != NULL)
+    {
+      assert ((*hlock)->packed == NULL);
+    }
   return allfind;
 }
 

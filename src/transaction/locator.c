@@ -1343,6 +1343,7 @@ locator_allocate_and_unpack_lockset (char *unpacked, int unpacked_size, bool unp
     }
 
   lockset->packed = unpacked;
+  printf ("locator.c:1346 : %s\n", unpacked);
   lockset->packed_size = unpacked_size;
 
   (void) locator_unpack_lockset (lockset, unpack_classes, unpack_objects);
@@ -1480,6 +1481,7 @@ locator_pack_lockset (LC_LOCKSET * lockset, bool pack_classes, bool pack_objects
 	    }
 
 	  lockset->packed = packed;
+	  printf ("locator.c:1484 : %s\n", packed);
 	  lockset->packed_size = packed_size;
 	}
       packed = lockset->packed;
@@ -1492,6 +1494,7 @@ locator_pack_lockset (LC_LOCKSET * lockset, bool pack_classes, bool pack_objects
 	  return 0;
 	}
       lockset->packed = packed;
+      printf ("locator.c:1497 : %s\n", packed);
       lockset->packed_size = packed_size;
     }
 
@@ -1737,6 +1740,10 @@ locator_initialize_lockhint (LC_LOCKHINT * lockhint, int length, int max_classes
   lockhint->packed = NULL;
   lockhint->packed_size = 0;
   lockhint->classes = ((struct lc_lockhint_class *) (lockhint->mem + sizeof (*lockhint)));
+  ((lc_lockhint_class *) lockhint->classes)->oid = oid_Null_oid;
+  ((lc_lockhint_class *) lockhint->classes)->chn = NULL_CHN;
+  ((lc_lockhint_class *) lockhint->classes)->lock = NULL_LOCK;
+  ((lc_lockhint_class *) lockhint->classes)->need_subclasses = 0;
 
   return NO_ERROR;
 }
@@ -1757,8 +1764,10 @@ LC_LOCKHINT *
 locator_reallocate_lockhint (LC_LOCKHINT * lockhint, int max_classes)
 {
   int length;
+  bool quit_on_errors = false;
 
   length = sizeof (*lockhint) + (max_classes * sizeof (*(lockhint->classes)));
+  quit_on_errors = lockhint->quit_on_errors;
 
   if (lockhint->length < length)
     {
@@ -1769,6 +1778,7 @@ locator_reallocate_lockhint (LC_LOCKHINT * lockhint, int max_classes)
 	}
 
       /* Reset to new areas */
+      locator_initialize_lockhint (lockhint, length, max_classes, quit_on_errors);
       lockhint->mem = (char *) lockhint;
       lockhint->length = length;
       lockhint->max_classes = max_classes;
@@ -1915,6 +1925,7 @@ locator_allocate_and_unpack_lockhint (char *unpacked, int unpacked_size, bool un
     }
 
   lockhint->packed = unpacked;
+  printf ("locator.c:1921 : %s\n", unpacked);
   lockhint->packed_size = unpacked_size;
 
   (void) locator_unpack_lockhint (lockhint, unpack_classes);
@@ -2021,6 +2032,7 @@ locator_pack_lockhint (LC_LOCKHINT * lockhint, bool pack_classes)
 	    }
 
 	  lockhint->packed = packed;
+	  printf ("locator.c:2028 : %s\n", packed);
 	  lockhint->packed_size = packed_size;
 	}
       packed = lockhint->packed;
@@ -2034,6 +2046,7 @@ locator_pack_lockhint (LC_LOCKHINT * lockhint, bool pack_classes)
 	}
 
       lockhint->packed = packed;
+      printf ("locator.c:2042 : %s\n", packed);
       lockhint->packed_size = packed_size;
     }
 

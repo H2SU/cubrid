@@ -302,6 +302,23 @@ main (int argc, char **argv)
 	return 1;
       }
 
+    char *ld_preload = getenv ("LD_PRELOAD");
+    if (ld_preload != NULL)
+      {
+	if (strstr (ld_preload, "libmemmon.so") != NULL)
+	  {
+	    fprintf (stdout, "\n%s\n", "Memory monitoring activated via LD_PRELOAD (libmemmon.so).");
+	  }
+	else
+	  {
+	    fprintf (stdout, "\n%s\n", "Memory monitoring deactivated.");
+	  }
+      }
+    else
+      {
+	fprintf (stdout, "\n%s\n", "Memory monitoring deactivated.");
+      }
+
     fprintf (stdout, "\nThis may take a long time depending on the amount " "of recovery works to do.\n");
     fflush (stdout);
 

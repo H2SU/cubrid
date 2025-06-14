@@ -13,17 +13,48 @@
 #include <algorithm>
 #include <ctime>
 #include <memory>  // std::allocator
+#include <mutex>   // 추가: ptr 로그 동기화
 #include "memmon.hpp"
 #include "error_manager.h"
 #include "object_representation.h"
 #include "memory_alloc.h"
-#include "mprec.h"
 
 #define CALC_RATIO(numerator, denominator) (((denominator) != 0) ? (((double)(numerator) / (denominator)) * 100) : 0.0)
 #define MAX_FNAME_LENGTH 255
 #define DEBUG_CALLSTACK false
 
-// -----------------------------
+// --------------------------------------------------
+// ptr log 관리용 전역 변수
+static FILE *ptr_log_file = nullptr;
+static std::mutex ptr_log_mutex;
+
+// 실행 시 자동으로 로그 파일 열기
+__attribute__ ((constructor))
+static void memmon_open_ptr_log()
+{
+  const char *home = getenv ("HOME");
+  char path[512];
+  // ~/CUBRID/databases/memdump/ptr_log.txt에 기록
+  snprintf (path, sizeof (path), "%s/CUBRID/databases/memdump/ptr_log.txt",
+	    home ? home : "/tmp");
+  ptr_log_file = fopen (path, "a");
+  if (!ptr_log_file)
+    {
+      perror ("memmon ptr_log fopen");
+    }
+}
+
+// 종료 시 자동으로 파일 닫기
+__attribute__ ((destructor))
+static void memmon_close_ptr_log()
+{
+  if (ptr_log_file)
+    {
+      fclose (ptr_log_file);
+    }
+}
+// --------------------------------------------------
+
 // glibc 내부 함수 포인터 초기화
 extern "C" {
   void *__libc_malloc (size_t);
@@ -31,9 +62,6 @@ extern "C" {
   void *__libc_realloc (void *, size_t);
   void __libc_free (void *);
 }
-
-// 재진입 방지
-thread_local bool in_bhook = false;
 
 static void * (*real_malloc) (size_t) = __libc_malloc;
 static void * (*real_calloc) (size_t, size_t) = __libc_calloc;
@@ -48,7 +76,6 @@ thread_local bool calloc_in_hook = false;
 thread_local bool realloc_in_hook = false;
 thread_local bool free_in_hook = false;
 
-// -----------------------------
 // RealAllocator: TBB map 내부 할당 시 후킹 영향을 받지 않도록 함
 template <typename T>
 struct RealAllocator
@@ -85,7 +112,6 @@ bool operator!= (const RealAllocator<T> &, const RealAllocator<U> &)
   return false;
 }
 
-// -----------------------------
 // AtomicSize 래퍼 (원자적 업데이트를 지원)
 struct AtomicSize
 {
@@ -114,7 +140,6 @@ struct AtomicSize
   }
 };
 
-// -----------------------------
 // TBB map 타입 및 lazy 초기화 함수
 using MemStatMap = tbb::concurrent_unordered_map<
 		   uintptr_t,
@@ -124,7 +149,6 @@ using MemStatMap = tbb::concurrent_unordered_map<
 		   RealAllocator<std::pair<const uintptr_t, AtomicSize>>
 		   >;
 
-// rehash를 한 번만 호출하도록 lambda 초기화를 사용
 MemStatMap &get_mem_stat_map()
 {
   static MemStatMap instance;
@@ -134,7 +158,7 @@ MemStatMap &get_mem_stat_map()
     return true;
   }
   ();
-  (void)initialized; // 사용하지 않는 변수 경고 제거
+  (void)initialized;
   return instance;
 }
 
@@ -156,7 +180,6 @@ CallStackMapRaw &get_call_stack_map_raw (void)
 
 void memmon_print_call_stack (uintptr_t caller_addr)
 {
-  // 저장된 콜스택 map에서 해당 키를 찾습니다.
   CallStackMapRaw &map_raw = get_call_stack_map_raw();
   auto it = map_raw.find (caller_addr);
   if (it == map_raw.end())
@@ -166,9 +189,8 @@ void memmon_print_call_stack (uintptr_t caller_addr)
     }
 
   const CallStackVector &cs_vec = it->second;
-  // backtrace_symbols는 vector의 내부 데이터가 연속적인 메모리임을 보장하므로 사용 가능합니다.
   char **symbols = backtrace_symbols (cs_vec.data(), cs_vec.size());
-  if (symbols != nullptr)
+  if (symbols)
     {
       printf ("Call stack for caller address 0x%lx:\n====================================\n", caller_addr);
       for (size_t i = 0; i < cs_vec.size(); i++)
@@ -179,7 +201,6 @@ void memmon_print_call_stack (uintptr_t caller_addr)
     }
   else
     {
-      // symbols를 얻지 못한 경우, 각 주소에 대해 dladdr를 통해 심볼 이름을 출력
       printf ("[X]Call stack for caller address 0x%lx:\n====================================\n", caller_addr);
       for (auto addr : cs_vec)
 	{
@@ -196,8 +217,6 @@ void memmon_print_call_stack (uintptr_t caller_addr)
     }
 }
 
-////////////////////////////////////////////
-// -----------------------------
 // 메타정보 관련 함수
 char *memmon_get_metainfo_pos (void *ptr, size_t size)
 {
@@ -233,44 +252,40 @@ void *memmon_get_initial_mem_call_addr (uintptr_t *caller_addr)
   for (int i = 0; i < trace_count; i++)
     {
       Dl_info dl_info;
-      if (dladdr (return_addr[i], &dl_info) == 0 || dl_info.dli_fname == nullptr)
+      if (dladdr (return_addr[i], &dl_info) == 0 || !dl_info.dli_fname)
 	{
 	  continue;
 	}
-
       if (strnlen (dl_info.dli_fname, MAX_FNAME_LENGTH) == MAX_FNAME_LENGTH)
 	{
-	  caller_addr = nullptr;
+	  *caller_addr = 0;
 	  return nullptr;
 	}
-
-      if ((strstr (dl_info.dli_fname, "libmemmon.so") == nullptr) && (strstr (dl_info.dli_fname, "libcubrid.so") == nullptr))
+      if (strstr (dl_info.dli_fname, "libmemmon.so") == nullptr &&
+	  strstr (dl_info.dli_fname, "libcubrid.so") == nullptr)
 	{
-	  caller_addr = nullptr;
+	  *caller_addr = 0;
 	  return nullptr;
 	}
-
-      // "libcubrid."가 포함된 심볼만 선택 (필요에 따라 조건 수정)
       if (strstr (dl_info.dli_fname, "libcubrid.") == nullptr)
 	{
 	  continue;
 	}
 
-      // 기준 주소가 0x40000000 이상이면 상대 주소로 계산
       if (dl_info.dli_fbase >= reinterpret_cast<const void *> (0x40000000))
 	{
 	  func_addr_p = reinterpret_cast<void *> (
-				reinterpret_cast<size_t> (return_addr[i]) - reinterpret_cast<size_t> (dl_info.dli_fbase)
+				reinterpret_cast<size_t> (return_addr[i]) -
+				reinterpret_cast<size_t> (dl_info.dli_fbase)
 			);
 	}
       else
 	{
 	  func_addr_p = return_addr[i];
 	}
+      *caller_addr = reinterpret_cast<uintptr_t> (func_addr_p);
       break;
     }
-
-  *caller_addr = reinterpret_cast<uintptr_t> (func_addr_p);
 
 #if (DEBUG_CALLSTACK)
   if (func_addr_p)
@@ -283,95 +298,98 @@ void *memmon_get_initial_mem_call_addr (uintptr_t *caller_addr)
 	}
     }
 #endif
+
   return func_addr_p;
 }
 
 void memmon_add_stat (void *ptr, const size_t size, uintptr_t caller_addr)
 {
   assert (size > ALIGNED_METAINFO_SIZE);
-  char buffer[BUFFER_SIZE];
-  const char *func_name = nullptr;
 
-  MEMMON_METAINFO *metainfo = reinterpret_cast<MEMMON_METAINFO *> (memmon_get_metainfo_pos (ptr, size));
-
+  MEMMON_METAINFO *metainfo = reinterpret_cast<MEMMON_METAINFO *> (
+				      memmon_get_metainfo_pos (ptr, size)
+			      );
   metainfo->magic_number = MAGIC_NUMBER;
   metainfo->allocated_size = size;
   metainfo->caller_addr = caller_addr;
 
-  // func_name = memmon_resolve_function_name (reinterpret_cast<const char*>(caller_addr), buffer);
-  // printf("[memmon_add_stat] func_name: %s, size: %lu\n", func_name, size);
-
   MemStatMap &map_ref = get_mem_stat_map();
-
-  // emplace를 시도하고, 실패하면 기존 값에 누적
   auto result = map_ref.emplace (metainfo->caller_addr, AtomicSize (metainfo->allocated_size));
   if (!result.second)
     {
       result.first->second += metainfo->allocated_size;
     }
+
+  // --- 포인터 할당 로그 기록 ---
+  if (ptr_log_file)
+    {
+      std::lock_guard<std::mutex> lg (ptr_log_mutex);
+      fprintf (ptr_log_file, "[alloc] ptr: %p\n", ptr);
+      fflush (ptr_log_file);
+    }
 }
 
 void memmon_sub_stat (void *ptr)
 {
-  size_t size = 0;
-  char buffer[BUFFER_SIZE];
-  const char *func_name = nullptr;
-  MEMMON_METAINFO *metainfo = nullptr;
-
-  assert (ptr != nullptr);
-
-  size = malloc_usable_size (ptr);
+  if (!ptr)
+    {
+      return;
+    }
+  size_t size = malloc_usable_size (ptr);
   if (size <= ALIGNED_METAINFO_SIZE)
     {
       return;
     }
 
-  metainfo= reinterpret_cast<MEMMON_METAINFO *> (memmon_get_metainfo_pos (ptr, size));
+  MEMMON_METAINFO *metainfo = reinterpret_cast<MEMMON_METAINFO *> (
+				      memmon_get_metainfo_pos (ptr, size)
+			      );
   if (metainfo->magic_number != MAGIC_NUMBER)
     {
       return;
     }
 
-  //assert (metainfo->allocated_size == size);
-
   auto &map_ref = get_mem_stat_map();
-  auto result = map_ref.find (metainfo->caller_addr);
-  if (result != map_ref.end())
+  auto it = map_ref.find (metainfo->caller_addr);
+  if (it != map_ref.end())
     {
-      result->second -= metainfo->allocated_size;
+      it->second -= metainfo->allocated_size;
+    }
+  else
+    {
+      assert(false);
+    }
+    
+  // --- 포인터 해제 로그 기록 ---
+  if (ptr_log_file)
+    {
+      std::lock_guard<std::mutex> lg (ptr_log_mutex);
+      fprintf (ptr_log_file, "[free ] ptr: %p\n", ptr);
+      fflush (ptr_log_file);
     }
 }
 
-// -----------------------------
 // 메모리 후킹 함수들
 extern "C" {
   void *malloc (size_t size)
   {
-    size_t total_size = 0;
-    uintptr_t caller_addr = 0;
-    void *ptr = nullptr;
-    size_t aligned_payload = 0;
-
     if (malloc_in_hook || disable_force)
       {
 	return real_malloc (size);
       }
 
     malloc_in_hook = true;
+    uintptr_t caller_addr = 0;
+    void *ptr = nullptr;
 
-    // 메모리 호출 위치를 확인
     if (memmon_get_initial_mem_call_addr (&caller_addr) != nullptr)
       {
-	total_size = size + ALIGNED_METAINFO_SIZE;
-
+	size_t total_size = size + ALIGNED_METAINFO_SIZE;
 	ptr = real_malloc (total_size);
-	if (!ptr)
+	if (ptr)
 	  {
-	    malloc_in_hook = false;
-	    return nullptr;
+	    memmon_add_stat (ptr, total_size, caller_addr);
 	  }
-
-	memmon_add_stat (ptr, total_size, caller_addr);
       }
     else
       {
@@ -384,29 +402,23 @@ extern "C" {
 
   void *calloc (size_t nmemb, size_t size)
   {
-    size_t total_size = 0;
-    uintptr_t caller_addr = 0;
-    void *ptr = nullptr;
-
     if (calloc_in_hook || disable_force)
       {
 	return real_calloc (nmemb, size);
       }
 
     calloc_in_hook = true;
+    uintptr_t caller_addr = 0;
+    void *ptr = nullptr;
 
     if (memmon_get_initial_mem_call_addr (&caller_addr) != nullptr)
       {
-	total_size = (nmemb * size) + ALIGNED_METAINFO_SIZE;
-
+	size_t total_size = nmemb * size + ALIGNED_METAINFO_SIZE;
 	ptr = real_calloc (1, total_size);
-	if (!ptr)
+	if (ptr)
 	  {
-	    calloc_in_hook = false;
-	    return nullptr;
+	    memmon_add_stat (ptr, total_size, caller_addr);
 	  }
-
-	memmon_add_stat (ptr, total_size, caller_addr);
       }
     else
       {
@@ -419,46 +431,41 @@ extern "C" {
 
   void *realloc (void *ptr, size_t size)
   {
-    void *new_ptr = nullptr;
-    uintptr_t caller_addr = 0;
-
     if (realloc_in_hook || disable_force)
       {
 	return real_realloc (ptr, size);
       }
 
     realloc_in_hook = true;
-
-    if (ptr == nullptr)
+    void *new_ptr = nullptr;
+    if (!ptr)
       {
 	realloc_in_hook = false;
 	return malloc (size);
       }
-
     if (size == 0)
       {
 	free (ptr);
 	realloc_in_hook = false;
 	return nullptr;
       }
+
+    uintptr_t caller_addr = 0;
+    if (memmon_get_initial_mem_call_addr (&caller_addr) != nullptr)
+      {
+	new_ptr = malloc (size);
+	if (new_ptr)
+	  {
+	    size_t old_sz = memmon_get_payload_size (ptr);
+	    size_t copy_sz = (old_sz < size ? old_sz : size);
+	    memcpy (new_ptr, ptr, copy_sz);
+	    free (ptr);
+	  }
+      }
     else
       {
-	if (memmon_get_initial_mem_call_addr (&caller_addr) != nullptr)
-	  {
-	    new_ptr = malloc (size);
-	    if (new_ptr != nullptr)
-	      {
-		size_t old_size = memmon_get_payload_size (ptr);
-		size_t copy_size = (old_size < size) ? old_size : size;
-		memcpy (new_ptr, ptr, copy_size);
-		free (ptr);
-	      }
-	  }
-	else
-	  {
-	    realloc_in_hook = false;
-	    return real_realloc (ptr, size);
-	  }
+	realloc_in_hook = false;
+	return real_realloc (ptr, size);
       }
 
     realloc_in_hook = false;
@@ -471,7 +478,6 @@ extern "C" {
       {
 	return;
       }
-
     if (free_in_hook || disable_force)
       {
 	real_free (ptr);
@@ -480,15 +486,12 @@ extern "C" {
 
     free_in_hook = true;
     memmon_sub_stat (ptr);
-
     real_free (ptr);
-    ptr = nullptr;
     free_in_hook = false;
   }
 }
 
-// -----------------------------
-// operator new / delete 후킹
+// operator new/delete 후킹
 void *operator new (std::size_t size)
 {
   void *ptr = malloc (size);
@@ -541,129 +544,11 @@ void operator delete[] (void *ptr, std::size_t) noexcept
     }
 }
 
-// --------------------------------------------------
-// Bigint 전용 할당 후킹: _Jv_Balloc
-extern "C" _Jv_Bigint *_Jv_Balloc (struct _Jv_reent *r, int k)
-{
-  using fn_t = _Jv_Bigint* (*) (struct _Jv_reent *, int);
-  static fn_t orig = nullptr;
-  if (!orig)
-    {
-      orig = (fn_t)dlsym (RTLD_NEXT, "_Jv_Balloc");
-    }
-
-  // ----------------------------------------
-  // freelist 배열이 아직 없거나 작으면 할당/확장
-  if (r->_freelist == nullptr)
-    {
-      // 첫 호출: (k+1)개의 슬롯을 0으로 초기화
-      r->_freelist = (_Jv_Bigint **)
-		     real_calloc (k + 1, sizeof (_Jv_Bigint *));
-      r->_max_k = k;
-    }
-  else if (r->_max_k < k)
-    {
-      // 더 큰 k 가 들어왔으면 배열 크기 확장
-      size_t old_count = r->_max_k + 1;
-      size_t new_count = k + 1;
-      auto tmp = (_Jv_Bigint **) real_realloc (
-			 r->_freelist,
-			 new_count * sizeof (_Jv_Bigint *)
-		 );
-      // 새로 늘어난 부분은 0으로 초기화
-      memset (tmp + old_count, 0, (new_count - old_count) * sizeof (_Jv_Bigint *));
-      r->_freelist = tmp;
-      r->_max_k = k;
-    }
-  // ----------------------------------------
-
-  // 재진입 또는 훅 비활성화 시 원본 호출
-  if (in_bhook)
-    {
-      return orig (r, k);
-    }
-  in_bhook = true;
-  bool prev_disable = disable_force;
-  disable_force = true;
-
-  // (1) 풀에 남은 블록이 있으면 꺼내서 반환
-  _Jv_Bigint *b = r->_freelist[k];
-  if (b)
-    {
-      r->_freelist[k] = b->_next;
-      disable_force = prev_disable;
-      in_bhook = false;
-      return b;
-    }
-
-  // (2) 풀에 없으면 새로 할당
-  size_t nwords   = size_t{1} << k;
-  size_t nbytes   = sizeof (_Jv_Bigint) + (nwords - 1) * sizeof (unsigned long);
-  size_t total_sz = nbytes + ALIGNED_METAINFO_SIZE;
-  void *raw = real_calloc (1, total_sz);
-  if (!raw)
-    {
-      disable_force = prev_disable;
-      in_bhook = false;
-      return nullptr;
-    }
-
-  // (3) 블록 내부 초기화
-  b = (_Jv_Bigint *)raw;
-  b->_k      = k;
-  b->_maxwds = int (nwords);
-  b->_sign   = 0;
-  b->_wds    = 0;
-  b->_next   = nullptr;  // 아직 풀에 none
-
-  // (4) 통계에 새 할당만 기록
-  uintptr_t caller = (uintptr_t)__builtin_return_address (0);
-  memmon_add_stat (raw, total_sz, caller);
-
-  disable_force = prev_disable;
-  in_bhook = false;
-  return b;
-}
-
-// --------------------------------------------------
-// Bigint 전용 해제 후킹: _Jv_Bfree
-extern "C" void _Jv_Bfree (struct _Jv_reent *r, _Jv_Bigint *b)
-{
-  using fn_t = void (*) (struct _Jv_reent *, _Jv_Bigint *);
-  static fn_t orig = nullptr;
-  if (!orig)
-    {
-      orig = (fn_t)dlsym (RTLD_NEXT, "_Jv_Bfree");
-    }
-
-  // 재진입 방지—풀 반납만 수행
-  if (!b || in_bhook)
-    {
-      orig (r, b);
-      return;
-    }
-  in_bhook       = true;
-  bool prev_disable = disable_force;
-  disable_force    = true;
-
-  // (중요) 여기서는 절대 memmon_sub_stat 을 호출하지 않습니다!
-  // 메모리가 실제 free 되는 시점은 free_Bigints → free() 훅에서 처리됩니다.
-
-  // 원본 풀 반납 로직
-  orig (r, b);
-
-  disable_force = prev_disable;
-  in_bhook      = false;
-}
-
-
-// memmon_trim_function_name: 경로 문자열에서 마지막에서 두 번째 '/'부터 시작하는 부분을 반환하고,
-//                    문자열 끝의 개행 문자('\n')도 제거한다.
-// 예) "/home/heexoo/workspace/cubrid/src/transaction/log_compress.c:206\n" → "/src/transaction/log_compress.c:206"
+// memmon_trim_function_name: 경로 문자열 가공
 static const char *memmon_trim_function_name (char *path)
 {
   size_t len = strlen (path);
-  if (len > 0 && path[len - 1] == '\n')
+  if (len && path[len - 1] == '\n')
     {
       path[len - 1] = '\0';
     }
@@ -675,9 +560,8 @@ static const char *memmon_trim_function_name (char *path)
     }
   else
     {
-      // 마지막 슬래시보다 앞쪽부터 역순으로 두 번째 슬래시를 찾음
       const char *second_last = nullptr;
-      for (const char *p = last_slash - 1; p >= path; p--)
+      for (const char *p = last_slash - 1; p >= path; --p)
 	{
 	  if (*p == '/')
 	    {
@@ -688,44 +572,39 @@ static const char *memmon_trim_function_name (char *path)
       last_slash = second_last ? second_last : path;
     }
 
-  // 마지막에서 두 번째 '/'부터 시작하는 부분에서 첫 번째 공백 찾기
-  char *result = (char *)last_slash;
-  char *space_ptr = strchr (result, ' ');
-  if (space_ptr)
+  char *res = (char *)last_slash;
+  char *sp = strchr (res, ' ');
+  if (sp)
     {
-      *space_ptr = '\0';
+      *sp = '\0';
     }
-
-  return result;
+  return res;
 }
-
-
 
 const char *memmon_resolve_function_name (const void *address, char *buffer)
 {
   FILE *output = nullptr;
   char cmd_line[BUFFER_SIZE] = {0};
-  const char *func_name_p = nullptr;
   const char *fixed_lib = "/home/heexoo/CUBRID/lib/libcubrid.so.11.4";
 
-  snprintf (cmd_line, sizeof (cmd_line), "addr2line -e %s %p 2> /dev/null", fixed_lib, address);
-
+  snprintf (cmd_line, sizeof (cmd_line),
+	    "addr2line -e %s %p 2> /dev/null",
+	    fixed_lib, address);
   output = popen (cmd_line, "r");
-  if (output == nullptr)
+  if (!output)
     {
       return nullptr;
     }
 
-  func_name_p = fgets (buffer, BUFFER_SIZE - 1, output);
+  const char *fn = fgets (buffer, BUFFER_SIZE - 1, output);
   pclose (output);
-
-  if (!func_name_p || !func_name_p[0])
+  if (!fn || !fn[0])
     {
       return nullptr;
     }
 
 #if (DEBUG_CALLSTACK)
-  if (strchr (buffer, '?') != nullptr)
+  if (strchr (buffer, '?'))
     {
       printf ("\nfile:line : %s\n", buffer);
       memmon_print_call_stack (reinterpret_cast<uintptr_t> (address));
@@ -735,28 +614,25 @@ const char *memmon_resolve_function_name (const void *address, char *buffer)
   return memmon_trim_function_name (buffer);
 }
 
-
-
-// -----------------------------
-// 파일명을 "memory_dump_YYYYMMDD_HHMMSS.txt" 형식으로 생성하여 파일을 여는 함수
+// memmon_open_dump_file: memory_dump_YYYYMMDD_HHMMSS.txt 생성
 FILE *memmon_open_dump_file (void)
 {
-  char filename[512] = {0};
-  char datetime[64] = {0};
-
+  char filename[512] = {0}, datetime[64] = {0};
   time_t now = time (nullptr);
   struct tm tm_now;
   localtime_r (&now, &tm_now);
-  strftime (datetime, sizeof (datetime), "memory_dump_%Y%m%d_%H%M%S.txt", &tm_now);
+  strftime (datetime, sizeof (datetime),
+	    "memory_dump_%Y%m%d_%H%M%S.txt", &tm_now);
 
   const char *dump_dir = getenv ("HOME");
-  if (dump_dir == NULL)
+  if (!dump_dir)
     {
-      dump_dir = "/home/heexoo";  // fallback
+      dump_dir = "/home/heexoo";
     }
 
-  // 전체 경로 생성: ~/CUBRID/databases/memdump/memory_dump_YYYYMMDD_HHMMSS.txt
-  snprintf (filename, sizeof (filename), "%s/CUBRID/databases/memdump/%s", dump_dir, datetime);
+  snprintf (filename, sizeof (filename),
+	    "%s/CUBRID/databases/memdump/%s",
+	    dump_dir, datetime);
 
   FILE *fp = fopen (filename, "w");
   if (!fp)
@@ -766,8 +642,6 @@ FILE *memmon_open_dump_file (void)
   return fp;
 }
 
-// -----------------------------
-// memmon_dump_memory_usage 함수를 C 방식으로 내보내기
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -777,17 +651,14 @@ int memmon_dump_memory_usage (void)
   int error = NO_ERROR;
   double ratio = 0;
   char buffer[BUFFER_SIZE] = {0};
-  size_t usage = 0;
-  size_t total_usage = 0;
+  size_t usage = 0, total_usage = 0;
   int count = 0;
-
   const char *func_name = nullptr;
   FILE *outfile_fp = nullptr;
 
   MemStatMap &map_ref = get_mem_stat_map();
   tbb::concurrent_unordered_map<std::string, size_t> func_usage;
 
-  // 각 항목마다 caller address를 함수 이름으로 해석 후 누적
   for (const auto &entry : map_ref)
     {
       memset (buffer, 0, sizeof (buffer));
@@ -795,8 +666,9 @@ int memmon_dump_memory_usage (void)
 	{
 	  continue;
 	}
-
-      func_name = memmon_resolve_function_name (reinterpret_cast<const void *> (entry.first), buffer);
+      func_name = memmon_resolve_function_name (
+			  reinterpret_cast<const void *> (entry.first),
+			  buffer);
       if (!func_name || !func_name[0])
 	{
 	  continue;
@@ -809,10 +681,9 @@ int memmon_dump_memory_usage (void)
       count++;
     }
 
-  // 결과를 벡터에 옮겨서 정렬
   std::vector<std::pair<std::string, size_t>> stats (func_usage.begin(), func_usage.end());
-  std::sort (stats.begin(), stats.end(), [] (const std::pair<std::string, size_t> &a,
-	     const std::pair<std::string, size_t> &b)
+  std::sort (stats.begin(), stats.end(),
+	     [] (auto &a, auto &b)
   {
     return a.second > b.second;
   });
@@ -824,22 +695,25 @@ int memmon_dump_memory_usage (void)
     }
 
   fprintf (outfile_fp, "==================== Memory Usage Dump ====================\n");
-  fprintf (outfile_fp, "Total Memory Usage: %lu Bytes (%lu MB)\n", total_usage, total_usage/1024/1024);
+  fprintf (outfile_fp, "Total Memory Usage: %lu Bytes (%lu MB)\n",
+	   total_usage, total_usage/1024/1024);
   fprintf (outfile_fp, "MetaInfo Size: %lu Bytes\n\n", count * ALIGNED_METAINFO_SIZE);
-  fprintf (outfile_fp, "%-60s | %-15s | %s\n", "Function Name", "Memory Usage", "Ratio (%)");
-  fprintf (outfile_fp, "---------------------------------------------------------------------\n");
+  fprintf (outfile_fp, "%-60s | %-15s | %s\n",
+	   "Function Name", "Memory Usage", "Ratio (%)");
+  fprintf (outfile_fp,
+	   "---------------------------------------------------------------------\n");
 
-  for (const auto &stat : stats)
+  for (auto &stat : stats)
     {
       ratio = CALC_RATIO (stat.second, total_usage);
-      fprintf (outfile_fp, "%-60s | %-15zu | %7.2f%%\n", stat.first.c_str(), stat.second, ratio);
+      fprintf (outfile_fp, "%-60s | %-15zu | %7.2f%%\n",
+	       stat.first.c_str(), stat.second, ratio);
     }
 
   fprintf (outfile_fp, "=====================================================================\n");
   fflush (outfile_fp);
   fclose (outfile_fp);
   printf ("Memory usage dump written to file.\n");
-
   return error;
 }
 
@@ -848,95 +722,6 @@ int memmon_disabled_force (void)
   disable_force = true;
   return NO_ERROR;
 }
-
-
-#if 0
-/*
- * memmon_dump_memstat_map - Dump the MemStatMap (caller address and memory usage)
- *                           to the client.
- *
- * Parameters:
- *   thread_p(in): THREAD_ENTRY 포인터 (현재 스레드 정보)
- *   rid(in): 클라이언트 요청 ID
- *
- * Return:
- *   NO_ERROR on success, or an error code.
- */
-int
-memmon_dump_memstat_map (THREAD_ENTRY *thread_p, unsigned int rid)
-{
-  int error = NO_ERROR;
-  int count = 0;
-  int size = 0;
-  char *buffer_a = NULL, *buffer, *ptr;
-  // 응답 헤더를 위한 정렬된 버퍼 (4바이트 + 4바이트)
-  OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
-  char *reply = OR_ALIGNED_BUF_START (a_reply);
-
-  // MemStatMap에서 아직 추적되고 있는 항목(값 > 0)을 카운트
-  MemStatMap &map_ref = get_mem_stat_map();
-  for (const auto &entry : map_ref)
-    {
-      if (entry.second > 0)
-	{
-	  count++;
-	}
-    }
-
-  /*
-   * 데이터 버퍼 구성:
-   *   헤더: 전체 데이터 크기 (4바이트) + 에러 코드 (4바이트)
-   *   각 항목: caller address (8바이트) + memory usage (8바이트)
-   */
-  size = OR_INT_SIZE + OR_INT_SIZE + count * (OR_INT64_SIZE + OR_INT64_SIZE);
-
-  // 응답 데이터 버퍼 할당
-  buffer_a = (char *) db_private_alloc (thread_p, size + MAX_ALIGNMENT);
-  if (buffer_a == NULL)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
-      error = ER_OUT_OF_VIRTUAL_MEMORY;
-      goto send_error;
-    }
-  buffer = PTR_ALIGN (buffer_a, MAX_ALIGNMENT);
-  ptr = buffer;
-
-  // 헤더 패킹: 전체 데이터 크기와 에러 코드(NO_ERROR)
-  ptr = or_pack_int (ptr, size);
-  ptr = or_pack_int (ptr, NO_ERROR);
-
-  // MemStatMap의 각 항목(값 > 0)에 대해, caller address와 memory usage를 패킹
-  for (const auto &entry : map_ref)
-    {
-      if (entry.second == 0)
-	{
-	  continue;
-	}
-      // 포인터를 uintptr_t로 변환한 뒤, 64비트 정수로 패킹
-      ptr = or_pack_int64 (ptr, (unsigned long long) entry.first);
-      ptr = or_pack_int64 (ptr, (unsigned long long) entry.second);
-    }
-  assert (size == (int) (ptr - buffer));
-
-  // 응답 헤더(reply)에도 전체 데이터 크기와 에러 코드를 패킹
-  ptr = or_pack_int (reply, size);
-  ptr = or_pack_int (ptr, NO_ERROR);
-  css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), buffer, size);
-
-  db_private_free_and_init (thread_p, buffer_a);
-  return NO_ERROR;
-
-send_error:
-  ptr = or_pack_int (reply, 0);
-  ptr = or_pack_int (ptr, error);
-  css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
-  if (buffer_a)
-    {
-      db_private_free_and_init (thread_p, buffer_a);
-    }
-  return error;
-}
-#endif //memmon_dump_memstat_map
 
 #ifdef __cplusplus
 }

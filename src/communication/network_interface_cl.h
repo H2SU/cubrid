@@ -462,6 +462,7 @@ EXPORT_IMPORT extern int pl_call (const cubpl::pl_signature & sig,
 				  std::vector < DB_VALUE > &out_args, DB_VALUE & result);
 
 /* memmon */
-extern int mmon_get_server_info (MMON_SERVER_INFO & server_info);
+// extern int mmon_get_server_info (MMON_SERVER_INFO & server_info);
 extern int mmon_disable_force ();
+extern int mmon_dump_memory_usage ();
 #endif /* _NETWORK_INTERFACE_CL_H_ */

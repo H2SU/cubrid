@@ -22,28 +22,28 @@
 
 #include "memory_monitor_cl.hpp"
 
-void mmon_print_server_info (MMON_SERVER_INFO &server_info, FILE *outfile_fp)
-{
-  double mem_usage_ratio = 0.0;
+// void mmon_print_server_info (MMON_SERVER_INFO &server_info, FILE *outfile_fp)
+// {
+//   double mem_usage_ratio = 0.0;
 
-  fprintf (outfile_fp, "====================cubrid memmon====================\n");
-  fprintf (outfile_fp, "Server Name: %s\n", server_info.server_name);
-  fprintf (outfile_fp, "Total Memory Usage: %lu Bytes (for meta info: %lu Bytes)\n",
-	   server_info.total_mem_usage, server_info.total_metainfo_mem_usage);
-  fprintf (outfile_fp, "-----------------------------------------------------\n");
+//   fprintf (outfile_fp, "====================cubrid memmon====================\n");
+//   fprintf (outfile_fp, "Server Name: %s\n", server_info.server_name);
+//   fprintf (outfile_fp, "Total Memory Usage: %lu Bytes (for meta info: %lu Bytes)\n",
+// 	   server_info.total_mem_usage, server_info.total_metainfo_mem_usage);
+//   fprintf (outfile_fp, "-----------------------------------------------------\n");
 
-  fprintf (outfile_fp, "\t%-100s | %17s(%s)\n", "File Name", "Memory Usage", "Ratio");
+//   fprintf (outfile_fp, "\t%-100s | %17s(%s)\n", "File Name", "Memory Usage", "Ratio");
 
-  if (server_info.total_mem_usage != 0)
-    {
-      for (const auto &stat : server_info.stat_info)
-	{
-	  mem_usage_ratio = stat.second / (double) server_info.total_mem_usage;
-	  mem_usage_ratio *= 100;
-	  fprintf (outfile_fp, "\t%-100s | %17lu Bytes(%3d%%)\n",stat.first.c_str (), stat.second,
-		   (int)mem_usage_ratio);
-	}
-    }
-  fprintf (outfile_fp, "-----------------------------------------------------\n");
-  fflush (outfile_fp);
-}
+//   if (server_info.total_mem_usage != 0)
+//     {
+//       for (const auto &stat : server_info.stat_info)
+// 	{
+// 	  mem_usage_ratio = stat.second / (double) server_info.total_mem_usage;
+// 	  mem_usage_ratio *= 100;
+// 	  fprintf (outfile_fp, "\t%-100s | %17lu Bytes(%3d%%)\n",stat.first.c_str (), stat.second,
+// 		   (int)mem_usage_ratio);
+// 	}
+//     }
+//   fprintf (outfile_fp, "-----------------------------------------------------\n");
+//   fflush (outfile_fp);
+// }
