@@ -12811,8 +12811,8 @@ cdc_get_attribute_size (DB_VALUE * value)
 	    }
 	}
       break;
-    case DB_TYPE_BLOB:
-    case DB_TYPE_CLOB:
+    case DB_TYPE_BFILE:
+    case DB_TYPE_CFILE:
       {
 	DB_ELO *elo;
 	elo = db_get_elo (value);
@@ -14020,8 +14020,8 @@ cdc_put_value_to_loginfo (db_value * new_value, char **data_ptr)
 	    }
 	}
       break;
-    case DB_TYPE_BLOB:
-    case DB_TYPE_CLOB:
+    case DB_TYPE_BFILE:
+    case DB_TYPE_CFILE:
       {
 	DB_ELO *elo;
 	func_type = 7;

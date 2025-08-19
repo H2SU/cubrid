@@ -128,7 +128,7 @@ extern int net_buf_cp_float (T_NET_BUF * net_buf, float value);
 extern int net_buf_cp_double (T_NET_BUF * net_buf, double value);
 extern int net_buf_cp_short (T_NET_BUF * net_buf, short value);
 extern int net_buf_cp_object (T_NET_BUF * net_buf, T_OBJECT * oid);
-extern int net_buf_cp_lob_handle (T_NET_BUF * net_buf, T_LOB_HANDLE * lob);
+extern int net_buf_cp_lobfile_handle (T_NET_BUF * net_buf, T_LOB_HANDLE * lobfile);
 
 extern void net_buf_error_msg_set (T_NET_BUF * net_buf, int errindicator, int errcode, char *errstr, const char *file,
 				   int line);

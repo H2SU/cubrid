@@ -122,7 +122,7 @@
 #define BOOT_CHECK_HA_DELAY_CAP         NET_CAP_HA_REPL_DELAY
 
 static BOOT_SERVER_CREDENTIAL boot_Server_credential = {
-  /* db_full_name */ NULL, /* host_name */ NULL, /* lob_path */ NULL,
+  /* db_full_name */ NULL, /* host_name */ NULL, /* lobfile_path */ NULL,
   /* process_id */ -1,
   /* root_class_oid */ {NULL_PAGEID, NULL_SLOTID, NULL_VOLID},
   /* root_class_hfid */ {{NULL_FILEID, NULL_VOLID}, NULL_PAGEID},
@@ -405,28 +405,28 @@ boot_check_and_fill_db_path_info (BOOT_CLIENT_CREDENTIAL * client_credential, BO
       strcpy (boot_Log_path_buf, db_path_info->db_path);
       db_path_info->log_path = boot_Log_path_buf;
     }
-  if (db_path_info->lob_path == NULL)
+  if (db_path_info->lobfile_path == NULL)
     {
       /* assign the data volume directory */
-      snprintf (boot_Lob_path_buf, sizeof (boot_Lob_path_buf), "%s%s%clob", LOB_PATH_DEFAULT_PREFIX,
+      snprintf (boot_Lob_path_buf, sizeof (boot_Lob_path_buf), "%s%s%clobfile", LOBFILE_PATH_DEFAULT_PREFIX,
 		db_path_info->db_path, PATH_SEPARATOR);
-      db_path_info->lob_path = boot_Lob_path_buf;
+      db_path_info->lobfile_path = boot_Lob_path_buf;
     }
   else
     {
-      ES_TYPE es_type = es_get_type (db_path_info->lob_path);
+      ES_TYPE es_type = es_get_type (db_path_info->lobfile_path);
 
       switch (es_type)
 	{
 	case ES_NONE:
 	  /* prepend default prefix */
-	  snprintf (boot_Lob_path_buf, sizeof (boot_Lob_path_buf), "%s%s", LOB_PATH_DEFAULT_PREFIX,
-		    db_path_info->lob_path);
-	  db_path_info->lob_path = boot_Lob_path_buf;
+	  snprintf (boot_Lob_path_buf, sizeof (boot_Lob_path_buf), "%s%s", LOBFILE_PATH_DEFAULT_PREFIX,
+		    db_path_info->lobfile_path);
+	  db_path_info->lobfile_path = boot_Lob_path_buf;
 	  break;
 #if !defined (CUBRID_OWFS)
 	case ES_OWFS:
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_INVALID_PATH, 1, db_path_info->lob_path);
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_INVALID_PATH, 1, db_path_info->lobfile_path);
 	  return ER_ES_INVALID_PATH;
 #endif /* !CUBRID_OWFS */
 	default:
@@ -551,7 +551,7 @@ boot_build_db_info (BOOT_CLIENT_CREDENTIAL * client_credential, BOOT_DB_PATH_INF
       hosts[1] = NULL;
       db =
 	cfg_new_db (client_credential->get_db_name (), db_path_info->db_path, db_path_info->log_path,
-		    db_path_info->lob_path, hosts);
+		    db_path_info->lobfile_path, hosts);
     }
   else
     {
@@ -1306,9 +1306,9 @@ boot_restart_client (BOOT_CLIENT_CREDENTIAL * client_credential)
   tr_init ();			/* initialize trigger manager */
 
   /* TODO: how about to call es_init() only for normal client? */
-  if (boot_Server_credential.lob_path[0] != '\0')
+  if (boot_Server_credential.lobfile_path[0] != '\0')
     {
-      error_code = es_init (boot_Server_credential.lob_path);
+      error_code = es_init (boot_Server_credential.lobfile_path);
       if (error_code != NO_ERROR)
 	{
 	  goto error;
@@ -1316,7 +1316,7 @@ boot_restart_client (BOOT_CLIENT_CREDENTIAL * client_credential)
     }
   else
     {
-      er_set (ER_WARNING_SEVERITY, ARG_FILE_LINE, ER_ES_NO_LOB_PATH, 0);
+      er_set (ER_WARNING_SEVERITY, ARG_FILE_LINE, ER_ES_NO_LOBFILE_PATH, 0);
     }
   /* Does not care if was committed/aborted .. */
   (void) tran_commit (false);
@@ -1534,9 +1534,9 @@ boot_client_all_finalize (int final_level)
 	{
 	  db_private_free_and_init (NULL, boot_Server_credential.host_name);
 	}
-      if (boot_Server_credential.lob_path)
+      if (boot_Server_credential.lobfile_path)
 	{
-	  db_private_free_and_init (NULL, boot_Server_credential.lob_path);
+	  db_private_free_and_init (NULL, boot_Server_credential.lobfile_path);
 	}
       if (boot_Server_credential.db_lang)
 	{
@@ -2009,12 +2009,12 @@ boot_get_ha_server_state (void)
 #endif /* ENABLE_UNUSED_FUNCTION */
 
 /*
- * boot_get_lob_path - return the lob path which is received from the server
+ * boot_get_lobfile_path - return the lobfile path which is received from the server
  */
 const char *
-boot_get_lob_path (void)
+boot_get_lobfile_path (void)
 {
-  return boot_Server_credential.lob_path;
+  return boot_Server_credential.lobfile_path;
 }
 #endif /* CS_MODE */
 
