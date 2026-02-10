@@ -145,6 +145,8 @@ static const DB_TYPE db_type_rank[] = { DB_TYPE_NULL,
   DB_TYPE_ELO,
   DB_TYPE_BFILE,
   DB_TYPE_CFILE,
+  DB_TYPE_BLOB,
+  DB_TYPE_CLOB,
   DB_TYPE_VARIABLE,
   DB_TYPE_SUB,
   DB_TYPE_POINTER,
@@ -275,6 +277,17 @@ TP_DOMAIN tp_Midxkey_domain_list_heads[TP_NUM_MIDXKEY_DOMAIN_LIST] = {
 TP_DOMAIN tp_Elo_domain = { NULL, NULL, &tp_Elo, DOMAIN_INIT };	/* todo: remove me */
 TP_DOMAIN tp_Bfile_domain = { NULL, NULL, &tp_Bfile, DOMAIN_INIT };
 TP_DOMAIN tp_Cfile_domain = { NULL, NULL, &tp_Cfile, DOMAIN_INIT };
+
+// TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+TP_DOMAIN tp_Blob_domain = { NULL, NULL, &tp_Blob, DB_MAX_LOB_PRECISION, 0,
+  DOMAIN_INIT2 (INTL_CODESET_RAW_BITS, 0)
+};
+
+// TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+TP_DOMAIN tp_Clob_domain = { NULL, NULL, &tp_Clob, DB_MAX_LOB_PRECISION, 0,
+  DOMAIN_INIT2 (INTL_CODESET_ISO88591, LANG_COLL_ISO_BINARY)
+};
+
 TP_DOMAIN tp_Time_domain = { NULL, NULL, &tp_Time, DOMAIN_INIT4 (DB_TIME_PRECISION, 0) };
 TP_DOMAIN tp_Utime_domain = { NULL, NULL, &tp_Utime, DOMAIN_INIT4 (DB_TIMESTAMP_PRECISION, 0) };
 TP_DOMAIN tp_Timestamptz_domain = { NULL, NULL, &tp_Timestamptz, DOMAIN_INIT4 (DB_TIMESTAMPTZ_PRECISION, 0) };
@@ -375,6 +388,8 @@ static TP_DOMAIN *tp_Domains[] = {
    * added. */
   &tp_Bfile_domain,
   &tp_Cfile_domain,
+  &tp_Blob_domain,
+  &tp_Clob_domain,
   &tp_Enumeration_domain,
   &tp_Timestamptz_domain,
   &tp_Timestampltz_domain,
@@ -495,6 +510,10 @@ static TP_DOMAIN *tp_Sequence_conv[] = {
   &tp_Sequence_domain, &tp_Multiset_domain, NULL
 };
 
+static TP_DOMAIN *tp_Lob_conv[] = {
+  &tp_Blob_domain, &tp_Clob_domain, NULL
+};
+
 /*
  * tp_Domain_conversion_matrix
  *    This is the matrix of conversion rules.  It is used primarily
@@ -544,6 +563,8 @@ TP_DOMAIN **tp_Domain_conversion_matrix[] = {
   NULL,				/* DB_TYPE_DATETIME */
   NULL,				/* DB_TYPE_BFILE */
   NULL,				/* DB_TYPE_CFILE */
+  tp_Lob_conv,			/* DB_TYPE_BLOB */
+  tp_Lob_conv,			/* DB_TYPE_CLOB */
   NULL,				/* DB_TYPE_ENUMERATION */
   NULL,				/* DB_TYPE_TIMESTAMPTZ */
   NULL,				/* DB_TYPE_TIMESTAMPLTZ */
@@ -727,6 +748,7 @@ tp_apply_sys_charset (void)
 
   tp_Enumeration_domain.codeset = LANG_SYS_CODESET;
   tp_Enumeration_domain.collation_id = LANG_SYS_COLLATION;
+  tp_Clob_domain.collation_id = LANG_SYS_COLLATION;
 }
 
 /*
@@ -1042,10 +1064,16 @@ tp_domain_init (TP_DOMAIN * domain, DB_TYPE type_id)
 	  domain->enumeration.collation_id = LANG_SYS_COLLATION;
 	}
     }
-  else if (TP_IS_BIT_TYPE (type_id))
+  // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+  else if (TP_IS_BIT_TYPE (type_id) || type_id == DB_TYPE_BLOB)
     {
       domain->codeset = INTL_CODESET_RAW_BITS;
       domain->collation_id = 0;
+    }
+  else if (type_id == DB_TYPE_CLOB)
+    {
+      domain->codeset = LANG_SYS_CODESET;
+      domain->collation_id = LANG_SYS_COLLATION;
     }
   else
     {
@@ -2644,7 +2672,7 @@ tp_domain_find_charbit (DB_TYPE type, int codeset, int collation_id, unsigned ch
 	  /* we MUST perform exact matches here */
 	  if (dom->precision == precision && dom->is_desc == is_desc)
 	    {
-	      if (type == DB_TYPE_VARBIT)
+	      if (type == DB_TYPE_VARBIT || type == DB_TYPE_BLOB)
 		{
 		  break;	/* found */
 		}
@@ -3302,6 +3330,50 @@ tp_domain_resolve_value (const DB_VALUE * val, TP_DOMAIN * dbuf)
 	      domain = tp_domain_cache (domain);
 	    }
 	  break;
+
+	case DB_TYPE_BLOB:
+	case DB_TYPE_CLOB:
+	  // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+	  if (dbuf == NULL)
+	    {
+	      domain = tp_domain_new (value_type);
+	      if (domain == NULL)
+		{
+		  return NULL;
+		}
+	    }
+	  else
+	    {
+	      domain = dbuf;
+	      tp_domain_init (domain, value_type);
+	    }
+	  domain->codeset = db_get_string_codeset (val);
+	  domain->collation_id = db_get_string_collation (val);
+	  domain->precision = db_value_precision (val);
+
+	  if (TP_DOMAIN_TYPE (domain) == DB_TYPE_CLOB)
+	    {
+	      if (domain->precision == 0 || domain->precision == TP_FLOATING_PRECISION_VALUE
+		  || domain->precision > DB_MAX_LOB_PRECISION)
+		{
+		  domain->precision = DB_MAX_LOB_PRECISION;
+		}
+	    }
+	  else if (TP_DOMAIN_TYPE (domain) == DB_TYPE_BLOB)
+	    {
+	      if (domain->precision == 0 || domain->precision == TP_FLOATING_PRECISION_VALUE
+		  || domain->precision > DB_MAX_LOB_PRECISION)
+		{
+		  domain->precision = DB_MAX_LOB_PRECISION;
+		}
+	    }
+
+	  if (dbuf == NULL)
+	    {
+	      domain = tp_domain_cache (domain);
+	    }
+	  break;
+
 	case DB_TYPE_ENUMERATION:
 	  /*
 	   * We have no choice but to return the default enumeration domain
@@ -3528,6 +3600,8 @@ tp_domain_add (TP_DOMAIN ** dlist, TP_DOMAIN * domain)
 	    case DB_TYPE_DOUBLE:
 	    case DB_TYPE_BFILE:
 	    case DB_TYPE_CFILE:
+	    case DB_TYPE_BLOB:
+	    case DB_TYPE_CLOB:
 	    case DB_TYPE_TIME:
 	    case DB_TYPE_TIMESTAMP:
 	    case DB_TYPE_TIMESTAMPTZ:
@@ -3670,6 +3744,8 @@ tp_domain_drop (TP_DOMAIN ** dlist, TP_DOMAIN * domain)
 	    case DB_TYPE_DOUBLE:
 	    case DB_TYPE_BFILE:
 	    case DB_TYPE_CFILE:
+	    case DB_TYPE_BLOB:
+	    case DB_TYPE_CLOB:
 	    case DB_TYPE_TIME:
 	    case DB_TYPE_TIMESTAMP:
 	    case DB_TYPE_TIMESTAMPLTZ:
@@ -5670,7 +5746,7 @@ tp_value_string_to_double (const DB_VALUE * value, DB_VALUE * result)
   int ret;
   DB_TYPE type = DB_VALUE_TYPE (value);
 
-  if (!TP_IS_CHAR_STRING (type))
+  if (!(TP_IS_CHAR_TYPE (type) || TP_IS_LOB_TYPE (type)))
     {
       db_make_double (result, 0);
       return ER_FAILED;
@@ -7087,6 +7163,7 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 	case DB_JSON_BOOL:
 	  switch (desired_type)
 	    {
+	    case DB_TYPE_CLOB:
 	    case DB_TYPE_CHAR:
 	    case DB_TYPE_VARCHAR:
 	      db_make_string (&src_replacement, db_json_get_bool_as_str_from_document (src_doc));
@@ -7117,7 +7194,8 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 	  src = &src_replacement;
 	}
     }
-  else if (original_type == DB_TYPE_MIDXKEY && (desired_type == DB_TYPE_CHAR || desired_type == DB_TYPE_VARCHAR))
+  else if (original_type == DB_TYPE_MIDXKEY
+	   && (desired_type == DB_TYPE_CHAR || desired_type == DB_TYPE_VARCHAR || desired_type == DB_TYPE_CLOB))
     {
       string_buffer sb;
 
@@ -7240,11 +7318,11 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
    */
   db_value_domain_init (target, desired_type, desired_domain->precision, desired_domain->scale);
 
-  if (TP_IS_CHAR_TYPE (desired_type))
+  if (TP_IS_CHAR_TYPE (desired_type) || desired_type == DB_TYPE_CLOB)
     {
       if (desired_domain->collation_flag == TP_DOMAIN_COLL_ENFORCE)
 	{
-	  if (TP_IS_CHAR_TYPE (original_type))
+	  if (TP_IS_CHAR_TYPE (original_type) || desired_type == DB_TYPE_CLOB)
 	    {
 	      db_string_put_cs_and_collation (target, TP_DOMAIN_CODESET (desired_domain),
 					      TP_DOMAIN_COLLATION (desired_domain));
@@ -7279,7 +7357,7 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 		  new_elem_dom = tp_domain_copy (elem_dom, false);
 		  elem_dom->next = save_elem_dom_next;
 
-		  if (TP_IS_CHAR_TYPE (TP_DOMAIN_TYPE (elem_dom)))
+		  if (TP_IS_CHAR_TYPE (TP_DOMAIN_TYPE (elem_dom)) || TP_DOMAIN_TYPE (elem_dom) == DB_TYPE_CLOB)
 		    {
 		      /* for string domains overwrite collation */
 		      new_elem_dom->collation_id = TP_DOMAIN_COLLATION (desired_domain);
@@ -9074,10 +9152,78 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 	}
       break;
 
+    case DB_TYPE_BLOB:
+      switch (original_type)
+	{
+	case DB_TYPE_BLOB:
+	  err = db_value_clone ((DB_VALUE *) src, target);
+	  break;
+	case DB_TYPE_BIT:
+	case DB_TYPE_VARBIT:
+	  err = db_bit_to_blob (src, target);
+	  break;
+	case DB_TYPE_CHAR:
+	case DB_TYPE_VARCHAR:
+	case DB_TYPE_NCHAR:
+	case DB_TYPE_VARNCHAR:
+	  err = db_char_to_blob (src, target);
+	  break;
+	case DB_TYPE_CLOB:
+	  // TODO: update when storage structure is improved.
+	  err = db_char_to_blob (src, target);
+	  break;
+	case DB_TYPE_ENUMERATION:
+	  {
+	    DB_VALUE varchar_val;
+
+	    if (tp_enumeration_to_varchar (src, &varchar_val) != NO_ERROR)
+	      {
+		status = DOMAIN_ERROR;
+		break;
+	      }
+	    status =
+	      tp_value_cast_internal (&varchar_val, target, desired_domain, coercion_mode, do_domain_select, false);
+	  }
+	  break;
+	default:
+	  status = DOMAIN_INCOMPATIBLE;
+	  break;
+	}
+      break;
+
+    case DB_TYPE_CLOB:
+      switch (original_type)
+	{
+	case DB_TYPE_CLOB:
+	  err = db_value_clone ((DB_VALUE *) src, target);
+	  break;
+	case DB_TYPE_CHAR:
+	case DB_TYPE_VARCHAR:
+	  err = db_char_to_clob (src, target);
+	  break;
+	case DB_TYPE_ENUMERATION:
+	  {
+	    DB_VALUE varchar_val;
+	    if (tp_enumeration_to_varchar (src, &varchar_val) != NO_ERROR)
+	      {
+		status = DOMAIN_ERROR;
+		break;
+	      }
+	    status =
+	      tp_value_cast_internal (&varchar_val, target, desired_domain, coercion_mode, do_domain_select, false);
+	    break;
+	  }
+	default:
+	  status = DOMAIN_INCOMPATIBLE;
+	  break;
+	}
+      break;
+
     case DB_TYPE_BIT:
     case DB_TYPE_VARBIT:
       switch (original_type)
 	{
+	case DB_TYPE_CLOB:
 	case DB_TYPE_VARCHAR:
 	case DB_TYPE_CHAR:
 	  {
@@ -9123,7 +9269,21 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 	      }
 	  }
 	  break;
+	case DB_TYPE_BLOB:
+	  {
+	    DB_VALUE tmpval;
 
+	    db_make_null (&tmpval);
+
+	    err = db_blob_to_bit (src, NULL, &tmpval);
+	    if (err == NO_ERROR)
+	      {
+		err = tp_value_cast_internal (&tmpval, target, desired_domain, coercion_mode, do_domain_select, false);
+	      }
+
+	    (void) pr_clear_value (&tmpval);
+	  }
+	  break;
 	case DB_TYPE_ENUMERATION:
 	  {
 	    DB_VALUE varchar_val;
@@ -9474,6 +9634,8 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 
 	case DB_TYPE_BIT:
 	case DB_TYPE_VARBIT:
+	case DB_TYPE_BLOB:
+	  // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
 	  {
 	    int max_size;
 	    char *new_string;
@@ -9534,7 +9696,30 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 	    pr_clear_value (&tmpval);
 	  }
 	  break;
+	case DB_TYPE_CLOB:
+	  switch (desired_type)
+	    {
+	    case DB_TYPE_CHAR:
+	    case DB_TYPE_VARCHAR:
+	      {
+		DB_VALUE cs;
 
+		/* convert directly from CLOB into charset of desired domain string */
+		db_make_int (&cs, desired_domain->codeset);
+		err = db_clob_to_char (src, &cs, target);
+		if (err == NO_ERROR)
+		  {
+		    err = tp_value_cast_internal (target, dest, desired_domain, coercion_mode, do_domain_select, false);
+		  }
+
+		status = (err == NO_ERROR) ? DOMAIN_COMPATIBLE : DOMAIN_INCOMPATIBLE;
+	      }
+	      break;
+	    default:
+	      status = DOMAIN_INCOMPATIBLE;
+	      break;
+	    }
+	  break;
 	case DB_TYPE_JSON:
 	  {
 	    char *json_str;
@@ -9576,6 +9761,14 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 	case DB_TYPE_VARCHAR:
 	  err = db_char_to_blob (src, target);
 	  break;
+	case DB_TYPE_BLOB:
+	  // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+	  err = db_bit_to_bfile (src, target);
+	  break;
+	case DB_TYPE_CLOB:
+	  // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+	  err = db_char_to_bfile (src, target);
+	  break;
 	case DB_TYPE_ENUMERATION:
 	  {
 	    DB_VALUE varchar_val;
@@ -9603,6 +9796,10 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 	  break;
 	case DB_TYPE_CHAR:
 	case DB_TYPE_VARCHAR:
+	  err = db_char_to_cfile (src, target);
+	  break;
+	case DB_TYPE_CLOB:
+	  // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
 	  err = db_char_to_cfile (src, target);
 	  break;
 	case DB_TYPE_ENUMERATION:
@@ -9719,6 +9916,8 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 		val_idx = (unsigned short) floor (v_money->amount);
 	      }
 	    break;
+	  case DB_TYPE_BLOB:
+	    // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
 	  case DB_TYPE_TIMESTAMP:
 	  case DB_TYPE_TIMESTAMPLTZ:
 	  case DB_TYPE_TIMESTAMPTZ:
@@ -9742,6 +9941,8 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 		}
 	    }
 	    break;
+	  case DB_TYPE_CLOB:
+	    // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
 	  case DB_TYPE_CHAR:
 	  case DB_TYPE_VARCHAR:
 	    if (db_get_string_codeset (src) != TP_DOMAIN_CODESET (desired_domain))
@@ -11035,6 +11236,8 @@ tp_check_value_size (TP_DOMAIN * domain, DB_VALUE * value)
 
 	case DB_TYPE_VARCHAR:
 	case DB_TYPE_VARBIT:
+	case DB_TYPE_BLOB:
+	case DB_TYPE_CLOB:
 	  /*
 	   * The compatibility of the value is always determined by the
 	   * actual length of the value, not the destination precision.

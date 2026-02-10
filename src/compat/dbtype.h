@@ -81,10 +81,12 @@
 #define DB_NEED_CLEAR(v) \
       ((!DB_IS_NULL(v) \
 	&& ((v)->need_clear == true \
-	    || (TP_IS_CHAR_TYPE(DB_VALUE_DOMAIN_TYPE(v)) && (v)->data.ch.info.compressed_need_clear != 0))))
+	    || ((TP_IS_CHAR_TYPE(DB_VALUE_DOMAIN_TYPE(v)) || DB_VALUE_DOMAIN_TYPE(v) == DB_TYPE_CLOB) \
+		&& (v)->data.ch.info.compressed_need_clear != 0))))
 
 #define DB_GET_COMPRESSED_STRING(v) \
-      (!TP_IS_CHAR_TYPE(DB_VALUE_DOMAIN_TYPE(v)) ? NULL : (v)->data.ch.medium.compressed_buf)
+      ((!TP_IS_CHAR_TYPE(DB_VALUE_DOMAIN_TYPE(v)) && DB_VALUE_DOMAIN_TYPE(v) != DB_TYPE_CLOB) \
+	? NULL : (v)->data.ch.medium.compressed_buf)
 
 #define DB_GET_ENUMERATION(v) \
       ((v)->data.enumeration)
