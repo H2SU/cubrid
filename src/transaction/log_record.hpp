@@ -137,6 +137,8 @@ enum log_rectype
 				 * it contains transaction user info, DDL statement, undo lsa, redo lsa for DML,
 				 * or undo images that never retrieved from the log. */
 
+  LOG_DUMMY_OOS_RECORD = 53,	/* boundary marker indicating the start of a multi-chunk OOS record */
+
   LOG_LARGER_LOGREC_TYPE	/* A higher bound for checks */
 };
 typedef enum log_rectype LOG_RECTYPE;
