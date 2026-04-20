@@ -2209,7 +2209,10 @@ log_append_undoredo_crumbs (THREAD_ENTRY * thread_p, LOG_RCVINDEX rcvindex, LOG_
 	}
       else if (rcvindex == RVOOS_INSERT)
 	{
-	  tdes->oos_insert_lsa_queue.push (tdes->tail_lsa);
+	  if (!tdes->suppress_oos_insert_lsa_push)
+	    {
+	      tdes->oos_insert_lsa_queue.push (tdes->tail_lsa);
+	    }
 	}
     }
 }
@@ -2477,7 +2480,10 @@ log_append_redo_crumbs (THREAD_ENTRY * thread_p, LOG_RCVINDEX rcvindex, LOG_DATA
 	}
       else if (rcvindex == RVOOS_INSERT)
 	{
-	  tdes->oos_insert_lsa_queue.push (tdes->tail_lsa);
+	  if (!tdes->suppress_oos_insert_lsa_push)
+	    {
+	      tdes->oos_insert_lsa_queue.push (tdes->tail_lsa);
+	    }
 	  assert (tdes->is_active_worker_transaction ());
 	}
     }

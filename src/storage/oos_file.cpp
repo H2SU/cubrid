@@ -21,14 +21,17 @@
 #include "error_code.h"
 #include "error_manager.h"
 #include "file_manager.h"
+#include "log_impl.h"
 #include "log_manager.h"
 #include "memory_alloc.h"
 #include "memory_hash.h"
+#include "oid.h"
 #include "page_buffer.h"
 #include "porting_inline.hpp"
 #include "scope_exit.hpp"
 #include "slotted_page.h"
 #include "page_buffer_util.hpp"
+#include "thread_entry.hpp"
 #include "xserver_interface.h"
 
 #include "oos_file.hpp"
@@ -1111,11 +1114,50 @@ oos_insert_across_pages (THREAD_ENTRY *thread_p, const VFID &oos_vfid, RECDES &r
 
   const int total_size = recdes.length;
 
+  // For replication, emit a boundary dummy log (LOG_DUMMY_OOS_RECORD) before the chunks
+  // so the slave can distinguish a multi-chunk OOS record from a series of independent
+  // single-chunk OOS inserts. The dummy's LSA is pushed to the tdes OOS LSA queue and a
+  // NULL OID is pushed to thread_p->oos_oids so that the 1:1 mapping between
+  // {OID vector entry} and {queue entry} is preserved. Intermediate chunk RVOOS_INSERT
+  // auto-pushes are suppressed via tdes->suppress_oos_insert_lsa_push; only chunk 0
+  // (the head, inserted last) leaves its LSA in the queue.
+  const bool emit_repl_boundary = !LOG_CHECK_LOG_APPLIER (thread_p) && log_does_allow_replication ();
+  LOG_TDES *tdes = NULL;
+  if (emit_repl_boundary)
+    {
+      const int tran_index = LOG_FIND_THREAD_TRAN_INDEX (thread_p);
+      tdes = LOG_FIND_TDES (tran_index);
+      if (tdes == NULL)
+	{
+	  er_set (ER_FATAL_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_UNKNOWN_TRANINDEX, 1, tran_index);
+	  return ER_LOG_UNKNOWN_TRANINDEX;
+	}
+
+      log_append_empty_record (thread_p, LOG_DUMMY_OOS_RECORD, NULL);
+      tdes->oos_insert_lsa_queue.push (tdes->tail_lsa);
+      thread_p->oos_oids.push_back (oid_Null_oid);
+
+      tdes->suppress_oos_insert_lsa_push = true;
+    }
+  scope_exit reset_suppress ([&]()
+  {
+    if (tdes != NULL)
+      {
+	tdes->suppress_oos_insert_lsa_push = false;
+      }
+  });
+
   int total_inserted_size = 0;
   OID next_chunk_oid = OID_INITIALIZER; // the last chunk has null OID as next_chunk_oid
   // this loop inserts chunks in reverse order so that next_chunk_oid is always known
   for (int i = required_page_nums - 1; i >= 0; --i)
     {
+      // Allow the final (head) chunk's RVOOS_INSERT LSA to be pushed to the queue
+      // so that the repl log can target it as the reassembly anchor.
+      if (emit_repl_boundary && i == 0)
+	{
+	  tdes->suppress_oos_insert_lsa_push = false;
+	}
 
       RECDES chunk_recdes{};
       chunk_recdes.type = REC_HOME;
