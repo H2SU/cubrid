@@ -61,6 +61,7 @@
 #include "memory_hash.h"
 #include "schema_manager.h"
 #include "log_applier_sql_log.h"
+#include "oos_file.hpp"
 #include "util_func.h"
 #include "dbtype.h"
 #ifdef UNSTABLE_TDE_FOR_REPLICATION_LOG
@@ -340,6 +341,10 @@ struct la_info
 
   int num_unflushed;
 
+  /* Set to true after a dummy LOG_DUMMY_OOS_RECORD repl entry is observed, meaning the
+   * next RVREPL_OOS_INSERT item must be reassembled from multiple logged chunks. */
+  bool oos_multi_chunk_pending;
+
   /* file lock */
   int log_path_lockf_vdes;
   int db_lockf_vdes;
@@ -510,6 +515,8 @@ static int la_get_undoredo_diff (LOG_PAGE ** pgptr, LOG_PAGEID * pageid, PGLENGT
 static int la_get_log_data (LOG_RECORD_HEADER * lrec, LOG_LSA * lsa, LOG_PAGE * pgptr, unsigned int match_rcvindex,
 			    unsigned int *rcvindex, void **logs, char **rec_type, char **data, int *d_length);
 static int la_get_overflow_recdes (LOG_RECORD_HEADER * lrec, void *logs, RECDES * recdes, unsigned int rcvindex);
+static int la_get_oos_multi_chunk_recdes (LOG_LSA * head_lsa, LOG_PAGE * head_pgptr, LOG_RECORD_HEADER * head_lrec,
+					  RECDES * recdes);
 static int la_get_next_update_log (LOG_RECORD_HEADER * prev_lrec, LOG_PAGE * pgptr, void **logs, char **rec_type,
 				   char **data, int *d_length);
 static int la_get_relocation_recdes (LOG_RECORD_HEADER * lrec, LOG_PAGE * pgptr, unsigned int match_rcvindex,
@@ -4376,6 +4383,179 @@ la_get_overflow_recdes (LOG_RECORD_HEADER * log_record, void *logs, RECDES * rec
 }
 
 /*
+ * la_get_oos_multi_chunk_recdes() - reassemble a multi-chunk OOS record from its
+ *   RVOOS_INSERT log entries on the slave side.
+ *
+ *   return: NO_ERROR or error code
+ *   head_lsa(in): LSA of the head (chunk 0) RVOOS_INSERT record, which is the most
+ *                 recently logged chunk (chunks are logged N-1..0 so walk back gives
+ *                 0, 1, ..., N-1).
+ *   head_pgptr(in): log page containing head_lsa
+ *   recdes(out): reassembled record data (header-stripped bodies concatenated)
+ *
+ * Note:
+ *   Each logged chunk's redo data is OOS_RECORD_HEADER + chunk_body. This function
+ *   strips the OOS_RECORD_HEADER from each chunk and concatenates the bodies in
+ *   natural order (body_0 | body_1 | ... | body_{N-1}). Walk back terminates at
+ *   LOG_DUMMY_OOS_RECORD (the boundary marker emitted by the master).
+ */
+static int
+la_get_oos_multi_chunk_recdes (LOG_LSA * head_lsa, LOG_PAGE * head_pgptr, LOG_RECORD_HEADER * head_lrec,
+			       RECDES * recdes)
+{
+  LA_OVF_PAGE_LIST *chunk_list_head = NULL;
+  LA_OVF_PAGE_LIST *chunk_list_tail = NULL;
+  LA_OVF_PAGE_LIST *chunk_entry = NULL;
+  LOG_LSA current_lsa;
+  LOG_PAGE *current_log_page;
+  LOG_RECORD_HEADER *current_log_record;
+  unsigned int rcvindex = 0;
+  void *logs = NULL;
+  int total_body_len = 0;
+  int error = NO_ERROR;
+
+  auto free_chunk_list = [&chunk_list_head]()
+  {
+    while (chunk_list_head != NULL)
+      {
+	LA_OVF_PAGE_LIST *tmp = chunk_list_head;
+	chunk_list_head = chunk_list_head->next;
+	if (tmp->data != NULL)
+	  {
+	    free_and_init (tmp->data);
+	  }
+	free_and_init (tmp);
+      }
+  };
+
+  auto append_chunk = [&](char *data, int length) -> int
+  {
+    LA_OVF_PAGE_LIST *entry = (LA_OVF_PAGE_LIST *) malloc (DB_SIZEOF (LA_OVF_PAGE_LIST));
+    if (entry == NULL)
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF (LA_OVF_PAGE_LIST));
+	return ER_OUT_OF_VIRTUAL_MEMORY;
+      }
+    memset (entry, 0, DB_SIZEOF (LA_OVF_PAGE_LIST));
+    entry->data = data;
+    entry->length = length;
+    entry->next = NULL;
+    if (chunk_list_head == NULL)
+      {
+	chunk_list_head = chunk_list_tail = entry;
+      }
+    else
+      {
+	chunk_list_tail->next = entry;
+	chunk_list_tail = entry;
+      }
+    return NO_ERROR;
+  };
+
+  /* process the head (chunk 0) first */
+  {
+    logs = NULL;
+    char *data = NULL;
+    int length = 0;
+    error =
+      la_get_log_data (head_lrec, head_lsa, head_pgptr, RVOOS_INSERT, &rcvindex, &logs, &la_Info.rec_type, &data,
+		       &length);
+    if (error != NO_ERROR || logs == NULL || data == NULL || rcvindex != RVOOS_INSERT
+	|| length < OOS_RECORD_HEADER_SIZE)
+      {
+	if (data != NULL)
+	  {
+	    free_and_init (data);
+	  }
+	return (error != NO_ERROR) ? error : ER_FAILED;
+      }
+    error = append_chunk (data, length);
+    if (error != NO_ERROR)
+      {
+	free_and_init (data);
+	free_chunk_list ();
+	return error;
+      }
+    total_body_len += length - OOS_RECORD_HEADER_SIZE;
+  }
+
+  /* walk back via prev_tranlsa, collecting chunks 1..N-1 until LOG_DUMMY_OOS_RECORD */
+  LSA_COPY (&current_lsa, &head_lrec->prev_tranlsa);
+  while (!LSA_ISNULL (&current_lsa))
+    {
+      current_log_page = la_get_page (current_lsa.pageid);
+      if (current_log_page == NULL)
+	{
+	  free_chunk_list ();
+	  return ER_FAILED;
+	}
+      current_log_record = LOG_GET_LOG_RECORD_HEADER (current_log_page, &current_lsa);
+
+      if (current_log_record->trid != head_lrec->trid || current_log_record->type == LOG_DUMMY_OOS_RECORD)
+	{
+	  la_release_page_buffer (current_lsa.pageid);
+	  break;
+	}
+      else if (LOG_IS_REDO_RECORD_TYPE (current_log_record->type))
+	{
+	  logs = NULL;
+	  char *data = NULL;
+	  int length = 0;
+	  error =
+	    la_get_log_data (current_log_record, &current_lsa, current_log_page, RVOOS_INSERT, &rcvindex, &logs,
+			     &la_Info.rec_type, &data, &length);
+	  if (error == NO_ERROR && logs != NULL && data != NULL && rcvindex == RVOOS_INSERT
+	      && length >= OOS_RECORD_HEADER_SIZE)
+	    {
+	      error = append_chunk (data, length);
+	      if (error != NO_ERROR)
+		{
+		  free_and_init (data);
+		  la_release_page_buffer (current_lsa.pageid);
+		  free_chunk_list ();
+		  return error;
+		}
+	      total_body_len += length - OOS_RECORD_HEADER_SIZE;
+	    }
+	  else if (data != NULL)
+	    {
+	      free_and_init (data);
+	    }
+	}
+      la_release_page_buffer (current_lsa.pageid);
+      LSA_COPY (&current_lsa, &current_log_record->prev_tranlsa);
+    }
+
+  /* Allocate destination recdes: [chunk_0 header | body_0 | body_1 | ... | body_{N-1}].
+   * The leading OOS_RECORD_HEADER is chunk 0's header — its total_size field matches the
+   * reassembled body length. The slave-side locator_oos_insert_force strips this header
+   * before calling oos_insert, so the caller receives exactly the original record body. */
+  const int reassembled_len = OOS_RECORD_HEADER_SIZE + total_body_len;
+  error = la_realloc_recdes_data (recdes, reassembled_len);
+  if (error != NO_ERROR)
+    {
+      free_chunk_list ();
+      return error;
+    }
+
+  /* chunk 0 is the first entry in the list (walk started there) */
+  memcpy (recdes->data, chunk_list_head->data, OOS_RECORD_HEADER_SIZE);
+  int copied = OOS_RECORD_HEADER_SIZE;
+  for (chunk_entry = chunk_list_head; chunk_entry != NULL; chunk_entry = chunk_entry->next)
+    {
+      const int body_len = chunk_entry->length - OOS_RECORD_HEADER_SIZE;
+      memcpy (recdes->data + copied, chunk_entry->data + OOS_RECORD_HEADER_SIZE, body_len);
+      copied += body_len;
+    }
+  assert (copied == reassembled_len);
+  recdes->length = reassembled_len;
+  recdes->type = REC_HOME;
+
+  free_chunk_list ();
+  return NO_ERROR;
+}
+
+/*
  * la_get_next_update_log() - get the right update log
  *   return: NO_ERROR or error code
  *   prev_lrec(in):  prev log record
@@ -5336,6 +5516,23 @@ la_apply_insert_log (LA_ITEM * item)
       return er_errid ();
     }
 
+  /* Multi-chunk OOS boundary: the master emits a LOG_DUMMY_OOS_RECORD before a
+   * multi-chunk OOS insert and a matching dummy RVREPL_OOS_INSERT repl entry
+   * (with NULL inst_oid and target_lsa pointing at the dummy log record). When
+   * the applier encounters that dummy item, it sets a pending flag so that the
+   * following RVREPL_OOS_INSERT item triggers chunk reassembly instead of a
+   * normal single-chunk apply. */
+  if (item->item_type == RVREPL_OOS_INSERT)
+    {
+      LOG_RECORD_HEADER *peek_lrec = LOG_GET_LOG_RECORD_HEADER (pgptr, &item->target_lsa);
+      if (peek_lrec != NULL && peek_lrec->type == LOG_DUMMY_OOS_RECORD)
+	{
+	  la_Info.oos_multi_chunk_pending = true;
+	  la_release_page_buffer (old_pageid);
+	  return NO_ERROR;
+	}
+    }
+
   class_obj = db_find_class (item->class_name);
   if (class_obj == NULL)
     {
@@ -5351,11 +5548,25 @@ la_apply_insert_log (LA_ITEM * item)
   recdes = la_assign_recdes_from_pool ();
   is_mvcc_class = la_is_mvcc_class (ws_oid (class_obj));
 
-  /* retrieve the target record description */
-  error = la_get_recdes (&item->target_lsa, pgptr, recdes, &rcvindex, la_Info.rec_type, is_mvcc_class);
-  if (error != NO_ERROR)
+  if (item->item_type == RVREPL_OOS_INSERT && la_Info.oos_multi_chunk_pending)
     {
-      goto end;
+      la_Info.oos_multi_chunk_pending = false;
+      LOG_RECORD_HEADER *head_lrec = LOG_GET_LOG_RECORD_HEADER (pgptr, &item->target_lsa);
+      error = la_get_oos_multi_chunk_recdes (&item->target_lsa, pgptr, head_lrec, recdes);
+      if (error != NO_ERROR)
+	{
+	  goto end;
+	}
+      rcvindex = RVOOS_INSERT;
+    }
+  else
+    {
+      /* retrieve the target record description */
+      error = la_get_recdes (&item->target_lsa, pgptr, recdes, &rcvindex, la_Info.rec_type, is_mvcc_class);
+      if (error != NO_ERROR)
+	{
+	  goto end;
+	}
     }
 
   if (recdes->type == REC_ASSIGN_ADDRESS || recdes->type == REC_RELOCATION)
@@ -6960,6 +7171,7 @@ la_init (const char *log_path, const int max_mem_size)
   la_Info.db_lockf_vdes = NULL_VOLDES;
 
   la_Info.num_unflushed = 0;
+  la_Info.oos_multi_chunk_pending = false;
 
   la_recdes_pool.is_initialized = false;
 
