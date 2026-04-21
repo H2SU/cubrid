@@ -4496,8 +4496,11 @@ la_get_oos_multi_chunk_recdes (LOG_LSA * head_lsa, LOG_PAGE * head_pgptr, LOG_RE
 	  la_release_page_buffer (current_lsa.pageid);
 	  break;
 	}
-      else if (LOG_IS_REDO_RECORD_TYPE (current_log_record->type))
+      else if (LOG_IS_REDO_RECORD_TYPE (current_log_record->type)
+	       || LOG_IS_UNDOREDO_RECORD_TYPE (current_log_record->type))
 	{
+	  /* RVOOS_INSERT is logged via log_append_undoredo_recdes (LOG_UNDOREDO_DATA), so the walk-back must
+	   * accept UNDOREDO records as well as pure REDO records. */
 	  logs = NULL;
 	  char *data = NULL;
 	  int length = 0;
