@@ -38,6 +38,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+#include <unordered_map>
+#include <vector>
 
 #include "log_applier.h"
 
@@ -51,6 +53,7 @@
 #include "log_lsa.hpp"
 #include "object_primitive.h"
 #include "object_representation.h"
+#include "oos_file.hpp"
 #include "db_value_printer.hpp"
 #include "db.h"
 #include "object_accessor.h"
@@ -251,6 +254,45 @@ struct la_item
   LOG_LSA target_lsa;		/* the LSA of the target log record */
 };
 
+/*
+ * Per-transaction cache that lets the sql.log writer resolve OOS-stored
+ * variable columns into their actual values.  The slave server already gets
+ * the OOS chunks through the normal replication flush, but the log applier
+ * itself runs in CS mode and never calls oos_read.  We therefore stash each
+ * RVREPL_OOS_INSERT chunk's body here, keyed by the chunk's OID, so that
+ * la_get_current() can walk the chain (chunk_index 0 -> next_chunk_oid -> ...)
+ * and substitute the reassembled value before the recdes is fed to
+ * sl_write_insert_sql / sl_write_update_sql.
+ */
+struct la_oos_chunk
+{
+  OID next_chunk_oid;
+  int chunk_index;
+  int total_size;
+  std::vector<char> body;
+};
+
+struct la_oid_hash
+{
+  std::size_t operator() (const OID &o) const noexcept
+  {
+    std::size_t h = (std::size_t) o.pageid;
+    h = h * 31u + (std::size_t) (unsigned int) o.slotid;
+    h = h * 31u + (std::size_t) (unsigned int) o.volid;
+    return h;
+  }
+};
+
+struct la_oid_eq
+{
+  bool operator() (const OID &a, const OID &b) const noexcept
+  {
+    return a.pageid == b.pageid && a.slotid == b.slotid && a.volid == b.volid;
+  }
+};
+
+using la_oos_chunk_map = std::unordered_map<OID, la_oos_chunk, la_oid_hash, la_oid_eq>;
+
 typedef struct la_apply LA_APPLY;
 struct la_apply
 {
@@ -261,6 +303,11 @@ struct la_apply
   LOG_LSA last_lsa;
   LA_ITEM *head;
   LA_ITEM *tail;
+  /* Reassembled OOS chunk bodies for the current transaction.  Allocated
+   * lazily when the first RVREPL_OOS_INSERT item is processed, freed in
+   * la_free_all_repl_items().  Holds void* to keep this struct trivially
+   * malloc-able. */
+  void *oos_chunks;
 };
 
 typedef struct la_commit LA_COMMIT;
@@ -499,10 +546,16 @@ static int la_set_repl_log (LOG_PAGE * log_pgptr, int log_type, int tranid, LOG_
 static int la_add_node_into_la_commit_list (int tranid, LOG_LSA * lsa, int type, time_t eot_time);
 static time_t la_retrieve_eot_time (LOG_PAGE * pgptr, LOG_LSA * lsa);
 static int la_get_current (OR_BUF * buf, SM_CLASS * sm_class, int bound_bit_flag, DB_OTMPL * def, DB_VALUE * key,
-			   int offset_size);
+			   int offset_size, RECDES * recdes, la_oos_chunk_map * oos_chunks);
 static void la_make_room_for_mvcc_insid (RECDES * recdes);
 static void la_make_room_for_mvcc_delid_and_prev_ver (RECDES * recdes);
-static int la_disk_to_obj (MOBJ classobj, RECDES * record, DB_OTMPL * def, DB_VALUE * key);
+static int la_disk_to_obj (MOBJ classobj, RECDES * record, DB_OTMPL * def, DB_VALUE * key,
+			   la_oos_chunk_map * oos_chunks);
+static la_oos_chunk_map *la_oos_get_or_create_map (LA_APPLY * apply);
+static void la_oos_free_map (LA_APPLY * apply);
+static int la_oos_cache_chunk (LA_APPLY * apply, LA_ITEM * item);
+static int la_oos_resolve_value (la_oos_chunk_map * oos_chunks, const OID * head_oid, int total_size,
+				 std::vector<char> &out_buffer);
 static char *la_get_zipped_data (char *undo_data, int undo_length, bool is_diff, bool is_undo_zip, bool is_overflow,
 				 char **rec_type, char **data, int *length);
 static int la_get_undoredo_diff (LOG_PAGE ** pgptr, LOG_PAGEID * pageid, PGLENGTH * offset, bool * is_undo_zip,
@@ -522,8 +575,8 @@ static int la_write_delete_sql_log (LA_ITEM * item, DB_OBJECT * class_obj);
 static int la_write_update_sql_log (LA_ITEM * item, DB_OBJECT * class_obj, RECDES * recdes);
 static int la_write_insert_sql_log (LA_ITEM * item, DB_OBJECT * class_obj, RECDES * recdes);
 static int la_apply_delete_log (LA_ITEM * item);
-static int la_apply_update_log (LA_ITEM * item);
-static int la_apply_insert_log (LA_ITEM * item);
+static int la_apply_update_log (LA_APPLY * apply, LA_ITEM * item);
+static int la_apply_insert_log (LA_APPLY * apply, LA_ITEM * item);
 static int la_update_query_execute (const char *sql, bool au_disable);
 static int la_update_query_execute_with_values (const char *sql, int arg_count, DB_VALUE * vals, bool au_disable);
 static int la_apply_statement_log (LA_ITEM * item);
@@ -2813,6 +2866,7 @@ la_init_repl_lists (bool need_realloc)
       LSA_SET_NULL (&la_Info.repl_lists[i]->last_lsa);
       la_Info.repl_lists[i]->head = NULL;
       la_Info.repl_lists[i]->tail = NULL;
+      la_Info.repl_lists[i]->oos_chunks = NULL;
     }
 
   if (error != NO_ERROR)
@@ -3370,6 +3424,7 @@ la_free_all_repl_items (LA_APPLY * apply)
   apply->is_long_trans = false;
   apply->head = NULL;
   apply->tail = NULL;
+  la_oos_free_map (apply);
 
   return;
 }
@@ -3399,6 +3454,244 @@ la_clear_all_repl_and_commit_list (void)
     }
 
   return;
+}
+
+/*
+ * la_oos_get_or_create_map () - return the per-transaction OOS chunk cache,
+ *   allocating it on first use.  Returns NULL only on allocation failure.
+ */
+static la_oos_chunk_map *
+la_oos_get_or_create_map (LA_APPLY * apply)
+{
+  if (apply == NULL)
+    {
+      return NULL;
+    }
+  if (apply->oos_chunks == NULL)
+    {
+      try
+	{
+	  apply->oos_chunks = new la_oos_chunk_map ();
+	}
+      catch (const std::bad_alloc &)
+	{
+	  apply->oos_chunks = NULL;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (int) sizeof (la_oos_chunk_map));
+	  return NULL;
+	}
+    }
+  return static_cast<la_oos_chunk_map *> (apply->oos_chunks);
+}
+
+/*
+ * la_oos_free_map () - release the per-transaction OOS chunk cache.
+ */
+static void
+la_oos_free_map (LA_APPLY * apply)
+{
+  if (apply == NULL || apply->oos_chunks == NULL)
+    {
+      return;
+    }
+  delete static_cast<la_oos_chunk_map *> (apply->oos_chunks);
+  apply->oos_chunks = NULL;
+}
+
+/*
+ * la_oos_cache_chunk () - read the OOS chunk that the RVREPL_OOS_INSERT
+ *   replication item points at and store its body in the per-transaction
+ *   cache, keyed by the chunk's OID.  The OID is derived from the LOG_DATA
+ *   embedded in the underlying RVOOS_INSERT log record (volid/pageid/slotid
+ *   are exactly where oos_log_insert_physical() recorded them).
+ *
+ *   The chunk body fed to the cache is the part AFTER the OOS_RECORD_HEADER;
+ *   the header itself is parsed to recover total_size, chunk_index, and the
+ *   pointer to the next chunk in the chain (next_chunk_oid).
+ */
+static int
+la_oos_cache_chunk (LA_APPLY * apply, LA_ITEM * item)
+{
+  LOG_PAGE *log_pgptr = NULL;
+  LOG_RECORD_HEADER *log_rec = NULL;
+  LOG_PAGEID old_pageid = NULL_PAGEID;
+  unsigned int rcvindex = 0;
+  void *log_info = NULL;
+  /* la_get_zipped_data() unconditionally writes the leading INT16 rec_type
+   * marker into *rec_type when rec_type != NULL; we must therefore hand it a
+   * real buffer rather than NULL.  Reusing la_Info.rec_type would clobber the
+   * recdes the caller will later read, so use a local stack slot. */
+  char rec_type_storage[DB_SIZEOF (INT16)] = { 0 };
+  char *rec_type_buf = rec_type_storage;
+  char *raw_data = NULL;
+  int raw_length = 0;
+  int error = NO_ERROR;
+  la_oos_chunk_map *map = NULL;
+  OOS_RECORD_HEADER hdr;
+  OID chunk_oid = OID_INITIALIZER;
+  LOG_LSA target = item->target_lsa;
+
+  if (apply == NULL || item == NULL || LSA_ISNULL (&target))
+    {
+      return NO_ERROR;
+    }
+
+  old_pageid = target.pageid;
+  log_pgptr = la_get_page (old_pageid);
+  if (log_pgptr == NULL)
+    {
+      assert (er_errid () != NO_ERROR);
+      return er_errid () != NO_ERROR ? er_errid () : ER_FAILED;
+    }
+
+  log_rec = LOG_GET_LOG_RECORD_HEADER (log_pgptr, &target);
+
+  error =
+    la_get_log_data (log_rec, &target, log_pgptr, RVOOS_INSERT, &rcvindex, &log_info, &rec_type_buf, &raw_data,
+		     &raw_length);
+  if (error != NO_ERROR || log_info == NULL || raw_data == NULL || raw_length < OOS_RECORD_HEADER_SIZE)
+    {
+      if (raw_data != NULL)
+	{
+	  free_and_init (raw_data);
+	}
+      la_release_page_buffer (old_pageid);
+      /* Not all RVREPL_OOS_INSERT items will yield a chunk we can read here
+       * (e.g. archive eviction).  Treat parse failure as soft and let sql.log
+       * fall through to a placeholder rather than abort replication. */
+      return NO_ERROR;
+    }
+
+  /* Recover the chunk's own OID from the embedded LOG_DATA. */
+  switch (log_rec->type)
+    {
+    case LOG_UNDOREDO_DATA:
+    case LOG_DIFF_UNDOREDO_DATA:
+      {
+	LOG_REC_UNDOREDO *ur = (LOG_REC_UNDOREDO *) log_info;
+	chunk_oid.volid = ur->data.volid;
+	chunk_oid.pageid = ur->data.pageid;
+	chunk_oid.slotid = ur->data.offset;
+	break;
+      }
+    case LOG_MVCC_UNDOREDO_DATA:
+    case LOG_MVCC_DIFF_UNDOREDO_DATA:
+      {
+	LOG_REC_MVCC_UNDOREDO *mur = (LOG_REC_MVCC_UNDOREDO *) log_info;
+	chunk_oid.volid = mur->undoredo.data.volid;
+	chunk_oid.pageid = mur->undoredo.data.pageid;
+	chunk_oid.slotid = mur->undoredo.data.offset;
+	break;
+      }
+    case LOG_REDO_DATA:
+    case LOG_MVCC_REDO_DATA:
+      {
+	LOG_REC_REDO *r = (LOG_REC_REDO *) log_info;
+	chunk_oid.volid = r->data.volid;
+	chunk_oid.pageid = r->data.pageid;
+	chunk_oid.slotid = r->data.offset;
+	break;
+      }
+    default:
+      free_and_init (raw_data);
+      la_release_page_buffer (old_pageid);
+      return NO_ERROR;
+    }
+
+  if (OID_ISNULL (&chunk_oid))
+    {
+      free_and_init (raw_data);
+      la_release_page_buffer (old_pageid);
+      return NO_ERROR;
+    }
+
+  std::memcpy (&hdr, raw_data, OOS_RECORD_HEADER_SIZE);
+
+  map = la_oos_get_or_create_map (apply);
+  if (map == NULL)
+    {
+      free_and_init (raw_data);
+      la_release_page_buffer (old_pageid);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  try
+    {
+      la_oos_chunk &slot = (*map)[chunk_oid];
+      slot.next_chunk_oid = hdr.next_chunk_oid;
+      slot.chunk_index = hdr.chunk_index;
+      slot.total_size = hdr.total_size;
+      const int body_len = raw_length - OOS_RECORD_HEADER_SIZE;
+      slot.body.assign (raw_data + OOS_RECORD_HEADER_SIZE, raw_data + OOS_RECORD_HEADER_SIZE + body_len);
+    }
+  catch (const std::bad_alloc &)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, raw_length);
+      error = ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  free_and_init (raw_data);
+  la_release_page_buffer (old_pageid);
+  return error;
+}
+
+/*
+ * la_oos_resolve_value () - reassemble the full OOS payload that the heap
+ *   record references, by walking the chunk chain stored in the per-tx cache.
+ *   Starts at head_oid (the OID embedded inline in the heap recdes) and
+ *   follows next_chunk_oid until the chain ends or total_size bytes have been
+ *   gathered.  Returns NO_ERROR and fills out_buffer on success.
+ */
+static int
+la_oos_resolve_value (la_oos_chunk_map * oos_chunks, const OID * head_oid, int total_size,
+		      std::vector<char> &out_buffer)
+{
+  if (oos_chunks == NULL || head_oid == NULL || OID_ISNULL (head_oid) || total_size <= 0)
+    {
+      return ER_FAILED;
+    }
+
+  out_buffer.clear ();
+  try
+    {
+      out_buffer.reserve ((std::size_t) total_size);
+    }
+  catch (const std::bad_alloc &)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, total_size);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  OID cur = *head_oid;
+  /* The chain length is bounded by total_size / minimum chunk body size, so a
+   * generous safety cap on iterations is enough to detect cycles. */
+  const int max_iters = total_size + 16;
+  int iters = 0;
+  while (!OID_ISNULL (&cur) && (int) out_buffer.size () < total_size && iters++ < max_iters)
+    {
+      auto it = oos_chunks->find (cur);
+      if (it == oos_chunks->end ())
+	{
+	  return ER_FAILED;
+	}
+      const la_oos_chunk &chunk = it->second;
+      try
+	{
+	  out_buffer.insert (out_buffer.end (), chunk.body.begin (), chunk.body.end ());
+	}
+      catch (const std::bad_alloc &)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (int) chunk.body.size ());
+	  return ER_OUT_OF_VIRTUAL_MEMORY;
+	}
+      cur = chunk.next_chunk_oid;
+    }
+
+  if ((int) out_buffer.size () != total_size)
+    {
+      return ER_FAILED;
+    }
+
+  return NO_ERROR;
 }
 
 /*
@@ -3552,7 +3845,8 @@ la_retrieve_eot_time (LOG_PAGE * pgptr, LOG_LSA * lsa)
  *     call dbt_put_internal() for update...
  */
 static int
-la_get_current (OR_BUF * buf, SM_CLASS * sm_class, int bound_bit_flag, DB_OTMPL * def, DB_VALUE * key, int offset_size)
+la_get_current (OR_BUF * buf, SM_CLASS * sm_class, int bound_bit_flag, DB_OTMPL * def, DB_VALUE * key, int offset_size,
+		RECDES * recdes, la_oos_chunk_map * oos_chunks)
 {
   SM_ATTRIBUTE *att;
   int *vars = NULL;
@@ -3637,9 +3931,83 @@ la_get_current (OR_BUF * buf, SM_CLASS * sm_class, int bound_bit_flag, DB_OTMPL 
   for (i = sm_class->fixed_count, j = 0; i < sm_class->att_count && j < sm_class->variable_count;
        i++, j++, att = (SM_ATTRIBUTE *) att->header.next)
     {
-      att->type->data_readval (buf, &value, att->domain, vars[j], true, NULL, 0);
-      v_start += vars[j];
-      buf->ptr = v_start;
+      bool is_oos_var = false;
+
+      /* Detect whether this variable column is stored OOS by inspecting the
+       * variable-offset table flag for slot j.  The OR_VAR_TABLE element
+       * index is the variable-section position (0-based), which matches the
+       * loop counter j here.  Mirrors heap_attrvalue_point_variable() on the
+       * server side, the only place that normally calls oos_read; the log
+       * applier client never reaches that path. */
+      if (recdes != NULL && recdes->data != NULL)
+	{
+	  int rec_offset_size = OR_GET_OFFSET_SIZE (recdes->data);
+	  char *elem_ptr =
+	    OR_VAR_TABLE_ELEMENT_PTR (OR_GET_OBJECT_VAR_TABLE (recdes->data), j, rec_offset_size);
+	  int raw_offset = 0;
+
+	  switch (rec_offset_size)
+	    {
+	    case OR_BYTE_SIZE:
+	      raw_offset = OR_GET_BYTE (elem_ptr);
+	      break;
+	    case OR_SHORT_SIZE:
+	      raw_offset = OR_GET_SHORT (elem_ptr);
+	      break;
+	    case OR_INT_SIZE:
+	      raw_offset = OR_GET_INT (elem_ptr);
+	      break;
+	    default:
+	      raw_offset = 0;
+	      break;
+	    }
+	  is_oos_var = OR_IS_OOS (raw_offset) != 0;
+	}
+
+      if (is_oos_var)
+	{
+	  /* Inline payload is [OID head_oid (8B) + DB_BIGINT length (8B)].
+	   * Reassemble the actual OOS body from the cache and hand a real
+	   * DB_VALUE to the sql.log writer instead of the OID bytes. */
+	  OR_BUF inline_buf;
+	  OID head_oid = OID_INITIALIZER;
+	  DB_BIGINT total_length = 0;
+	  int inline_rc = NO_ERROR;
+	  std::vector<char> reassembled;
+	  bool resolved = false;
+
+	  or_init (&inline_buf, buf->ptr, vars[j]);
+	  or_get_oid (&inline_buf, &head_oid);
+	  total_length = or_get_bigint (&inline_buf, &inline_rc);
+
+	  if (inline_rc == NO_ERROR && !OID_ISNULL (&head_oid) && total_length > 0
+	      && total_length <= (DB_BIGINT) INT_MAX
+	      && oos_chunks != NULL
+	      && la_oos_resolve_value (oos_chunks, &head_oid, (int) total_length, reassembled) == NO_ERROR)
+	    {
+	      OR_BUF body_buf;
+	      or_init (&body_buf, reassembled.data (), (int) reassembled.size ());
+	      att->type->data_readval (&body_buf, &value, att->domain, (int) reassembled.size (), true, NULL, 0);
+	      resolved = true;
+	    }
+
+	  if (!resolved)
+	    {
+	      /* Fall back to NULL when reassembly is not possible (cache miss
+	       * due to archive eviction, parse errors, etc.).  This still beats
+	       * dumping raw OID bytes as varchar bits. */
+	      db_make_null (&value);
+	    }
+
+	  v_start += vars[j];
+	  buf->ptr = v_start;
+	}
+      else
+	{
+	  att->type->data_readval (buf, &value, att->domain, vars[j], true, NULL, 0);
+	  v_start += vars[j];
+	  buf->ptr = v_start;
+	}
 
       /* update the column */
       error = dbt_put_internal (def, att->header.name, &value);
@@ -3729,7 +4097,7 @@ la_make_room_for_mvcc_delid_and_prev_ver (RECDES * recdes)
  *     call dbt_put_internal() for update...
  */
 static int
-la_disk_to_obj (MOBJ classobj, RECDES * record, DB_OTMPL * def, DB_VALUE * key)
+la_disk_to_obj (MOBJ classobj, RECDES * record, DB_OTMPL * def, DB_VALUE * key, la_oos_chunk_map * oos_chunks)
 {
   OR_BUF orep, *buf;
   SM_CLASS *sm_class;
@@ -3785,7 +4153,7 @@ la_disk_to_obj (MOBJ classobj, RECDES * record, DB_OTMPL * def, DB_VALUE * key)
 
   bound_bit_flag = repid_bits & OR_BOUND_BIT_FLAG;
 
-  error = la_get_current (buf, sm_class, bound_bit_flag, def, key, offset_size);
+  error = la_get_current (buf, sm_class, bound_bit_flag, def, key, offset_size, record, oos_chunks);
 
   if (error == NO_ERROR && buf->ptr > buf->endptr)
     {
@@ -5044,7 +5412,7 @@ end:
 }
 
 static int
-la_write_update_sql_log (LA_ITEM * item, DB_OBJECT * class_obj, RECDES * recdes)
+la_write_update_sql_log (LA_ITEM * item, DB_OBJECT * class_obj, RECDES * recdes, la_oos_chunk_map * oos_chunks)
 {
   MOBJ mclass;
   int au_save;
@@ -5069,7 +5437,7 @@ la_write_update_sql_log (LA_ITEM * item, DB_OBJECT * class_obj, RECDES * recdes)
 
   key = la_get_item_pk_value (item);
 
-  if (la_disk_to_obj (mclass, recdes, inst_tp, key) != NO_ERROR)
+  if (la_disk_to_obj (mclass, recdes, inst_tp, key, oos_chunks) != NO_ERROR)
     {
       ret = ER_FAILED;
       goto end;
@@ -5110,7 +5478,7 @@ end:
  *      . If la_enable_sql_logging(config param is ha_enable_sql_logging) is enabled, the query is written to a file.
  */
 static int
-la_apply_update_log (LA_ITEM * item)
+la_apply_update_log (LA_APPLY * apply, LA_ITEM * item)
 {
   int error = NO_ERROR;
   unsigned int rcvindex;
@@ -5180,9 +5548,11 @@ la_apply_update_log (LA_ITEM * item)
   if (la_enable_sql_logging)
     {
       int ret;
+      la_oos_chunk_map *oos_chunks =
+	(apply != NULL && apply->oos_chunks != NULL) ? static_cast<la_oos_chunk_map *> (apply->oos_chunks) : NULL;
 
       er_stack_push ();
-      ret = la_write_update_sql_log (item, class_obj, recdes);
+      ret = la_write_update_sql_log (item, class_obj, recdes, oos_chunks);
       er_stack_pop ();
 
       if (ret != NO_ERROR)
@@ -5244,7 +5614,7 @@ la_is_mvcc_class (const OID * class_oid)
 }
 
 static int
-la_write_insert_sql_log (LA_ITEM * item, DB_OBJECT * class_obj, RECDES * recdes)
+la_write_insert_sql_log (LA_ITEM * item, DB_OBJECT * class_obj, RECDES * recdes, la_oos_chunk_map * oos_chunks)
 {
   MOBJ mclass;
   int au_save;
@@ -5270,7 +5640,7 @@ la_write_insert_sql_log (LA_ITEM * item, DB_OBJECT * class_obj, RECDES * recdes)
   key = la_get_item_pk_value (item);
 
   /* make object using the record description */
-  if (la_disk_to_obj (mclass, recdes, inst_tp, key) != NO_ERROR)
+  if (la_disk_to_obj (mclass, recdes, inst_tp, key, oos_chunks) != NO_ERROR)
     {
       ret = ER_FAILED;
       goto end;
@@ -5311,7 +5681,7 @@ end:
  *      . If la_enable_sql_logging(config param is ha_enable_sql_logging) is enabled, the query is written to a file.
  */
 static int
-la_apply_insert_log (LA_ITEM * item)
+la_apply_insert_log (LA_APPLY * apply, LA_ITEM * item)
 {
   int error = NO_ERROR;
   DB_OBJECT *class_obj;
@@ -5320,6 +5690,23 @@ la_apply_insert_log (LA_ITEM * item)
   RECDES *recdes;
   LOG_PAGEID old_pageid = NULL_PAGEID;
   bool is_mvcc_class;
+  bool is_oos_chunk_item = (item != NULL && item->item_type == RVREPL_OOS_INSERT);
+
+  /* RVREPL_OOS_INSERT items are storage-internal (one per OOS chunk) and must
+   * never produce their own sql.log entry — that would split a single user
+   * INSERT into N+1 garbled lines.  Stash the chunk body in the per-tx cache
+   * so the heap row's RVREPL_DATA_INSERT can resolve OOS columns later, then
+   * fall through to la_repl_add_object so the slave still replicates OOS. */
+  if (is_oos_chunk_item)
+    {
+      int cache_ret = la_oos_cache_chunk (apply, item);
+      if (cache_ret != NO_ERROR && cache_ret != ER_OUT_OF_VIRTUAL_MEMORY)
+	{
+	  /* Soft failure path inside la_oos_cache_chunk already returns
+	   * NO_ERROR; this branch only catches OOM and propagates it. */
+	  return cache_ret;
+	}
+    }
 
   error = la_flush_repl_items (false);
   if (error != NO_ERROR)
@@ -5374,12 +5761,16 @@ la_apply_insert_log (LA_ITEM * item)
       goto end;
     }
 
-  if (la_enable_sql_logging)
+  /* Skip sql.log for OOS chunk items — the heap row item that follows will
+   * emit the user-visible INSERT with reassembled column values. */
+  if (la_enable_sql_logging && !is_oos_chunk_item)
     {
       int ret;
+      la_oos_chunk_map *oos_chunks =
+	(apply != NULL && apply->oos_chunks != NULL) ? static_cast<la_oos_chunk_map *> (apply->oos_chunks) : NULL;
 
       er_stack_push ();
-      ret = la_write_insert_sql_log (item, class_obj, recdes);
+      ret = la_write_insert_sql_log (item, class_obj, recdes, oos_chunks);
       er_stack_pop ();
       if (ret != NO_ERROR)
 	{
@@ -5806,12 +6197,12 @@ la_apply_repl_log (int tranid, int rectype, LOG_LSA * commit_lsa, int *total_row
 		case RVREPL_DATA_UPDATE_START:
 		case RVREPL_DATA_UPDATE_END:
 		case RVREPL_DATA_UPDATE:
-		  error = la_apply_update_log (item);
+		  error = la_apply_update_log (apply, item);
 		  break;
 
 		case RVREPL_DATA_INSERT:
 		case RVREPL_OOS_INSERT:
-		  error = la_apply_insert_log (item);
+		  error = la_apply_insert_log (apply, item);
 		  break;
 
 		case RVREPL_DATA_DELETE:
