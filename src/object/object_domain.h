@@ -244,7 +244,7 @@ typedef enum tp_match
 #define TP_IS_LOB_TYPE(typeid)                 ((typeid) == DB_TYPE_BLOB || (typeid) == DB_TYPE_CLOB)
 #define TP_IS_LOB_FAMILY_TYPE(typeid)          (TP_IS_LOBFILE_TYPE (typeid) || TP_IS_LOB_TYPE (typeid))
 #define TP_IS_FIXED_LEN_CHAR_TYPE(typeid) ((typeid) == DB_TYPE_CHAR)
-#define TP_IS_VAR_LEN_CHAR_TYPE(typeid)   ((typeid) == DB_TYPE_VARCHAR)
+#define TP_IS_VAR_LEN_CHAR_TYPE(typeid)   ((typeid) == DB_TYPE_VARCHAR || (typeid) == DB_TYPE_CLOB)
 
 /*
  * TP_IS_CHAR_BIT_TYPE

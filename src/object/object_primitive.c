@@ -14086,7 +14086,7 @@ pr_clear_compressed_string (DB_VALUE * value)
   db_type = DB_VALUE_DOMAIN_TYPE (value);
 
   /* Clear only for variable-length string types (VARCHAR, CHAR). */
-  if (!TP_IS_CHAR_TYPE (db_type))
+  if (!TP_IS_VAR_LEN_CHAR_TYPE (db_type))
     {
       return NO_ERROR;		/* do nothing */
     }
@@ -14137,7 +14137,7 @@ pr_do_db_value_string_compression (DB_VALUE * value)
   db_type = DB_VALUE_DOMAIN_TYPE (value);
 
   /* Compress only for variable-length string types (VARCHAR, CHAR). */
-  if (!TP_IS_CHAR_TYPE (db_type))
+  if (!TP_IS_VAR_LEN_CHAR_TYPE (db_type))
     {
       return rc;		/* do nothing */
     }

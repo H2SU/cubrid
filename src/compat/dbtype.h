@@ -235,7 +235,7 @@ extern "C"
 
     DB_TYPE type = db_value_domain_type (src);
 
-    if (TP_IS_CHAR_TYPE (type))
+    if (TP_IS_VAR_LEN_CHAR_TYPE (type))
       {
 	dst->data.ch.info.compressed_need_clear = false;
       }
