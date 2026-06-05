@@ -14856,8 +14856,7 @@ mr_getmem_clob (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, bool copy)
 
       if (!copy)
 	{
-	  db_make_clob (value, domain->precision, cur, mem_length, TP_DOMAIN_CODESET (domain),
-			TP_DOMAIN_COLLATION (domain));
+	  db_make_clob (value, domain->precision, cur, mem_length);
 	  value->need_clear = false;
 	}
       else
@@ -14873,8 +14872,7 @@ mr_getmem_clob (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, bool copy)
 	    {
 	      memcpy (new_, cur, mem_length);
 	      new_[mem_length] = '\0';
-	      db_make_clob (value, domain->precision, new_, mem_length, TP_DOMAIN_CODESET (domain),
-			    TP_DOMAIN_COLLATION (domain));
+	      db_make_clob (value, domain->precision, new_, mem_length);
 	      value->need_clear = true;
 	    }
 	}
@@ -15053,7 +15051,8 @@ mr_freemem_clob (void *memptr)
 static void
 mr_initval_clob (DB_VALUE * value, int precision, int scale)
 {
-  db_make_clob (value, precision, NULL, 0, LANG_SYS_CODESET, LANG_SYS_COLLATION);
+  /* CLOB has no per-value codeset/collation — server uses LANG_SYS_CODESET. */
+  db_make_clob (value, precision, NULL, 0);
   value->need_clear = false;
 }
 
@@ -15099,8 +15098,7 @@ mr_setval_clob (DB_VALUE * dest, const DB_VALUE * src, bool copy)
       /* should we be paying attention to this? it is extremely dangerous */
       if (!copy)
 	{
-	  error = db_make_clob (dest, src_precision, src_str, src_length, db_get_string_codeset (src),
-				db_get_string_collation (src));
+	  error = db_make_clob (dest, src_precision, src_str, src_length);
 	  dest->data.ch.medium.compressed_buf = src->data.ch.medium.compressed_buf;
 	  dest->data.ch.info.compressed_need_clear = false;
 	}
@@ -15117,8 +15115,7 @@ mr_setval_clob (DB_VALUE * dest, const DB_VALUE * src, bool copy)
 	    {
 	      memcpy (new_, src_str, src_length);
 	      new_[src_length] = '\0';
-	      db_make_clob (dest, src_precision, new_, src_length, db_get_string_codeset (src),
-			    db_get_string_collation (src));
+	      db_make_clob (dest, src_precision, new_, src_length);
 	      dest->need_clear = true;
 	    }
 
@@ -15392,8 +15389,7 @@ mr_readval_clob_internal (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, in
 		  goto cleanup;
 		}
 	      string[expected_decompressed_size] = '\0';
-	      db_make_clob (value, precision, string, expected_decompressed_size, TP_DOMAIN_CODESET (domain),
-			    TP_DOMAIN_COLLATION (domain));
+	      db_make_clob (value, precision, string, expected_decompressed_size);
 	      value->need_clear = true;
 
 	      compressed_string = (char *) db_private_alloc (NULL, compressed_size + 1);
@@ -15413,8 +15409,7 @@ mr_readval_clob_internal (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, in
 	      assert (compressed_size == 0);
 
 	      str_length = expected_decompressed_size;
-	      db_make_clob (value, precision, buf->ptr, expected_decompressed_size, TP_DOMAIN_CODESET (domain),
-			    TP_DOMAIN_COLLATION (domain));
+	      db_make_clob (value, precision, buf->ptr, expected_decompressed_size);
 	      value->need_clear = false;
 	      db_set_compressed_string (value, NULL, DB_UNCOMPRESSABLE, false);
 	    }
@@ -15558,8 +15553,7 @@ mr_readval_clob_internal (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, in
 		  goto cleanup;
 		}
 
-	      db_make_clob (value, precision, new_, str_length, TP_DOMAIN_CODESET (domain),
-			    TP_DOMAIN_COLLATION (domain));
+	      db_make_clob (value, precision, new_, str_length);
 	      value->need_clear = (new_ != copy_buf) ? true : false;
 
 	      if (compressed_string == NULL)
@@ -15688,8 +15682,7 @@ data_readval_clob (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int size,
 	      goto cleanup;
 	    }
 
-	  db_make_clob (value, precision, decompressed_string, expected_decompressed_size,
-			TP_DOMAIN_CODESET (domain), TP_DOMAIN_COLLATION (domain));
+	  db_make_clob (value, precision, decompressed_string, expected_decompressed_size);
 	  value->need_clear = (decompressed_string != copy_buf) ? true : false;
 	  db_set_compressed_string (value, NULL, DB_NOT_YET_COMPRESSED, false);
 	}
@@ -15697,8 +15690,7 @@ data_readval_clob (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int size,
 	{
 	  assert (compressed_size == 0);
 
-	  db_make_clob (value, precision, buf->ptr, expected_decompressed_size, TP_DOMAIN_CODESET (domain),
-			TP_DOMAIN_COLLATION (domain));
+	  db_make_clob (value, precision, buf->ptr, expected_decompressed_size);
 	  value->need_clear = false;
 	  db_set_compressed_string (value, NULL, DB_UNCOMPRESSABLE, false);
 	}
@@ -15733,8 +15725,7 @@ data_readval_clob (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int size,
 	      goto cleanup;
 	    }
 
-	  db_make_clob (value, precision, decompressed_string, expected_decompressed_size,
-			TP_DOMAIN_CODESET (domain), TP_DOMAIN_COLLATION (domain));
+	  db_make_clob (value, precision, decompressed_string, expected_decompressed_size);
 	  value->need_clear = (decompressed_string != copy_buf) ? true : false;
 	  db_set_compressed_string (value, NULL, DB_NOT_YET_COMPRESSED, false);
 	}
@@ -15745,8 +15736,7 @@ data_readval_clob (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int size,
 	  memcpy (decompressed_string, buf->ptr, expected_decompressed_size);
 	  decompressed_string[expected_decompressed_size] = '\0';
 
-	  db_make_clob (value, precision, decompressed_string, expected_decompressed_size,
-			TP_DOMAIN_CODESET (domain), TP_DOMAIN_COLLATION (domain));
+	  db_make_clob (value, precision, decompressed_string, expected_decompressed_size);
 	  value->need_clear = (decompressed_string != copy_buf) ? true : false;
 	  db_set_compressed_string (value, NULL, DB_UNCOMPRESSABLE, false);
 	}
@@ -16153,7 +16143,7 @@ mr_data_lengthmem_blob (void *memptr, TP_DOMAIN * domain, int disk)
   len = 0;
   if (!disk)
     {
-      len = tp_VarBit.size;
+      len = tp_Blob.size;
     }
   else if (memptr != NULL)
     {
