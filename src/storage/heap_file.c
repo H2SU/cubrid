@@ -10672,8 +10672,6 @@ heap_attrvalue_point_variable (RECDES * recdes, HEAP_CACHE_ATTRINFO * attr_info,
 	{
 	case DB_TYPE_BFILE:
 	case DB_TYPE_CFILE:
-	case DB_TYPE_BLOB:
-	case DB_TYPE_CLOB:
 	case DB_TYPE_SET:	/* it may be just a little bit fast */
 	case DB_TYPE_MULTISET:
 	case DB_TYPE_SEQUENCE:
