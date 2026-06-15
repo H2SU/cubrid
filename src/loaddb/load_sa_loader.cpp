@@ -27,10 +27,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fstream>
+#include <string>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 #if defined (WINDOWS)
 #include <io.h>
 #else
@@ -46,6 +50,7 @@
 #include "elo.h"
 #include "environment_variable.h"
 #include "execute_schema.h"
+#include "heap_file.h"
 #include "intl_support.h"
 #include "language_support.h"
 #include "load_db_value_converter.hpp"
@@ -76,6 +81,19 @@
 using namespace cubload;
 
 const std::size_t LDR_MAX_ARGS = 32;
+static const char *LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX = "_internal_lob";
+static const char *LDR_INTERNAL_LOB_SIDE_CAR_MAGIC = "CUBRID_INTERNAL_LOB_UNLOAD 1";
+
+struct internal_lob_sidecar_entry
+{
+  char type;
+  int bit_length;
+  std::vector<char> data;
+};
+
+static bool ldr_internal_lob_sidecar_loaded = false;
+static bool ldr_internal_lob_sidecar_available = false;
+static std::unordered_map<std::string, internal_lob_sidecar_entry> ldr_internal_lob_sidecar;
 
 /* filter out ignorable errid */
 #define FILTER_OUT_ERR_INTERNAL(err, expr)                              \
@@ -478,6 +496,8 @@ static int ldr_destroy (LDR_CONTEXT *context, int err);
 static int ldr_init (load_args *args);
 static void ldr_init_driver ();
 static int ldr_final (void);
+static int ldr_internal_lob_sidecar_load (const std::string &object_file);
+static void ldr_internal_lob_sidecar_clear ();
 
 /* Statistics updating/retrieving functions */
 static void ldr_stats (int *errors, int64_t *objects, int *defaults, int64_t *lastcommit, int *fails);
@@ -564,6 +584,8 @@ static int ldr_str_db_char (LDR_CONTEXT *context, const char *str, size_t len, S
 static int ldr_str_db_varchar (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att);
 static int ldr_str_db_clob (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att);
 static int ldr_str_db_generic (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att);
+static int ldr_internal_lob_ref_db_blob (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att);
+static int ldr_internal_lob_ref_db_clob (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att);
 static int ldr_bstr_elem (LDR_CONTEXT *context, const char *str, size_t len, DB_VALUE *val);
 static int ldr_bstr_db_varbit (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att);
 static int ldr_bstr_db_blob (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att);
@@ -896,6 +918,7 @@ error_exit:
 	  case LDR_XSTR:
 	  case LDR_ELO_INT:
 	  case LDR_ELO_EXT:
+	  case LDR_INTERNAL_LOB_REF:
 	  case LDR_SYS_USER:
 	  case LDR_SYS_CLASS:
 	  {
@@ -1912,6 +1935,197 @@ is_internal_class (DB_OBJECT *class_)
   return (ml_find (internal_classes, class_));
 }
 
+static void
+ldr_internal_lob_sidecar_clear ()
+{
+  ldr_internal_lob_sidecar.clear ();
+  ldr_internal_lob_sidecar_loaded = false;
+  ldr_internal_lob_sidecar_available = false;
+}
+
+static std::string
+ldr_internal_lob_sidecar_path (const std::string &object_file)
+{
+  const std::string object_suffix = "_objects";
+
+  if (object_file.size () >= object_suffix.size ()
+      && object_file.compare (object_file.size () - object_suffix.size (), object_suffix.size (), object_suffix) == 0)
+    {
+      return object_file.substr (0, object_file.size () - object_suffix.size ()) + LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX;
+    }
+
+  return object_file + LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX;
+}
+
+static bool
+ldr_internal_lob_sidecar_next_field (const std::string &line, size_t &pos, std::string &field)
+{
+  size_t end = line.find ('\t', pos);
+
+  if (end == std::string::npos)
+    {
+      field = line.substr (pos);
+      pos = line.size ();
+      return true;
+    }
+
+  field = line.substr (pos, end - pos);
+  pos = end + 1;
+  return true;
+}
+
+static int
+ldr_internal_lob_sidecar_hex_to_bytes (const std::string &hex, std::vector<char> &data)
+{
+  auto hex_value = [] (char ch) -> int
+  {
+    if (ch >= '0' && ch <= '9')
+      {
+	return ch - '0';
+      }
+    if (ch >= 'a' && ch <= 'f')
+      {
+	return ch - 'a' + 10;
+      }
+    if (ch >= 'A' && ch <= 'F')
+      {
+	return ch - 'A' + 10;
+      }
+    return -1;
+  };
+
+  if ((hex.size () % 2) != 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  data.resize (hex.size () / 2);
+  for (size_t i = 0; i < data.size (); i++)
+    {
+      int hi = hex_value (hex[i * 2]);
+      int lo = hex_value (hex[i * 2 + 1]);
+      if (hi < 0 || lo < 0)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	  return ER_FAILED;
+	}
+      data[i] = (char) ((hi << 4) | lo);
+    }
+
+  return NO_ERROR;
+}
+
+static int
+ldr_internal_lob_sidecar_parse_entry (const std::string &line)
+{
+  size_t pos = 0;
+  std::string type_field, key_len_field, key, data_len_field, bit_len_field, data_hex;
+  char *endptr = NULL;
+  unsigned long key_len;
+  unsigned long long data_len;
+  long bit_length;
+  internal_lob_sidecar_entry entry;
+
+  if (!ldr_internal_lob_sidecar_next_field (line, pos, type_field)
+      || !ldr_internal_lob_sidecar_next_field (line, pos, key_len_field)
+      || !ldr_internal_lob_sidecar_next_field (line, pos, key)
+      || !ldr_internal_lob_sidecar_next_field (line, pos, data_len_field)
+      || !ldr_internal_lob_sidecar_next_field (line, pos, bit_len_field)
+      || !ldr_internal_lob_sidecar_next_field (line, pos, data_hex))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  if (type_field.size () != 1 || (type_field[0] != 'B' && type_field[0] != 'C'))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  key_len = strtoul (key_len_field.c_str (), &endptr, 10);
+  if (endptr == key_len_field.c_str () || *endptr != '\0' || key_len != key.size ())
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  data_len = strtoull (data_len_field.c_str (), &endptr, 10);
+  if (endptr == data_len_field.c_str () || *endptr != '\0')
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  bit_length = strtol (bit_len_field.c_str (), &endptr, 10);
+  if (endptr == bit_len_field.c_str () || *endptr != '\0' || bit_length < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  if (data_hex.size () != (size_t) data_len * 2)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  entry.type = type_field[0];
+  entry.bit_length = (int) bit_length;
+  if (ldr_internal_lob_sidecar_hex_to_bytes (data_hex, entry.data) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  ldr_internal_lob_sidecar[key] = std::move (entry);
+  return NO_ERROR;
+}
+
+static int
+ldr_internal_lob_sidecar_load (const std::string &object_file)
+{
+  std::string path;
+  std::ifstream sidecar;
+  std::string line;
+
+  ldr_internal_lob_sidecar_clear ();
+  ldr_internal_lob_sidecar_loaded = true;
+
+  if (object_file.empty ())
+    {
+      return NO_ERROR;
+    }
+
+  path = ldr_internal_lob_sidecar_path (object_file);
+  sidecar.open (path, std::ios::in | std::ios::binary);
+  if (!sidecar.is_open ())
+    {
+      return NO_ERROR;
+    }
+
+  if (!std::getline (sidecar, line) || line != LDR_INTERNAL_LOB_SIDE_CAR_MAGIC)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  while (std::getline (sidecar, line))
+    {
+      if (line.empty ())
+	{
+	  continue;
+	}
+      if (ldr_internal_lob_sidecar_parse_entry (line) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  ldr_internal_lob_sidecar_available = true;
+  return NO_ERROR;
+}
+
 /*
  *                         LEXER ACTION ROUTINES
  *
@@ -2917,6 +3131,143 @@ ldr_str_db_clob (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE
     }
 
   CHECK_ERR (err, db_make_clob (&val, att->domain->precision, str, (int) len));
+  CHECK_ERR (err, ldr_generic (context, &val));
+
+error_exit:
+  db_value_clear (&val);
+  return err;
+}
+
+static int
+ldr_internal_lob_ref_make_value (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att,
+				 DB_TYPE expected_type, DB_VALUE *val)
+{
+  int err = NO_ERROR;
+  char token_type;
+  char expected_token_type;
+  std::string key;
+  auto found = ldr_internal_lob_sidecar.end ();
+  int max_length;
+  char *bstring = NULL;
+  DB_VALUE materialized;
+  INTERNAL_LOB_LOCATOR locator;
+  OID *class_oid = NULL;
+
+  db_make_null (val);
+  db_make_null (&materialized);
+  OID_SET_NULL (&locator.oid);
+  locator.length = 0;
+
+  if (str == NULL || len < 3 || str[1] != '|')
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      CHECK_PARSE_ERR (err, ER_FAILED, context, expected_type, str);
+    }
+
+  token_type = str[0];
+  expected_token_type = (expected_type == DB_TYPE_BLOB) ? 'B' : 'C';
+  if (token_type != expected_token_type)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OBJ_DOMAIN_CONFLICT, 1, ldr_attr_name (context));
+      CHECK_PARSE_ERR (err, ER_OBJ_DOMAIN_CONFLICT, context, expected_type, str);
+    }
+
+  if (!ldr_internal_lob_sidecar_loaded)
+    {
+      CHECK_PARSE_ERR (err, ldr_internal_lob_sidecar_load (context->args->object_file), context, expected_type, str);
+    }
+
+  if (!ldr_internal_lob_sidecar_available)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      CHECK_PARSE_ERR (err, ER_FAILED, context, expected_type, str);
+    }
+
+  key.assign (str + 2, len - 2);
+  found = ldr_internal_lob_sidecar.find (key);
+  if (found == ldr_internal_lob_sidecar.end () || found->second.type != token_type)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      CHECK_PARSE_ERR (err, ER_FAILED, context, expected_type, str);
+    }
+
+  max_length = att->domain->precision;
+  if (max_length <= 0 || max_length > DB_MAX_LOB_PRECISION)
+    {
+      max_length = DB_MAX_LOB_PRECISION;
+    }
+
+  if (expected_type == DB_TYPE_CLOB)
+    {
+      if (found->second.data.size () > (size_t) max_length)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, db_get_type_name (DB_TYPE_CLOB));
+	  CHECK_PARSE_ERR (err, ER_IT_DATA_OVERFLOW, context, DB_TYPE_CLOB, str);
+	}
+
+      CHECK_ERR (err,
+		 db_make_clob (&materialized, max_length, found->second.data.empty () ? "" : found->second.data.data (),
+			       (int) found->second.data.size ()));
+    }
+  else
+    {
+      if (found->second.bit_length > max_length)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, db_get_type_name (DB_TYPE_BLOB));
+	  CHECK_PARSE_ERR (err, ER_IT_DATA_OVERFLOW, context, DB_TYPE_BLOB, str);
+	}
+
+      CHECK_PTR (err, bstring = (char *) db_private_alloc (NULL, found->second.data.size () + 1));
+      if (!found->second.data.empty ())
+	{
+	  memcpy (bstring, found->second.data.data (), found->second.data.size ());
+	}
+      CHECK_ERR (err, db_make_blob (&materialized, max_length, bstring, found->second.bit_length));
+
+      materialized.need_clear = true;
+      bstring = NULL;
+    }
+
+  class_oid = WS_OID (context->cls);
+  if (class_oid == NULL || OID_ISNULL (class_oid) || OID_ISTEMP (class_oid))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      CHECK_PARSE_ERR (err, ER_FAILED, context, expected_type, str);
+    }
+
+  CHECK_ERR (err, heap_internal_lob_insert_value (thread_get_thread_entry_info (), class_oid, &materialized, &locator));
+  CHECK_ERR (err, internal_lob_make_locator_db_value (val, expected_type, locator));
+
+error_exit:
+  if (bstring != NULL)
+    {
+      db_private_free_and_init (NULL, bstring);
+    }
+  db_value_clear (&materialized);
+  return err;
+}
+
+static int
+ldr_internal_lob_ref_db_blob (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att)
+{
+  int err = NO_ERROR;
+  DB_VALUE val;
+
+  CHECK_ERR (err, ldr_internal_lob_ref_make_value (context, str, len, att, DB_TYPE_BLOB, &val));
+  CHECK_ERR (err, ldr_generic (context, &val));
+
+error_exit:
+  db_value_clear (&val);
+  return err;
+}
+
+static int
+ldr_internal_lob_ref_db_clob (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE *att)
+{
+  int err = NO_ERROR;
+  DB_VALUE val;
+
+  CHECK_ERR (err, ldr_internal_lob_ref_make_value (context, str, len, att, DB_TYPE_CLOB, &val));
   CHECK_ERR (err, ldr_generic (context, &val));
 
 error_exit:
@@ -5547,10 +5898,12 @@ ldr_act_add_attr (LDR_CONTEXT *context, const char *attr_name, size_t len)
     case DB_TYPE_BLOB:
       attdesc->setter[LDR_BSTR] = &ldr_bstr_db_blob;
       attdesc->setter[LDR_XSTR] = &ldr_xstr_db_blob;
+      attdesc->setter[LDR_INTERNAL_LOB_REF] = &ldr_internal_lob_ref_db_blob;
       break;
 
     case DB_TYPE_CLOB:
       attdesc->setter[LDR_STR] = &ldr_str_db_clob;
+      attdesc->setter[LDR_INTERNAL_LOB_REF] = &ldr_internal_lob_ref_db_clob;
       break;
 
     case DB_TYPE_BFILE:
@@ -6388,6 +6741,12 @@ ldr_init (load_args *args)
       return er_errid ();
     }
 
+  if (ldr_internal_lob_sidecar_load (args->object_file) != NO_ERROR)
+    {
+      assert (er_errid () != NO_ERROR);
+      return er_errid ();
+    }
+
   idmap_init ();
 
   if (otable_init ())
@@ -6492,6 +6851,7 @@ ldr_final (void)
   idmap_final ();
   otable_final ();
   ldr_mop_tempoid_maps_final ();
+  ldr_internal_lob_sidecar_clear ();
 
   return shutdown_error;
 }

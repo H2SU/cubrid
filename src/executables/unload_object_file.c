@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <string.h>
 #if defined(WINDOWS)
 #include <io.h>
 #else
@@ -62,6 +63,10 @@
 #include "message_catalog.h"
 #include "string_opfunc.h"
 #include "porting.h"
+#if defined (SA_MODE)
+#include "internal_lob_file.hpp"
+#include "thread_manager.hpp"
+#endif /* SA_MODE */
 
 volatile bool error_occurred = false;
 int g_io_buffer_size = 4096;
@@ -80,6 +85,18 @@ static int fprint_blob_value (TEXT_OUTPUT * tout, DB_VALUE * value);
 static int fprint_special_strings (TEXT_OUTPUT * tout, DB_VALUE * value);
 
 static int write_object_file (TEXT_BUFFER_BLK * head);
+
+#define INTERNAL_LOB_UNLOAD_SUFFIX "_internal_lob"
+#define INTERNAL_LOB_UNLOAD_MAGIC "CUBRID_INTERNAL_LOB_UNLOAD 1\n"
+#define INTERNAL_LOB_UNLOAD_LOCATOR_PREFIX "@internal_lob:"
+
+static FILE *internal_lob_unload_fp = NULL;
+static pthread_mutex_t internal_lob_unload_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool internal_lob_unload_is_locator_key (const char *data, int size);
+static int internal_lob_unload_sidecar_write (char lob_type, const char *key, int key_len, const char *data,
+					      size_t data_len, int bit_length);
+static int fprint_internal_lob_ref_if_locator (TEXT_OUTPUT * tout, DB_VALUE * value, bool * printed);
 
 #if !defined(WINDOWS)
 extern S_WAITING_INFO wi_write_file;
@@ -685,6 +702,267 @@ need_append_dot (const char *val)
   return true;
 }
 
+static bool
+internal_lob_unload_is_locator_key (const char *data, int size)
+{
+  char locator_buf[128];
+  int volid, pageid, slotid;
+  long long length;
+  int consumed = 0;
+  int prefix_len = (int) strlen (INTERNAL_LOB_UNLOAD_LOCATOR_PREFIX);
+
+  if (data == NULL || size <= prefix_len || size >= (int) sizeof (locator_buf))
+    {
+      return false;
+    }
+  if (memcmp (data, INTERNAL_LOB_UNLOAD_LOCATOR_PREFIX, (size_t) prefix_len) != 0)
+    {
+      return false;
+    }
+
+  memcpy (locator_buf, data, (size_t) size);
+  locator_buf[size] = '\0';
+
+  if (sscanf (locator_buf + prefix_len, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &length, &consumed) != 4)
+    {
+      return false;
+    }
+  if (prefix_len + consumed != size || length < 0)
+    {
+      return false;
+    }
+
+  return true;
+}
+
+int
+internal_lob_unload_sidecar_open (const char *output_dirname, const char *output_prefix)
+{
+  char path[PATH_MAX];
+  int written;
+
+  if (output_dirname == NULL)
+    {
+      output_dirname = ".";
+    }
+  if (output_prefix == NULL)
+    {
+      output_prefix = "";
+    }
+
+  internal_lob_unload_sidecar_close ();
+
+  written = snprintf (path, sizeof (path), "%s/%s%s", output_dirname, output_prefix, INTERNAL_LOB_UNLOAD_SUFFIX);
+  if (written < 0 || written >= (int) sizeof (path))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  internal_lob_unload_fp = fopen (path, "wb");
+  if (internal_lob_unload_fp == NULL)
+    {
+      er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  if (fputs (INTERNAL_LOB_UNLOAD_MAGIC, internal_lob_unload_fp) == EOF)
+    {
+      internal_lob_unload_sidecar_close ();
+      er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  return NO_ERROR;
+}
+
+void
+internal_lob_unload_sidecar_close (void)
+{
+  if (internal_lob_unload_fp != NULL)
+    {
+      fclose (internal_lob_unload_fp);
+      internal_lob_unload_fp = NULL;
+    }
+}
+
+static int
+internal_lob_unload_sidecar_write_hex (FILE * fp, const char *data, size_t len)
+{
+  static const char hex[] = "0123456789abcdef";
+  size_t i;
+
+  for (i = 0; i < len; i++)
+    {
+      unsigned char ch = (unsigned char) data[i];
+      if (fputc (hex[ch >> 4], fp) == EOF || fputc (hex[ch & 0x0f], fp) == EOF)
+	{
+	  er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	  return ER_FAILED;
+	}
+    }
+
+  return NO_ERROR;
+}
+
+static int
+internal_lob_unload_sidecar_write (char lob_type, const char *key, int key_len, const char *data, size_t data_len,
+				   int bit_length)
+{
+  int error = NO_ERROR;
+
+  if (internal_lob_unload_fp == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  pthread_mutex_lock (&internal_lob_unload_lock);
+
+  if (fprintf (internal_lob_unload_fp, "%c\t%d\t", lob_type, key_len) < 0)
+    {
+      er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      error = ER_FAILED;
+      goto exit;
+    }
+  if (fwrite (key, 1, (size_t) key_len, internal_lob_unload_fp) != (size_t) key_len)
+    {
+      er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      error = ER_FAILED;
+      goto exit;
+    }
+  if (fprintf (internal_lob_unload_fp, "\t%zu\t%d\t", data_len, bit_length) < 0)
+    {
+      er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      error = ER_FAILED;
+      goto exit;
+    }
+  error = internal_lob_unload_sidecar_write_hex (internal_lob_unload_fp, data, data_len);
+  if (error != NO_ERROR)
+    {
+      goto exit;
+    }
+  if (fputc ('\n', internal_lob_unload_fp) == EOF)
+    {
+      er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      error = ER_FAILED;
+    }
+
+exit:
+  pthread_mutex_unlock (&internal_lob_unload_lock);
+  return error;
+}
+
+static int
+fprint_internal_lob_ref_if_locator (TEXT_OUTPUT * tout, DB_VALUE * value, bool * printed)
+{
+  int error = NO_ERROR;
+  DB_VALUE materialized;
+  DB_TYPE lob_type;
+  char lob_type_char;
+  const char *key = NULL;
+  int key_len = 0;
+  const char *data = NULL;
+  size_t data_len = 0;
+  int bit_length = 0;
+
+  *printed = false;
+
+  lob_type = DB_VALUE_DOMAIN_TYPE (value);
+  if (lob_type == DB_TYPE_CLOB)
+    {
+      key = db_get_string (value);
+      key_len = db_get_string_size (value);
+      lob_type_char = 'C';
+    }
+  else if (lob_type == DB_TYPE_BLOB)
+    {
+      key = (const char *) db_get_bit (value, &bit_length);
+      key_len = (bit_length + 7) / 8;
+      lob_type_char = 'B';
+    }
+  else
+    {
+      return NO_ERROR;
+    }
+
+  if (!internal_lob_unload_is_locator_key (key, key_len))
+    {
+      return NO_ERROR;
+    }
+
+  if (key == NULL || key_len <= 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      return ER_FAILED;
+    }
+
+  db_make_null (&materialized);
+#if defined (SA_MODE)
+  {
+    INTERNAL_LOB_LOCATOR locator;
+
+    if (!internal_lob_parse_locator_string (key, key_len, &locator))
+      {
+	return NO_ERROR;
+      }
+
+    error = internal_lob_read_db_value (thread_get_thread_entry_info (), locator, lob_type, &materialized, NULL);
+  }
+#elif defined (CS_MODE)
+  error = internal_lob_read_db_value_from_server (key, key_len, lob_type, &materialized);
+#else
+  (void) lob_type;
+  return NO_ERROR;
+#endif
+  if (error != NO_ERROR)
+    {
+      goto exit;
+    }
+
+  if (lob_type == DB_TYPE_CLOB)
+    {
+      int bytes_size;
+
+      data = db_get_string (&materialized);
+      bytes_size = db_get_string_size (&materialized);
+      if (bytes_size < 0)
+	{
+	  bytes_size = (data != NULL) ? (int) strlen (data) : 0;
+	}
+      data_len = (size_t) bytes_size;
+      bit_length = 0;
+    }
+  else
+    {
+      data = (const char *) db_get_bit (&materialized, &bit_length);
+      data_len = (size_t) ((bit_length + 7) / 8);
+    }
+
+  if (data == NULL && data_len > 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+      error = ER_FAILED;
+      goto exit;
+    }
+
+  error = internal_lob_unload_sidecar_write (lob_type_char, key, key_len, data, data_len, bit_length);
+  if (error != NO_ERROR)
+    {
+      goto exit;
+    }
+
+  CHECK_PRINT_ERROR (text_print (tout, NULL, 0, "^L'%c|", lob_type_char));
+  CHECK_PRINT_ERROR (text_print (tout, key, key_len, NULL));
+  CHECK_PRINT_ERROR (text_print (tout, "'", 1, NULL));
+  *printed = true;
+
+exit_on_error:
+exit:
+  db_value_clear (&materialized);
+  return error;
+}
+
 /*
  * fprint_clob_value - print a CLOB DB_VALUE to TEXT_OUTPUT
  *    return: NO_ERROR if successful, error code otherwise
@@ -701,6 +979,13 @@ fprint_clob_value (TEXT_OUTPUT * tout, DB_VALUE * value)
   int error = NO_ERROR;
   const char *str_ptr;
   int len;
+  bool printed = false;
+
+  CHECK_PRINT_ERROR (fprint_internal_lob_ref_if_locator (tout, value, &printed));
+  if (printed)
+    {
+      return NO_ERROR;
+    }
 
   str_ptr = db_get_string (value);
   len = db_get_string_size (value);
@@ -732,6 +1017,13 @@ fprint_blob_value (TEXT_OUTPUT * tout, DB_VALUE * value)
   char buf[INTERNAL_BUFFER_SIZE];
   char *ptr = NULL;
   int max_size = ((db_get_string_length (value) + 3) / 4) + 1;
+  bool printed = false;
+
+  CHECK_PRINT_ERROR (fprint_internal_lob_ref_if_locator (tout, value, &printed));
+  if (printed)
+    {
+      return NO_ERROR;
+    }
 
   if (max_size > INTERNAL_BUFFER_SIZE)
     {
