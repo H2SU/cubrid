@@ -25,9 +25,13 @@
 #include "db_client_type.hpp"
 #include "dbtype_def.h"
 #include "error_code.h"
+#include "error_manager.h"
 #include "intl_support.h"
 
+#include <cstdlib>
 #include <fstream>
+#include <unordered_map>
+#include <vector>
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
 #include "memory_wrapper.hpp"
 
@@ -55,6 +59,21 @@ namespace cubload
    * Trim whitespaces on the right of the string. String is passed as reference and it will be modified
    */
   void rtrim (std::string &str);
+
+  struct internal_lob_sidecar_entry
+  {
+    char type;
+    int bit_length;
+    std::vector<char> data;
+    std::string data_hex;
+  };
+
+  using internal_lob_sidecar_map = std::unordered_map<std::string, internal_lob_sidecar_entry>;
+
+  int load_internal_lob_sidecar (const std::string &object_file_name, internal_lob_sidecar_map &sidecar,
+				 bool &sidecar_available);
+
+  int expand_internal_lob_refs (std::string &row, const internal_lob_sidecar_map &sidecar, bool sidecar_available);
 }
 
 ///////////////////// Function definitions /////////////////////
@@ -645,14 +664,349 @@ namespace cubload
 
 
 #define LOADDB_BUFFER_SIZE_LIMIT ((size_t)(((1024 * 1024 * 2) - 1) * 1024LL)) /* (2GB - 1K) */
+  static const char *LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX = "_internal_lob";
+  static const char *LDR_INTERNAL_LOB_SIDE_CAR_MAGIC = "CUBRID_INTERNAL_LOB_UNLOAD 1";
+
+  static std::string
+  internal_lob_sidecar_path (const std::string &object_file)
+  {
+    const std::string object_suffix = "_objects";
+
+    if (object_file.size () >= object_suffix.size ()
+	&& object_file.compare (object_file.size () - object_suffix.size (), object_suffix.size (), object_suffix) == 0)
+      {
+	return object_file.substr (0, object_file.size () - object_suffix.size ()) + LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX;
+      }
+
+    return object_file + LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX;
+  }
+
+  static bool
+  internal_lob_sidecar_next_field (const std::string &line, size_t &pos, std::string &field)
+  {
+    size_t end = line.find ('\t', pos);
+
+    if (end == std::string::npos)
+      {
+	field = line.substr (pos);
+	pos = line.size ();
+	return true;
+      }
+
+    field = line.substr (pos, end - pos);
+    pos = end + 1;
+    return true;
+  }
+
+  static int
+  internal_lob_sidecar_hex_to_bytes (const std::string &hex, std::vector<char> &data)
+  {
+    auto hex_value = [] (char ch) -> int
+    {
+      if (ch >= '0' && ch <= '9')
+	{
+	  return ch - '0';
+	}
+      if (ch >= 'a' && ch <= 'f')
+	{
+	  return ch - 'a' + 10;
+	}
+      if (ch >= 'A' && ch <= 'F')
+	{
+	  return ch - 'A' + 10;
+	}
+      return -1;
+    };
+
+    if ((hex.size () % 2) != 0)
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	return ER_FAILED;
+      }
+
+    data.resize (hex.size () / 2);
+    for (size_t i = 0; i < data.size (); i++)
+      {
+	int hi = hex_value (hex[i * 2]);
+	int lo = hex_value (hex[i * 2 + 1]);
+	if (hi < 0 || lo < 0)
+	  {
+	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	    return ER_FAILED;
+	  }
+	data[i] = (char) ((hi << 4) | lo);
+      }
+
+    return NO_ERROR;
+  }
+
+  static int
+  internal_lob_sidecar_parse_entry (const std::string &line, internal_lob_sidecar_map &sidecar)
+  {
+    size_t pos = 0;
+    std::string type_field, key_len_field, key, data_len_field, bit_len_field, data_hex;
+    char *endptr = NULL;
+    unsigned long key_len;
+    unsigned long long data_len;
+    long bit_length;
+    internal_lob_sidecar_entry entry;
+
+    if (!internal_lob_sidecar_next_field (line, pos, type_field)
+	|| !internal_lob_sidecar_next_field (line, pos, key_len_field)
+	|| !internal_lob_sidecar_next_field (line, pos, key)
+	|| !internal_lob_sidecar_next_field (line, pos, data_len_field)
+	|| !internal_lob_sidecar_next_field (line, pos, bit_len_field)
+	|| !internal_lob_sidecar_next_field (line, pos, data_hex))
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	return ER_FAILED;
+      }
+
+    if (type_field.size () != 1 || (type_field[0] != 'B' && type_field[0] != 'C'))
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	return ER_FAILED;
+      }
+
+    key_len = strtoul (key_len_field.c_str (), &endptr, 10);
+    if (endptr == key_len_field.c_str () || *endptr != '\0' || key_len != key.size ())
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	return ER_FAILED;
+      }
+
+    data_len = strtoull (data_len_field.c_str (), &endptr, 10);
+    if (endptr == data_len_field.c_str () || *endptr != '\0')
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	return ER_FAILED;
+      }
+
+    bit_length = strtol (bit_len_field.c_str (), &endptr, 10);
+    if (endptr == bit_len_field.c_str () || *endptr != '\0' || bit_length < 0)
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	return ER_FAILED;
+      }
+
+    if (data_hex.size () != (size_t) data_len * 2)
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	return ER_FAILED;
+      }
+
+    entry.type = type_field[0];
+    entry.bit_length = (int) bit_length;
+    entry.data_hex = data_hex;
+    if (internal_lob_sidecar_hex_to_bytes (data_hex, entry.data) != NO_ERROR)
+      {
+	return ER_FAILED;
+      }
+
+    sidecar[key] = std::move (entry);
+    return NO_ERROR;
+  }
+
+  int
+  load_internal_lob_sidecar (const std::string &object_file_name, internal_lob_sidecar_map &sidecar,
+			     bool &sidecar_available)
+  {
+    std::string path;
+    std::ifstream sidecar_file;
+    std::string line;
+
+    sidecar.clear ();
+    sidecar_available = false;
+
+    if (object_file_name.empty ())
+      {
+	return NO_ERROR;
+      }
+
+    path = internal_lob_sidecar_path (object_file_name);
+    sidecar_file.open (path, std::ios::in | std::ios::binary);
+    if (!sidecar_file.is_open ())
+      {
+	return NO_ERROR;
+      }
+
+    if (!std::getline (sidecar_file, line) || line != LDR_INTERNAL_LOB_SIDE_CAR_MAGIC)
+      {
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	return ER_FAILED;
+      }
+
+    while (std::getline (sidecar_file, line))
+      {
+	if (line.empty ())
+	  {
+	    continue;
+	  }
+	if (internal_lob_sidecar_parse_entry (line, sidecar) != NO_ERROR)
+	  {
+	    return ER_FAILED;
+	  }
+      }
+
+    sidecar_available = true;
+    return NO_ERROR;
+  }
+
+  static std::string
+  internal_lob_make_clob_literal (const std::vector<char> &data)
+  {
+    std::string literal;
+
+    literal.reserve (data.size () + 2);
+    literal.push_back ('\'');
+    for (char ch : data)
+      {
+	if (ch == '\'')
+	  {
+	    literal.append ("''");
+	  }
+	else
+	  {
+	    literal.push_back (ch);
+	  }
+      }
+    literal.push_back ('\'');
+
+    return literal;
+  }
+
+  static std::string
+  internal_lob_make_blob_bit_literal (const internal_lob_sidecar_entry &entry)
+  {
+    std::string literal;
+
+    literal.reserve ((size_t) entry.bit_length + 3);
+    literal.append ("B'");
+    for (int bit = 0; bit < entry.bit_length; bit++)
+      {
+	unsigned char byte = (unsigned char) entry.data[ (size_t) bit / 8];
+	int shift = 7 - (bit % 8);
+
+	literal.push_back (((byte >> shift) & 1) ? '1' : '0');
+      }
+    literal.push_back ('\'');
+
+    return literal;
+  }
+
+  static std::string
+  internal_lob_make_blob_literal (const internal_lob_sidecar_entry &entry)
+  {
+    if ((entry.bit_length % 8) == 0)
+      {
+	return "X'" + entry.data_hex + "'";
+      }
+
+    return internal_lob_make_blob_bit_literal (entry);
+  }
+
+  int
+  expand_internal_lob_refs (std::string &row, const internal_lob_sidecar_map &sidecar, bool sidecar_available)
+  {
+    std::string expanded;
+    bool in_quote = false;
+    bool changed = false;
+
+    for (size_t pos = 0; pos < row.size (); pos++)
+      {
+	char ch = row[pos];
+
+	if (ch == '\'')
+	  {
+	    if (in_quote && pos + 1 < row.size () && row[pos + 1] == '\'')
+	      {
+		expanded.append ("''");
+		pos++;
+		continue;
+	      }
+	    in_quote = !in_quote;
+	    expanded.push_back (ch);
+	    continue;
+	  }
+
+	if (!in_quote && ch == '^' && pos + 2 < row.size () && (row[pos + 1] == 'L' || row[pos + 1] == 'l')
+	    && row[pos + 2] == '\'')
+	  {
+	    size_t token_start = pos + 3;
+	    size_t token_end = row.find ('\'', token_start);
+	    if (token_end == std::string::npos)
+	      {
+		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+		return ER_FAILED;
+	      }
+
+	    std::string token = row.substr (token_start, token_end - token_start);
+	    if (token.size () < 3 || token[1] != '|')
+	      {
+		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+		return ER_FAILED;
+	      }
+
+	    if (!sidecar_available)
+	      {
+		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+		return ER_FAILED;
+	      }
+
+	    char type = token[0];
+	    std::string key = token.substr (2);
+	    auto found = sidecar.find (key);
+	    if (found == sidecar.end () || found->second.type != type)
+	      {
+		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+		return ER_FAILED;
+	      }
+
+	    if (type == 'C')
+	      {
+		expanded.append (internal_lob_make_clob_literal (found->second.data));
+	      }
+	    else if (type == 'B')
+	      {
+		expanded.append (internal_lob_make_blob_literal (found->second));
+	      }
+	    else
+	      {
+		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+		return ER_FAILED;
+	      }
+
+	    pos = token_end;
+	    changed = true;
+	    continue;
+	  }
+
+	expanded.push_back (ch);
+      }
+
+    if (changed)
+      {
+	row.swap (expanded);
+      }
+
+    return NO_ERROR;
+  }
+
   static int
   append_incomplete_row (std::string &batch_buffer, std::string &one_row_buffer, batch_handler &b_handler,
 			 class_id &clsid, batch_id &batch_id, int lineno,
-			 int &one_row_lineno, int &batch_start_offset, int64_t &batch_rows)
+			 int &one_row_lineno, int &batch_start_offset, int64_t &batch_rows,
+			 const internal_lob_sidecar_map &internal_lob_sidecar, bool internal_lob_sidecar_available)
   {
     int error_code = NO_ERROR;
 
     assert (one_row_buffer.empty() == false);
+
+    error_code = expand_internal_lob_refs (one_row_buffer, internal_lob_sidecar, internal_lob_sidecar_available);
+    if (error_code != NO_ERROR)
+      {
+	return error_code;
+      }
 
     // The content contained in one_row_buffer may not be a complete row.
     // TODO: How about handling errors right away without having to send them to the server?
@@ -686,6 +1040,8 @@ namespace cubload
     batch_id batch_id = NULL_BATCH_ID;
     std::string batch_buffer;
     std::string one_row_buffer;
+    internal_lob_sidecar_map internal_lob_sidecar;
+    bool internal_lob_sidecar_available = false;
     bool class_is_ignored = false;
     short single_quote_checker = 0;
     bool  size_over = false;
@@ -713,6 +1069,13 @@ namespace cubload
     one_row_buffer.reserve (DEFAULT_ONEROW_BUF_SZ);
     batch_buffer.reserve (DEFAULT_STRING_SZ);
 
+    error_code = load_internal_lob_sidecar (object_file_name, internal_lob_sidecar, internal_lob_sidecar_available);
+    if (error_code != NO_ERROR)
+      {
+	object_file.close ();
+	return error_code;
+      }
+
     for (std::string line; std::getline (object_file, line); ++lineno, ++one_row_lineno)
       {
 	if (single_quote_checker == 0)
@@ -725,7 +1088,8 @@ namespace cubload
 		if (one_row_buffer.empty() == false)
 		  {
 		    error_code = append_incomplete_row (batch_buffer, one_row_buffer, b_handler, clsid, batch_id,
-							lineno, one_row_lineno, batch_start_offset, batch_rows);
+							lineno, one_row_lineno, batch_start_offset, batch_rows,
+							internal_lob_sidecar, internal_lob_sidecar_available);
 		    if (error_code != NO_ERROR)
 		      {
 			object_file.close ();
@@ -814,6 +1178,13 @@ namespace cubload
 	    continue;
 	  }
 
+	error_code = expand_internal_lob_refs (one_row_buffer, internal_lob_sidecar, internal_lob_sidecar_available);
+	if (error_code != NO_ERROR)
+	  {
+	    object_file.close ();
+	    return error_code;
+	  }
+
 	if ((one_row_buffer.size() + batch_buffer.size()) >= LOADDB_BUFFER_SIZE_LIMIT)
 	  {
 	    size_over = true;
@@ -862,7 +1233,8 @@ namespace cubload
     if (one_row_buffer.empty() == false)
       {
 	error_code = append_incomplete_row (batch_buffer, one_row_buffer, b_handler, clsid, batch_id,
-					    lineno, one_row_lineno, batch_start_offset, batch_rows);
+					    lineno, one_row_lineno, batch_start_offset, batch_rows, internal_lob_sidecar,
+					    internal_lob_sidecar_available);
 	if (error_code != NO_ERROR)
 	  {
 	    object_file.close ();

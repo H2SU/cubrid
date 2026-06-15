@@ -4927,6 +4927,113 @@ csession_reset_cur_insert_id (void)
 }
 
 /*
+ * internal_lob_read_db_value_from_server () - materialize an internal LOB locator on the server.
+ * return       : NO_ERROR or error code
+ * locator_data : internal LOB locator bytes
+ * locator_len  : locator byte length
+ * lob_type     : DB_TYPE_CLOB or DB_TYPE_BLOB
+ * value        : materialized LOB value
+ */
+int
+internal_lob_read_db_value_from_server (const char *locator_data, int locator_len, DB_TYPE lob_type, DB_VALUE * value)
+{
+#if defined(CS_MODE)
+  OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *request = NULL;
+  char *locator_buf = NULL;
+  char *data_reply = NULL;
+  char *ptr = NULL;
+  int locator_strlen = 0;
+  int request_size = 0;
+  int data_size = 0;
+  int err = NO_ERROR;
+
+  if (value == NULL)
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+  db_make_null (value);
+
+  if (locator_data == NULL || locator_len <= 0 || (lob_type != DB_TYPE_CLOB && lob_type != DB_TYPE_BLOB))
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+
+  locator_buf = (char *) malloc ((size_t) locator_len + 1);
+  if (locator_buf == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) locator_len + 1);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+  memcpy (locator_buf, locator_data, (size_t) locator_len);
+  locator_buf[locator_len] = '\0';
+
+  request_size = OR_INT_SIZE + length_const_string (locator_buf, &locator_strlen);
+  request = (char *) malloc (request_size);
+  if (request == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) request_size);
+      err = ER_OUT_OF_VIRTUAL_MEMORY;
+      goto cleanup;
+    }
+
+  ptr = or_pack_int (request, (int) lob_type);
+  (void) pack_const_string_with_length (ptr, locator_buf, locator_strlen);
+
+  err =
+    net_client_request2 (NET_SERVER_INTERNAL_LOB_READ, request, request_size, reply, OR_ALIGNED_BUF_SIZE (a_reply),
+			 NULL, 0, &data_reply, &data_size);
+  if (err != NO_ERROR)
+    {
+      err = ER_FAILED;
+      goto cleanup;
+    }
+
+  ptr = or_unpack_int (reply, &data_size);
+  (void) or_unpack_int (ptr, &err);
+  if (err != NO_ERROR)
+    {
+      goto cleanup;
+    }
+  if (data_reply == NULL || data_size <= 0)
+    {
+      err = ER_FAILED;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+      goto cleanup;
+    }
+
+  (void) or_unpack_value (data_reply, value);
+
+cleanup:
+  if (request != NULL)
+    {
+      free_and_init (request);
+    }
+  if (locator_buf != NULL)
+    {
+      free_and_init (locator_buf);
+    }
+  if (data_reply != NULL)
+    {
+      free_and_init (data_reply);
+    }
+
+  return err;
+#else
+  if (value != NULL)
+    {
+      db_make_null (value);
+    }
+  (void) locator_data;
+  (void) locator_len;
+  (void) lob_type;
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
+/*
  * csession_create_prepared_statement () - create a prepared session statement
  * return	  : error code or NO_ERROR
  * name (in)	  : the name of the prepared statement

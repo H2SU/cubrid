@@ -233,17 +233,14 @@ struct heap_hdr_stats
 				 * these values are only used for hints. These values may not be accurate at any given
 				 * time and the entries may contain duplicated pages. */
 
-  int reserve0_for_future;	/* Reused by CBRD-26914 PoC: internal LOB VFID.fileid */
-  int reserve1_for_future;	/* Reused by CBRD-26914 PoC: internal LOB VFID.volid */
-  int reserve2_for_future;	/* Nothing reserved for future */
+  VFID internal_lob_vfid;	/* Internal LOB file identifier (if any) */
+  int reserve0_for_future;	/* Nothing reserved for future */
 };
-
-static_assert (sizeof (VFID) == 2 * sizeof (int), "HEAP_HDR_STATS reserve0/1 must fit one VFID");
 
 STATIC_INLINE void
 heap_get_internal_lob_vfid (const HEAP_HDR_STATS * heap_hdr, VFID * lob_vfid)
 {
-  memcpy (lob_vfid, &heap_hdr->reserve0_for_future, sizeof (*lob_vfid));
+  VFID_COPY (lob_vfid, &heap_hdr->internal_lob_vfid);
   if (lob_vfid->fileid == 0 && lob_vfid->volid == 0)
     {
       VFID_SET_NULL (lob_vfid);
@@ -253,7 +250,7 @@ heap_get_internal_lob_vfid (const HEAP_HDR_STATS * heap_hdr, VFID * lob_vfid)
 STATIC_INLINE void
 heap_set_internal_lob_vfid (HEAP_HDR_STATS * heap_hdr, const VFID * lob_vfid)
 {
-  memcpy (&heap_hdr->reserve0_for_future, lob_vfid, sizeof (*lob_vfid));
+  VFID_COPY (&heap_hdr->internal_lob_vfid, lob_vfid);
 }
 
 STATIC_INLINE void
@@ -12435,6 +12432,110 @@ end:
     }
 
   return success;
+}
+
+/*
+ * heap_internal_lob_insert_value () - Insert a BLOB/CLOB DB_VALUE into a class internal LOB file.
+ *   return: NO_ERROR, or error code
+ *   thread_p(in): thread entry
+ *   class_oid(in): class OID owning the target heap
+ *   value(in): materialized BLOB/CLOB value
+ *   locator(out): newly inserted internal LOB locator
+ *
+ * Note:
+ *   This helper is used by utility code that already has materialized LOB bytes
+ *   but needs to store the main object as an internal LOB locator.
+ */
+int
+heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, const DB_VALUE * value,
+				INTERNAL_LOB_LOCATOR * locator)
+{
+  char recbuf[IO_MAX_PAGE_SIZE + MAX_ALIGNMENT];
+  char *record_data = NULL;
+  char *alloc_record_data = NULL;
+  HFID hfid;
+  VFID lob_vfid;
+  OR_BUF buf;
+  const PR_TYPE *pr_type;
+  DB_TYPE type;
+  int length;
+  int error = NO_ERROR;
+
+  if (class_oid == NULL || value == NULL || locator == NULL || DB_IS_NULL (value))
+    {
+      error = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+      return error;
+    }
+
+  type = DB_VALUE_DOMAIN_TYPE (value);
+  if (!TP_IS_LOB_TYPE (type))
+    {
+      error = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+      return error;
+    }
+
+  if (heap_get_class_info (thread_p, class_oid, &hfid, NULL, NULL) != NO_ERROR)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+
+  VFID_SET_NULL (&lob_vfid);
+  if (!heap_internal_lob_find_vfid (thread_p, &hfid, &lob_vfid, true))
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+
+  pr_type = pr_type_from_id (type);
+  if (pr_type == NULL)
+    {
+      error = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+      return error;
+    }
+
+  length = pr_type->get_disk_size_of_value (value);
+  if (length < 0)
+    {
+      error = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+      return error;
+    }
+
+  if ((size_t) length <= IO_MAX_PAGE_SIZE)
+    {
+      record_data = PTR_ALIGN (recbuf, MAX_ALIGNMENT);
+    }
+  else
+    {
+      alloc_record_data = (char *) malloc (length);
+      if (alloc_record_data == NULL)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) length);
+	  return ER_OUT_OF_VIRTUAL_MEMORY;
+	}
+      record_data = alloc_record_data;
+    }
+
+  or_init (&buf, record_data, length);
+  if (pr_type->data_writeval (&buf, value) != NO_ERROR)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      goto exit;
+    }
+
+  error = internal_lob_insert (thread_p, lob_vfid, oos_buffer (record_data, (size_t) length), *locator);
+
+exit:
+  if (alloc_record_data != NULL)
+    {
+      free_and_init (alloc_record_data);
+    }
+
+  return error;
 }
 
 static SCAN_CODE

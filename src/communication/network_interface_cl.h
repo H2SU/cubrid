@@ -343,6 +343,8 @@ extern int csession_set_row_count (int rows);
 extern int csession_get_row_count (int *rows);
 extern int csession_get_last_insert_id (DB_VALUE * value, bool update_last_insert_id);
 extern int csession_reset_cur_insert_id (void);
+extern int internal_lob_read_db_value_from_server (const char *locator_data, int locator_len, DB_TYPE lob_type,
+						   DB_VALUE * value);
 extern int csession_create_prepared_statement (const char *name, const char *alias_print, char *stmt_info,
 					       int info_length);
 extern int csession_get_prepared_statement (const char *name, XASL_ID * xasl_id, char **stmt_info,

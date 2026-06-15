@@ -672,6 +672,10 @@ net_server_init (void)
   req_p = &net_Requests[NET_SERVER_OOS_STATS];
   req_p->processing_function = soos_stats;
 
+  req_p = &net_Requests[NET_SERVER_INTERNAL_LOB_READ];
+  req_p->action_attribute = IN_TRANSACTION;
+  req_p->processing_function = sinternal_lob_read;
+
   req_p = &net_Requests[NET_SERVER_GET_MVCC_SNAPSHOT];
   req_p->processing_function = slogtb_get_mvcc_snapshot;
 
