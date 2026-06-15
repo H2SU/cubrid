@@ -35,9 +35,11 @@ add_test(NAME test_oos_sql_delete COMMAND test_oos_sql_delete)
 add_test(NAME test_oos_sql_boundary COMMAND test_oos_sql_boundary)
 add_test(NAME test_oos_sql_update_delete COMMAND test_oos_sql_update_delete)
 add_test(NAME test_oos_sql_txn COMMAND test_oos_sql_txn)
+add_test(NAME test_oos_sql_internal_lob_locator COMMAND test_oos_sql_internal_lob_locator)
 
 set_tests_properties(
   test_oos_sql_crud test_oos_sql_ddl test_oos_sql_delete
   test_oos_sql_boundary test_oos_sql_update_delete test_oos_sql_txn
+  test_oos_sql_internal_lob_locator
   PROPERTIES FIXTURES_REQUIRED OOS_DB RUN_SERIAL TRUE
 )

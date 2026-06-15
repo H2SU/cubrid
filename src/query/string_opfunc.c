@@ -57,6 +57,10 @@
 #include "string_regex.hpp"
 #include "tz_support.h"
 #include "util_func.h"
+#if defined (SERVER_MODE) || defined (SA_MODE)
+#include "internal_lob_file.hpp"
+#include "thread_manager.hpp"
+#endif /* defined (SERVER_MODE) || defined (SA_MODE) */
 
 #include <algorithm>
 #include <string>
@@ -24599,6 +24603,34 @@ error:
   return error_status;
 }
 
+#if defined (SERVER_MODE) || defined (SA_MODE)
+static int
+internal_lob_materialize_if_locator (const DB_VALUE *src_value, DB_TYPE lob_type, DB_VALUE *materialized_value,
+				     bool *is_locator)
+{
+  INTERNAL_LOB_LOCATOR locator;
+
+  assert (src_value != NULL && materialized_value != NULL && is_locator != NULL);
+  assert (lob_type == DB_TYPE_BLOB || lob_type == DB_TYPE_CLOB);
+
+  *is_locator = false;
+  db_make_null (materialized_value);
+
+  if (DB_VALUE_DOMAIN_TYPE (src_value) != lob_type)
+    {
+      return NO_ERROR;
+    }
+
+  if (!internal_lob_db_value_is_locator (src_value, &locator))
+    {
+      return NO_ERROR;
+    }
+
+  *is_locator = true;
+  return internal_lob_read_db_value (thread_get_thread_entry_info (), locator, lob_type, materialized_value, NULL);
+}
+#endif /* defined (SERVER_MODE) || defined (SA_MODE) */
+
 /*
  * db_blob_to_bit - convert blob value to bit string value
  *   return: NO_ERROR or error code
@@ -24642,6 +24674,25 @@ db_blob_to_bit (const DB_VALUE * src_value, const DB_VALUE * length_value, DB_VA
       error_status = ER_QSTR_INVALID_DATA_TYPE;
       goto error;
     }
+
+#if defined (SERVER_MODE) || defined (SA_MODE)
+  {
+    DB_VALUE materialized;
+    bool is_locator = false;
+
+    error_status = internal_lob_materialize_if_locator (src_value, DB_TYPE_BLOB, &materialized, &is_locator);
+    if (error_status != NO_ERROR)
+      {
+	return error_status;
+      }
+    if (is_locator)
+      {
+	error_status = db_blob_to_bit (&materialized, length_value, result_value);
+	pr_clear_value (&materialized);
+	return error_status;
+      }
+  }
+#endif /* defined (SERVER_MODE) || defined (SA_MODE) */
 
   // TODO: This part should be revised when the TOAST structure is introduced in the future.
   blob_data = db_get_bit (src_value, &length);
@@ -24747,6 +24798,23 @@ db_blob_length (const DB_VALUE * src_value, DB_VALUE * result_value)
 
   if (src_type == DB_TYPE_BLOB)
     {
+#if defined (SERVER_MODE) || defined (SA_MODE)
+      DB_VALUE materialized;
+      bool is_locator = false;
+
+      error_status = internal_lob_materialize_if_locator (src_value, DB_TYPE_BLOB, &materialized, &is_locator);
+      if (error_status != NO_ERROR)
+	{
+	  return error_status;
+	}
+      if (is_locator)
+	{
+	  error_status = db_blob_length (&materialized, result_value);
+	  pr_clear_value (&materialized);
+	  return error_status;
+	}
+#endif /* defined (SERVER_MODE) || defined (SA_MODE) */
+
       // TODO: This part should be revised when the TOAST structure is introduced in the future.
       db_make_bigint (result_value, db_get_string_length (src_value));
     }
@@ -24868,6 +24936,25 @@ db_clob_to_char (const DB_VALUE * src_value, const DB_VALUE * codeset_value, DB_
 
   if (src_type == DB_TYPE_CLOB)
     {
+#if defined (SERVER_MODE) || defined (SA_MODE)
+      {
+	DB_VALUE materialized;
+	bool is_locator = false;
+
+	error_status = internal_lob_materialize_if_locator (src_value, DB_TYPE_CLOB, &materialized, &is_locator);
+	if (error_status != NO_ERROR)
+	  {
+	    return error_status;
+	  }
+	if (is_locator)
+	  {
+	    error_status = db_clob_to_char (&materialized, codeset_value, result_value);
+	    pr_clear_value (&materialized);
+	    return error_status;
+	  }
+      }
+#endif /* defined (SERVER_MODE) || defined (SA_MODE) */
+
       clob_data = db_get_string (src_value);
       length = db_get_string_size (src_value);
       collation = db_get_string_collation (src_value);
@@ -24980,6 +25067,23 @@ db_clob_length (const DB_VALUE * src_value, DB_VALUE * result_value)
 
   if (src_type == DB_TYPE_CLOB)
     {
+#if defined (SERVER_MODE) || defined (SA_MODE)
+      DB_VALUE materialized;
+      bool is_locator = false;
+
+      error_status = internal_lob_materialize_if_locator (src_value, DB_TYPE_CLOB, &materialized, &is_locator);
+      if (error_status != NO_ERROR)
+	{
+	  return error_status;
+	}
+      if (is_locator)
+	{
+	  error_status = db_clob_length (&materialized, result_value);
+	  pr_clear_value (&materialized);
+	  return error_status;
+	}
+#endif /* defined (SERVER_MODE) || defined (SA_MODE) */
+
       db_make_bigint (result_value, db_get_string_length (src_value));
     }
   else
@@ -25153,7 +25257,28 @@ db_bfile_to_blob (const DB_VALUE * src_value, DB_VALUE * result_value)
 int
 db_blob_to_bfile (const DB_VALUE * src_value, DB_VALUE * result_value)
 {
+  int error_status = NO_ERROR;
+
   assert (src_value != NULL && result_value != NULL);
+
+#if defined (SERVER_MODE) || defined (SA_MODE)
+  {
+    DB_VALUE materialized;
+    bool is_locator = false;
+
+    error_status = internal_lob_materialize_if_locator (src_value, DB_TYPE_BLOB, &materialized, &is_locator);
+    if (error_status != NO_ERROR)
+      {
+	return error_status;
+      }
+    if (is_locator)
+      {
+	error_status = db_blob_to_bfile (&materialized, result_value);
+	pr_clear_value (&materialized);
+	return error_status;
+      }
+  }
+#endif /* defined (SERVER_MODE) || defined (SA_MODE) */
 
   return db_bit_to_bfile (src_value, result_value);
 }
@@ -25198,7 +25323,28 @@ db_cfile_to_clob (const DB_VALUE * src_value, DB_VALUE * result_value)
 int
 db_clob_to_cfile (const DB_VALUE * src_value, DB_VALUE * result_value)
 {
+  int error_status = NO_ERROR;
+
   assert (src_value != NULL && result_value != NULL);
+
+#if defined (SERVER_MODE) || defined (SA_MODE)
+  {
+    DB_VALUE materialized;
+    bool is_locator = false;
+
+    error_status = internal_lob_materialize_if_locator (src_value, DB_TYPE_CLOB, &materialized, &is_locator);
+    if (error_status != NO_ERROR)
+      {
+	return error_status;
+      }
+    if (is_locator)
+      {
+	error_status = db_clob_to_cfile (&materialized, result_value);
+	pr_clear_value (&materialized);
+	return error_status;
+      }
+  }
+#endif /* defined (SERVER_MODE) || defined (SA_MODE) */
 
   return db_char_to_cfile (src_value, result_value);
 }

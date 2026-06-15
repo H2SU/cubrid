@@ -9405,7 +9405,11 @@ tp_value_cast_internal (const DB_VALUE * src, DB_VALUE * dest, const TP_DOMAIN *
 	    err = db_blob_to_bit (src, NULL, &tmpval);
 	    if (err == NO_ERROR)
 	      {
-		err = tp_value_cast_internal (&tmpval, target, desired_domain, coercion_mode, do_domain_select, false);
+		status = tp_value_cast_internal (&tmpval, target, desired_domain, coercion_mode, do_domain_select, false);
+	      }
+	    else
+	      {
+		status = DOMAIN_INCOMPATIBLE;
 	      }
 
 	    (void) pr_clear_value (&tmpval);

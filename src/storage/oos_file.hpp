@@ -42,6 +42,8 @@ using OOS_RECDES = RECDES;
  * .c-file formatter mangles `cubbase::span<char>(...)`'s angle brackets. */
 using oos_buffer = cubbase::span<char>;
 
+typedef struct log_rcv LOG_RCV;
+
 #define OOS_NUM_BEST_SPACESTATS 10
 
 #define OOS_STATS_NEXT_BEST_INDEX(i) \
@@ -81,8 +83,11 @@ struct oos_hdr_stats
   int reserve1_for_future;
 };
 
+extern int oos_create_file_with_type (THREAD_ENTRY *thread_p, int file_type, VFID &oos_vfid);
 extern int oos_create_file (THREAD_ENTRY *thread_p, VFID &oos_vfid);
 extern int oos_remove_file (THREAD_ENTRY *thread_p, const VFID &oos_vfid);
+extern int oos_remove_page_with_type (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid,
+                                      int file_type);
 extern int oos_remove_page (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid);
 /* Inserts src.size() bytes; on multi-page payloads, oid is the head-chunk OID. */
 extern int oos_insert (THREAD_ENTRY *thread_p, const VFID &oos_vfid, oos_buffer src, OID &oid);
