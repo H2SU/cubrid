@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include <float.h>
+#include <string.h>
 #include <time.h>
 
 #include "csql.h"
@@ -56,6 +57,8 @@
 #define TIME_STRING_MAX         20
 
 #define OID_LENGTH      15
+
+#define CSQL_INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
 
 #define COMMA_CHAR      ','
 
@@ -1143,6 +1146,35 @@ duplicate_string (const char *string)
 
 }
 
+static bool
+csql_is_internal_lob_locator (const char *data, int size)
+{
+  int prefix_len = (int) strlen (CSQL_INTERNAL_LOB_LOCATOR_PREFIX);
+
+  return data != NULL && size > prefix_len && memcmp (data, CSQL_INTERNAL_LOB_LOCATOR_PREFIX, prefix_len) == 0;
+}
+
+static char *
+csql_duplicate_internal_lob_locator (const char *data, int size)
+{
+  char *locator;
+
+  if (!csql_is_internal_lob_locator (data, size))
+    {
+      return NULL;
+    }
+
+  locator = (char *) malloc (size + 1);
+  if (locator == NULL)
+    {
+      return NULL;
+    }
+  memcpy (locator, data, size);
+  locator[size] = '\0';
+
+  return locator;
+}
+
 /*
  * csql_string_to_plain_string() - Refine the string and return it
  *   return: refined plain string
@@ -1874,7 +1906,15 @@ csql_db_value_as_string (DB_VALUE * value, int *length, const CSQL_ARGUMENT * cs
 
     case DB_TYPE_BLOB:
       // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
-      result = bit_to_string (value, string_delimiter, plain_string);
+      {
+	int bit_length = 0;
+	const char *bit_data = (const char *) db_get_bit (value, &bit_length);
+	result = csql_duplicate_internal_lob_locator (bit_data, (bit_length + 7) / 8);
+      }
+      if (result == NULL)
+	{
+	  result = bit_to_string (value, string_delimiter, plain_string);
+	}
       if (result)
 	{
 	  len = strlen (result);
@@ -1891,6 +1931,12 @@ csql_db_value_as_string (DB_VALUE * value, int *length, const CSQL_ARGUMENT * cs
 
 	str = db_get_char (value);
 	bytes_size = db_get_string_size (value);
+	result = csql_duplicate_internal_lob_locator (str, bytes_size);
+	if (result != NULL)
+	  {
+	    len = strlen (result);
+	    break;
+	  }
 	if (bytes_size > 0 && db_get_string_codeset (value) == INTL_CODESET_UTF8)
 	  {
 	    need_decomp =

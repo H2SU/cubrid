@@ -77,6 +77,7 @@
 #include "dbtype.h"
 #include "thread_manager.hpp"	// for thread_get_thread_entry_info
 #include "db_value_printer.hpp"
+#include "internal_lob_file.hpp"
 #include "log_append.hpp"
 #include "string_buffer.hpp"
 #include "tde.h"
@@ -233,10 +234,37 @@ struct heap_hdr_stats
 				 * these values are only used for hints. These values may not be accurate at any given
 				 * time and the entries may contain duplicated pages. */
 
-  int reserve0_for_future;	/* Nothing reserved for future */
-  int reserve1_for_future;	/* Nothing reserved for future */
+  int reserve0_for_future;	/* Reused by CBRD-26914 PoC: internal LOB VFID.fileid */
+  int reserve1_for_future;	/* Reused by CBRD-26914 PoC: internal LOB VFID.volid */
   int reserve2_for_future;	/* Nothing reserved for future */
 };
+
+static_assert (sizeof (VFID) == 2 * sizeof (int), "HEAP_HDR_STATS reserve0/1 must fit one VFID");
+
+STATIC_INLINE void
+heap_get_internal_lob_vfid (const HEAP_HDR_STATS * heap_hdr, VFID * lob_vfid)
+{
+  memcpy (lob_vfid, &heap_hdr->reserve0_for_future, sizeof (*lob_vfid));
+  if (lob_vfid->fileid == 0 && lob_vfid->volid == 0)
+    {
+      VFID_SET_NULL (lob_vfid);
+    }
+}
+
+STATIC_INLINE void
+heap_set_internal_lob_vfid (HEAP_HDR_STATS * heap_hdr, const VFID * lob_vfid)
+{
+  memcpy (&heap_hdr->reserve0_for_future, lob_vfid, sizeof (*lob_vfid));
+}
+
+STATIC_INLINE void
+heap_null_internal_lob_vfid (HEAP_HDR_STATS * heap_hdr)
+{
+  VFID lob_vfid;
+
+  VFID_SET_NULL (&lob_vfid);
+  heap_set_internal_lob_vfid (heap_hdr, &lob_vfid);
+}
 
 typedef struct heap_stats_entry HEAP_STATS_ENTRY;
 struct heap_stats_entry
@@ -699,6 +727,7 @@ static int heap_attrinfo_get_record_header_size (HEAP_CACHE_ATTRINFO * attr_info
 static int heap_attrinfo_determine_disk_layout (HEAP_CACHE_ATTRINFO * attr_info, bool is_mvcc_class,
 						size_t * offset_size_ptr, std::vector<bool> * oos_columns,
 						bool * has_oos, size_t * inline_size_after_oos_ptr);
+static bool heap_internal_lob_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * lob_vfid, bool docreate);
 // *INDENT-ON*
 
 static void heap_attrvalue_point_fixed (RECDES * recdes, HEAP_CACHE_ATTRINFO * attr_info, OR_ATTRIBUTE * attrepr,
@@ -706,10 +735,10 @@ static void heap_attrvalue_point_fixed (RECDES * recdes, HEAP_CACHE_ATTRINFO * a
 static int heap_attrvalue_read_oos_inline (RECDES * recdes, RECDES * raw, char *oos_scratch, int oos_scratch_size,
 					   bool * oos_owned_buffer);
 static int heap_attrvalue_point_variable (RECDES * recdes, HEAP_CACHE_ATTRINFO * attr_info, OR_ATTRIBUTE * attrepr,
-					  RECDES * raw, bool * oos_owned_buffer, char *oos_scratch,
-					  int oos_scratch_size);
+					  RECDES * raw, bool * oos_owned_buffer, bool * internal_lob_locator,
+					  char *oos_scratch, int oos_scratch_size);
 static int heap_attrvalue_transform_to_dbvalue (HEAP_ATTRVALUE * value, OR_ATTRIBUTE * attrepr, RECDES * raw,
-						bool oos_owned_buffer);
+						bool oos_owned_buffer, bool internal_lob_locator);
 static int heap_attrvalue_read (RECDES * recdes, HEAP_ATTRVALUE * value, HEAP_CACHE_ATTRINFO * attr_info);
 
 static int heap_midxkey_get_value (RECDES * recdes, OR_ATTRIBUTE * att, DB_VALUE * value,
@@ -5377,6 +5406,7 @@ heap_create_internal (THREAD_ENTRY * thread_p, HFID * hfid, const OID * class_oi
   VFID_SET_NULL (&heap_hdr.ovf_vfid);
   VPID_SET_NULL (&heap_hdr.next_vpid);
   VFID_SET_NULL (&heap_hdr.oos_vfid);
+  heap_null_internal_lob_vfid (&heap_hdr);
 
   heap_hdr.unfill_space = (int) ((float) DB_PAGESIZE * prm_get_float_value (PRM_ID_HF_UNFILL_FACTOR));
 
@@ -5748,6 +5778,7 @@ heap_reuse (THREAD_ENTRY * thread_p, const HFID * hfid, const OID * class_oid, c
    */
   VFID_SET_NULL (&heap_hdr->ovf_vfid);
   VFID_SET_NULL (&heap_hdr->oos_vfid);
+  heap_null_internal_lob_vfid (heap_hdr);
   heap_hdr->unfill_space = (int) ((float) DB_PAGESIZE * prm_get_float_value (PRM_ID_HF_UNFILL_FACTOR));
   heap_hdr->estimates.num_pages = npages;
   heap_hdr->estimates.num_recs = 0;
@@ -5909,6 +5940,20 @@ xheap_destroy (THREAD_ENTRY * thread_p, const HFID * hfid, const OID * class_oid
       }
   }
 
+  /* Internal LOB file cleanup */
+  {
+    VFID lob_vfid;
+    if (heap_internal_lob_find_vfid (thread_p, hfid, &lob_vfid, false))
+      {
+	int error = internal_lob_remove_file (thread_p, lob_vfid);
+	if (error != NO_ERROR)
+	  {
+	    ASSERT_ERROR ();
+	    return error;
+	  }
+      }
+  }
+
   file_postpone_destroy (thread_p, &hfid->vfid);
 
   (void) heap_stats_del_bestspace_by_hfid (thread_p, hfid);
@@ -5965,6 +6010,20 @@ xheap_destroy_newly_created (THREAD_ENTRY * thread_p, const HFID * hfid, const O
     if (!VFID_ISNULL (&oos_vfid))
       {
 	ret = oos_remove_file (thread_p, oos_vfid);
+	if (ret != NO_ERROR)
+	  {
+	    ASSERT_ERROR ();
+	    return ret;
+	  }
+      }
+  }
+
+  /* Internal LOB file cleanup */
+  {
+    VFID lob_vfid;
+    if (heap_internal_lob_find_vfid (thread_p, hfid, &lob_vfid, false))
+      {
+	ret = internal_lob_remove_file (thread_p, lob_vfid);
 	if (ret != NO_ERROR)
 	  {
 	    ASSERT_ERROR ();
@@ -10593,12 +10652,14 @@ heap_attrvalue_read_oos_inline (RECDES * recdes, RECDES * raw, char *oos_scratch
  */
 static int
 heap_attrvalue_point_variable (RECDES * recdes, HEAP_CACHE_ATTRINFO * attr_info, OR_ATTRIBUTE * attrepr, RECDES * raw,
-			       bool * oos_owned_buffer, char *oos_scratch, int oos_scratch_size)
+			       bool * oos_owned_buffer, bool * internal_lob_locator, char *oos_scratch,
+			       int oos_scratch_size)
 {
   int offset;
   int offset_size;
 
   *oos_owned_buffer = false;
+  *internal_lob_locator = false;
 
   if (OR_VAR_IS_NULL (recdes->data, attrepr->location))
     {
@@ -10633,8 +10694,18 @@ heap_attrvalue_point_variable (RECDES * recdes, HEAP_CACHE_ATTRINFO * attr_info,
   raw->data = ((char *) recdes->data + OR_VAR_OFFSET (recdes->data, attrepr->location));
   if (OR_IS_OOS (offset))
     {
-      /* The helper owns oos_owned_buffer from here: false on Cases 1-4, true on success / Case 5. */
-      return heap_attrvalue_read_oos_inline (recdes, raw, oos_scratch, oos_scratch_size, oos_owned_buffer);
+      if (TP_IS_LOB_TYPE (TP_DOMAIN_TYPE (attrepr->domain)))
+	{
+	  /* Internal LOB keeps the OOS inline slot as a locator DB_VALUE. */
+	  raw->length = OR_OOS_INLINE_SIZE;
+	  *internal_lob_locator = true;
+	}
+      else
+	{
+	  /* The helper owns oos_owned_buffer from here: false on pre-allocation errors,
+	   * true when raw contains an OOS-owned buffer. */
+	  return heap_attrvalue_read_oos_inline (recdes, raw, oos_scratch, oos_scratch_size, oos_owned_buffer);
+	}
     }
   else
     {
@@ -10667,7 +10738,7 @@ heap_attrvalue_point_variable (RECDES * recdes, HEAP_CACHE_ATTRINFO * attr_info,
  */
 static int
 heap_attrvalue_transform_to_dbvalue (HEAP_ATTRVALUE * value, OR_ATTRIBUTE * attrepr, RECDES * raw,
-				     bool oos_owned_buffer)
+				     bool oos_owned_buffer, bool internal_lob_locator)
 {
   const PR_TYPE *pr_type;
   OR_BUF buf;
@@ -10695,6 +10766,24 @@ heap_attrvalue_transform_to_dbvalue (HEAP_ATTRVALUE * value, OR_ATTRIBUTE * attr
   else
     {
       or_init (&buf, raw->data, raw->length);
+
+      if (internal_lob_locator)
+	{
+	  INTERNAL_LOB_LOCATOR locator;
+	  int rc = NO_ERROR;
+
+	  or_get_oid (&buf, &locator.oid);
+	  locator.length = or_get_bigint (&buf, &rc);
+	  if (rc != NO_ERROR)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	      return ER_GENERIC_ERROR;
+	    }
+
+	  rv = internal_lob_make_locator_db_value (&value->dbvalue, TP_DOMAIN_TYPE (attrepr->domain), locator);
+	  value->state = HEAP_READ_ATTRVALUE;
+	  return rv;
+	}
 
       /* read the value according to disk information that was found */
       pr_type = pr_type_from_id (attrepr->type);
@@ -10732,6 +10821,7 @@ heap_attrvalue_read (RECDES * recdes, HEAP_ATTRVALUE * value, HEAP_CACHE_ATTRINF
   OR_ATTRIBUTE *attrepr;
   RECDES raw = { -1, -1, REC_UNKNOWN, NULL };
   bool oos_owned_buffer = false;
+  bool internal_lob_locator = false;
   /* Stack scratch for inline-OOS reads up to one I/O page; larger payloads heap-alloc. */
   char oos_scratch_buf[IO_MAX_PAGE_SIZE + MAX_ALIGNMENT];
   char *oos_scratch = PTR_ALIGN (oos_scratch_buf, MAX_ALIGNMENT);
@@ -10769,8 +10859,8 @@ heap_attrvalue_read (RECDES * recdes, HEAP_ATTRVALUE * value, HEAP_CACHE_ATTRINF
 	}
       else
 	{
-	  error = heap_attrvalue_point_variable (recdes, attr_info, attrepr, &raw, &oos_owned_buffer, oos_scratch,
-						 IO_MAX_PAGE_SIZE);
+	  error = heap_attrvalue_point_variable (recdes, attr_info, attrepr, &raw, &oos_owned_buffer,
+						 &internal_lob_locator, oos_scratch, IO_MAX_PAGE_SIZE);
 	  if (error != NO_ERROR)
 	    {
 	      /* Contract: only oos_owned_buffer (Case 5) leaves a buffer to reclaim; the free is
@@ -10786,7 +10876,7 @@ heap_attrvalue_read (RECDES * recdes, HEAP_ATTRVALUE * value, HEAP_CACHE_ATTRINF
     }
 
   /* the data pointer will point to either a current value in recdes or a default one in attrepr */
-  error = heap_attrvalue_transform_to_dbvalue (value, attrepr, &raw, oos_owned_buffer);
+  error = heap_attrvalue_transform_to_dbvalue (value, attrepr, &raw, oos_owned_buffer, internal_lob_locator);
   /* TODO: revisit when dbvalue supports zero-copy to OOS and a PEEK mode lands. */
   if (oos_owned_buffer && raw.data != oos_scratch)
     {
@@ -10809,6 +10899,7 @@ heap_midxkey_get_value (RECDES * recdes, OR_ATTRIBUTE * att, DB_VALUE * value, H
 {
   RECDES raw = { -1, -1, REC_UNKNOWN, NULL };
   bool oos_owned_buffer = false;
+  bool internal_lob_locator = false;
   bool found = true;		/* Does attribute(att) exist in this disk representation? */
   /* Stack scratch for inline-OOS reads up to one I/O page on the hot index-key path. */
   char oos_scratch_buf[IO_MAX_PAGE_SIZE + MAX_ALIGNMENT];
@@ -10854,8 +10945,8 @@ heap_midxkey_get_value (RECDES * recdes, OR_ATTRIBUTE * att, DB_VALUE * value, H
 	    }
 	  else
 	    {			/* A variable attribute */
-	      error = heap_attrvalue_point_variable (recdes, attr_info, att, &raw, &oos_owned_buffer, oos_scratch,
-						     IO_MAX_PAGE_SIZE);
+	      error = heap_attrvalue_point_variable (recdes, attr_info, att, &raw, &oos_owned_buffer,
+						     &internal_lob_locator, oos_scratch, IO_MAX_PAGE_SIZE);
 	      if (error != NO_ERROR)
 		{
 		  /* value is already db_make_null at entry; only Case 5 leaves a buffer (NULL-tolerant free). */
@@ -10879,8 +10970,24 @@ heap_midxkey_get_value (RECDES * recdes, OR_ATTRIBUTE * att, DB_VALUE * value, H
       OR_BUF buf;
 
       or_init (&buf, raw.data, raw.length);
-      /* OOS-owned buffer => COPY (PEEK would dangle once we free it below). */
-      att->domain->type->data_readval (&buf, value, att->domain, raw.length, oos_owned_buffer, NULL, 0);
+      if (internal_lob_locator)
+	{
+	  INTERNAL_LOB_LOCATOR locator;
+	  int rc = NO_ERROR;
+
+	  or_get_oid (&buf, &locator.oid);
+	  locator.length = or_get_bigint (&buf, &rc);
+	  if (rc != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  return internal_lob_make_locator_db_value (value, TP_DOMAIN_TYPE (att->domain), locator);
+	}
+      else
+	{
+	  /* OOS-owned buffer => COPY (PEEK would dangle once we free it below). */
+	  att->domain->type->data_readval (&buf, value, att->domain, raw.length, oos_owned_buffer, NULL, 0);
+	}
     }
 
   if (oos_owned_buffer && raw.data != oos_scratch)
@@ -12205,6 +12312,17 @@ heap_attrinfo_determine_disk_layout (HEAP_CACHE_ATTRINFO * attr_info, bool is_mv
 
   /* calcuate the entire size of columns */
   payload_size = heap_attrinfo_get_record_payload_size (attr_info, &column_size);
+  for (i = 0; i < attr_info->num_values; i++)
+    {
+      if (!attr_info->values[i].last_attrepr->is_fixed
+	  && TP_IS_LOB_TYPE (TP_DOMAIN_TYPE (attr_info->values[i].last_attrepr->domain)) && column_size[i] > 0)
+	{
+	  (*oos_columns)[i] = true;
+	  payload_size -= column_size[i];
+	  payload_size += OR_OOS_INLINE_SIZE;
+	  *has_oos = true;
+	}
+    }
   header_size = heap_attrinfo_get_record_header_size (attr_info, payload_size, is_mvcc_class, offset_size_ptr);
   mvcc_extra = is_mvcc_class ? OR_MVCC_MAX_HEADER_SIZE - OR_MVCC_INSERT_HEADER_SIZE : 0;
 
@@ -12219,9 +12337,9 @@ heap_attrinfo_determine_disk_layout (HEAP_CACHE_ATTRINFO * attr_info, bool is_mv
 
       for (i = 0; i < attr_info->num_values; i++)
 	{
-	  /* a variable column is OOS-eligible only if externalizing it shrinks the inline record:
-	   * its value must be larger than the OOS stub (OID + length) it is replaced with */
-	  if (!attr_info->values[i].last_attrepr->is_fixed && column_size[i] > OR_OOS_INLINE_SIZE)
+	  /* A variable column is eligible only when it was not already assigned the
+	   * dedicated internal-LOB locator path and externalizing it shrinks the record. */
+	  if (!(*oos_columns)[i] && !attr_info->values[i].last_attrepr->is_fixed && column_size[i] > OR_OOS_INLINE_SIZE)
 	    {
 	      // *INDENT-OFF*
 	      heap_oos_demote_priority priority =
@@ -12372,6 +12490,84 @@ end:
   return success;
 }
 
+static bool
+heap_internal_lob_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * lob_vfid, bool docreate)
+{
+  HEAP_HDR_STATS *heap_hdr;	/* Header of heap structure */
+  LOG_DATA_ADDR addr_hdr;	/* Address of logging data */
+  VPID vpid;			/* Page-volume identifier */
+  RECDES hdr_recdes;		/* Header record descriptor */
+  PGBUF_LATCH_MODE mode;
+  bool success;
+
+  success = true;
+
+  addr_hdr.vfid = &hfid->vfid;
+  addr_hdr.offset = HEAP_HEADER_AND_CHAIN_SLOTID;
+
+  /* Read the header page */
+  vpid.volid = hfid->vfid.volid;
+  vpid.pageid = hfid->hpgid;
+
+  mode = (docreate == true ? PGBUF_LATCH_WRITE : PGBUF_LATCH_READ);
+  addr_hdr.pgptr = pgbuf_fix (thread_p, &vpid, OLD_PAGE, mode, PGBUF_UNCONDITIONAL_LATCH);
+  if (addr_hdr.pgptr == NULL)
+    {
+      goto exit_on_error;
+    }
+
+#if !defined (NDEBUG)
+  (void) pgbuf_check_page_ptype (thread_p, addr_hdr.pgptr, PAGE_HEAP);
+#endif /* !NDEBUG */
+
+  /* Peek the header record */
+  if (spage_get_record (thread_p, addr_hdr.pgptr, HEAP_HEADER_AND_CHAIN_SLOTID, &hdr_recdes, PEEK) != S_SUCCESS)
+    {
+      goto exit_on_error;
+    }
+
+  heap_hdr = (HEAP_HDR_STATS *) hdr_recdes.data;
+  heap_get_internal_lob_vfid (heap_hdr, lob_vfid);
+  if (VFID_ISNULL (lob_vfid))
+    {
+      if (docreate == true)
+	{
+	  /* START A TOP SYSTEM OPERATION */
+	  log_sysop_start (thread_p);
+	  if (internal_lob_create_file (thread_p, *lob_vfid) != NO_ERROR)
+	    {
+	      log_sysop_abort (thread_p);
+	      goto exit_on_error;
+	    }
+
+	  /* Log undo, then redo */
+	  log_append_undo_data (thread_p, RVHF_STATS, &addr_hdr, sizeof (*heap_hdr), heap_hdr);
+	  heap_set_internal_lob_vfid (heap_hdr, lob_vfid);
+	  log_append_redo_data (thread_p, RVHF_STATS, &addr_hdr, sizeof (*heap_hdr), heap_hdr);
+	  pgbuf_set_dirty (thread_p, addr_hdr.pgptr, DONT_FREE);
+
+	  log_sysop_commit (thread_p);
+	}
+      else
+	{
+	  goto exit_on_error;
+	}
+    }
+
+  goto end;
+
+exit_on_error:
+  success = false;
+
+end:
+  if (addr_hdr.pgptr)
+    {
+      pgbuf_unfix_and_init (thread_p, addr_hdr.pgptr);
+    }
+
+  return success;
+}
+
 static SCAN_CODE
 heap_attrinfo_dbvalue_to_recdes (THREAD_ENTRY * thread_p, HEAP_ATTRVALUE * value, OID class_oid, int lobfile_create_flag,
 				 RECDES * recdes)
@@ -12464,22 +12660,24 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
   char recbuf[IO_MAX_PAGE_SIZE + MAX_ALIGNMENT];
   HFID oos_hfid;
   VFID oos_vfid;
+  VFID lob_vfid;
   OID oos_oid;
+  INTERNAL_LOB_LOCATOR lob_locator;
   RECDES recdes;
   LOG_TDES *tdes;
   int tran_index;
   int i;
+  bool have_oos_vfid = false;
+  bool have_lob_vfid = false;
 
   recdes.area_size = IO_MAX_PAGE_SIZE;
   recdes.length = 0;
   recdes.data = PTR_ALIGN (recbuf, MAX_ALIGNMENT);
   recdes.type = REC_HOME;
+  VFID_SET_NULL (&oos_vfid);
+  VFID_SET_NULL (&lob_vfid);
 
   if (heap_get_class_info (thread_p, &attr_info->class_oid, &oos_hfid, NULL, NULL) != NO_ERROR)
-    {
-      return S_ERROR;
-    }
-  if (!heap_oos_find_vfid (thread_p, &oos_hfid, &oos_vfid, true))
     {
       return S_ERROR;
     }
@@ -12502,8 +12700,27 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
       /* is this oos column ? */
       if ((*oos_columns)[i])
 	{
+	  bool is_internal_lob = TP_IS_LOB_TYPE (TP_DOMAIN_TYPE (attr_info->values[i].last_attrepr->domain));
+
 	  assert (attr_info->values != NULL && !db_value_is_null (&attr_info->values[i].dbvalue));
 	  assert (!attr_info->values[i].last_attrepr->is_fixed);
+
+	  if (is_internal_lob)
+	    {
+	      if (!have_lob_vfid && !heap_internal_lob_find_vfid (thread_p, &oos_hfid, &lob_vfid, true))
+		{
+		  goto error_oos;
+		}
+	      have_lob_vfid = true;
+	    }
+	  else
+	    {
+	      if (!have_oos_vfid && !heap_oos_find_vfid (thread_p, &oos_hfid, &oos_vfid, true))
+		{
+		  goto error_oos;
+		}
+	      have_oos_vfid = true;
+	    }
 
 	  /* heap_attrinfo_dbvalue_to_recdes may replace recdes.data with a malloc'd
 	   * buffer when the dbvalue doesn't fit the stack scratch. Both failure
@@ -12513,14 +12730,29 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
 	    {
 	      goto error_oos;
 	    }
-	  if (oos_insert (thread_p, oos_vfid, oos_buffer (recdes.data, (size_t) recdes.length), oos_oid) != NO_ERROR)
+
+	  if (is_internal_lob)
 	    {
-	      goto error_oos;
+	      if (internal_lob_insert (thread_p, lob_vfid, oos_buffer (recdes.data, (size_t) recdes.length),
+				       lob_locator) != NO_ERROR)
+		{
+		  goto error_oos;
+		}
+	      oos_oid = lob_locator.oid;
+	      (*oos_lengths)[i] = lob_locator.length;
+	    }
+	  else
+	    {
+	      if (oos_insert (thread_p, oos_vfid, oos_buffer (recdes.data, (size_t) recdes.length), oos_oid)
+		  != NO_ERROR)
+		{
+		  goto error_oos;
+		}
+	      (*oos_lengths)[i] = (DB_BIGINT) recdes.length;
 	    }
 
 	  thread_p->oos_oids.push_back (oos_oid);	/* for replication log */
 	  (*oos_oids)[i] = oos_oid;
-	  (*oos_lengths)[i] = (DB_BIGINT) recdes.length;
 	  if (recdes.data != PTR_ALIGN (recbuf, MAX_ALIGNMENT))
 	    {
 	      free_and_init (recdes.data);
@@ -13050,7 +13282,7 @@ heap_attrinfo_transform_to_disk_internal (THREAD_ENTRY * thread_p, HEAP_CACHE_AT
   bool has_oos;
   // *INDENT-OFF*
   std::vector<bool> oos_columns (attr_info->num_values);
-  std::vector<OID> oos_oids (attr_info->num_values);
+  std::vector<OID> oos_oids (attr_info->num_values, oid_Null_oid);
   std::vector<DB_BIGINT> oos_lengths (attr_info->num_values, 0);
   std::set<int> incremented_attrids;
   // *INDENT-ON*
@@ -15594,6 +15826,11 @@ heap_dump_hdr (FILE * fp, HEAP_HDR_STATS * heap_hdr)
 	   heap_hdr->class_oid.slotid);
   fprintf (fp, "OVF_VFID = %4d|%4d, NEXT_VPID = %4d|%4d\n", heap_hdr->ovf_vfid.volid, heap_hdr->ovf_vfid.fileid,
 	   heap_hdr->next_vpid.volid, heap_hdr->next_vpid.pageid);
+  VFID internal_lob_vfid;
+
+  heap_get_internal_lob_vfid (heap_hdr, &internal_lob_vfid);
+  fprintf (fp, "OOS_VFID = %4d|%4d, INTERNAL_LOB_VFID = %4d|%4d\n", heap_hdr->oos_vfid.volid,
+	   heap_hdr->oos_vfid.fileid, internal_lob_vfid.volid, internal_lob_vfid.fileid);
   fprintf (fp, "unfill_space = %4d\n", heap_hdr->unfill_space);
   fprintf (fp, "Estimated: num_pages = %d, num_recs = %d,  avg reclength = %d\n", heap_hdr->estimates.num_pages,
 	   heap_hdr->estimates.num_recs, avg_length);

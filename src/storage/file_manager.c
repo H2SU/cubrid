@@ -1429,6 +1429,7 @@ file_header_dump_descriptor (THREAD_ENTRY * thread_p, const FILE_HEADER * fhead,
   switch (fhead->type)
     {
     case FILE_OOS:
+    case FILE_INTERNAL_LOB:
       {
 	assert (false);
 	break;
@@ -3061,6 +3062,8 @@ file_type_to_string (FILE_TYPE fstruct_type)
       return "TEMPORARILY";
     case FILE_OOS:
       return "OUT_OF_LINE_OVERFLOW_STORAGE";
+    case FILE_INTERNAL_LOB:
+      return "INTERNAL_LOB";
     case FILE_UNKNOWN_TYPE:
       return "UNKNOWN";
     case FILE_HEAP_REUSE_SLOTS:
@@ -3445,7 +3448,8 @@ file_create (THREAD_ENTRY * thread_p, FILE_TYPE file_type,
 
   /* decide on what page to use as file header page (which is going to decide the VFID also). */
 #if defined (SERVER_MODE)
-  if (file_type == FILE_BTREE || file_type == FILE_HEAP || file_type == FILE_HEAP_REUSE_SLOTS || file_type == FILE_OOS)
+  if (file_type == FILE_BTREE || file_type == FILE_HEAP || file_type == FILE_HEAP_REUSE_SLOTS || file_type == FILE_OOS
+      || file_type == FILE_INTERNAL_LOB)
     {
       /* we need to consider dropped files in vacuum's list. If we create a file with a duplicate VFID, we can run
        * into problems. */
@@ -10901,6 +10905,7 @@ file_tracker_get_and_protect (THREAD_ENTRY * thread_p, FILE_TYPE desired_type, F
       /* accept any type */
       break;
     case FILE_OOS:
+    case FILE_INTERNAL_LOB:
       {
 	assert (false);
 	break;
@@ -10929,6 +10934,7 @@ file_tracker_get_and_protect (THREAD_ENTRY * thread_p, FILE_TYPE desired_type, F
   switch ((FILE_TYPE) item->type)
     {
     case FILE_OOS:
+    case FILE_INTERNAL_LOB:
       {
 	assert (false);
 	break;
@@ -10973,6 +10979,7 @@ file_tracker_get_and_protect (THREAD_ENTRY * thread_p, FILE_TYPE desired_type, F
       *class_oid = fhead->descriptor.btree.class_oid;
       break;
     case FILE_OOS:
+    case FILE_INTERNAL_LOB:
       {
 	assert (false);
 	break;
@@ -12233,6 +12240,7 @@ file_tracker_item_spacedb (THREAD_ENTRY * thread_p, PAGE_PTR page_of_item, FILE_
       spacedb_ftype = SPACEDB_INDEX_FILE;
       break;
     case FILE_OOS:
+    case FILE_INTERNAL_LOB:
       assert_release (false);
       //TODO: spacedb_ftype = SPACEDB_OOS_FILE;
       spacedb_ftype = SPACEDB_HEAP_FILE;

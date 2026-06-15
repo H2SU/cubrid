@@ -907,7 +907,7 @@ oos_stats_update (THREAD_ENTRY *thread_p, PAGE_PTR pgptr, const VFID *vfid, int 
 // ****************************************************************************
 
 int
-oos_create_file (THREAD_ENTRY *thread_p, VFID &oos_vfid)
+oos_create_file_with_type (THREAD_ENTRY *thread_p, int file_type, VFID &oos_vfid)
 {
   int err = NO_ERROR;
   FILE_DESCRIPTORS des;
@@ -921,7 +921,7 @@ oos_create_file (THREAD_ENTRY *thread_p, VFID &oos_vfid)
   tablespace.expand_min_size = DISK_SECTOR_NPAGES * DB_PAGESIZE;
   tablespace.expand_max_size = DISK_SECTOR_NPAGES * DB_PAGESIZE * 1024;
 
-  err = file_create (thread_p, FILE_OOS, &tablespace, &des,
+  err = file_create (thread_p, (FILE_TYPE) file_type, &tablespace, &des,
 		     false /* is_temp */, true /* is_numerable */, &oos_vfid);
   if (err != NO_ERROR)
     {
@@ -986,10 +986,16 @@ oos_create_file (THREAD_ENTRY *thread_p, VFID &oos_vfid)
 
   log_sysop_commit (thread_p);
 
-  oos_trace ("created OOS file {fileid=%d, volid=%d} with header page {pageid=%d}",
-	     oos_vfid.fileid, oos_vfid.volid, hdr_vpid.pageid);
+  oos_trace ("created OOS-like file type=%d {fileid=%d, volid=%d} with header page {pageid=%d}",
+	     (int) file_type, oos_vfid.fileid, oos_vfid.volid, hdr_vpid.pageid);
 
   return NO_ERROR;
+}
+
+int
+oos_create_file (THREAD_ENTRY *thread_p, VFID &oos_vfid)
+{
+  return oos_create_file_with_type (thread_p, FILE_OOS, oos_vfid);
 }
 
 int
@@ -1005,9 +1011,9 @@ oos_remove_file (THREAD_ENTRY *thread_p, const VFID &oos_vfid)
 
 // TODO: will be called by vacuum when OOS vacuum is implemented
 int
-oos_remove_page (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid)
+oos_remove_page_with_type (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid, int file_type)
 {
-  int err = file_dealloc (thread_p, &oos_vfid, &vpid, FILE_OOS);
+  int err = file_dealloc (thread_p, &oos_vfid, &vpid, (FILE_TYPE) file_type);
   if (err != NO_ERROR)
     {
       oos_error ("file_dealloc failed for vpid={pageid=%d, volid=%d}", vpid.pageid, vpid.volid);
@@ -1015,6 +1021,12 @@ oos_remove_page (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid)
     }
 
   return NO_ERROR;
+}
+
+int
+oos_remove_page (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid)
+{
+  return oos_remove_page_with_type (thread_p, oos_vfid, vpid, FILE_OOS);
 }
 
 
