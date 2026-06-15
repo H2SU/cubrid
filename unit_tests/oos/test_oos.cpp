@@ -223,6 +223,56 @@ TEST (OosTest, OosInsertLarge160KBString)
   ASSERT_EQ (rec_out.data, nullptr);
 }
 
+TEST (OosTest, OosStreamingReadPullAcrossChunks)
+{
+  int err;
+  VFID oos_vfid;
+
+  err = oos_create_file (thread_p, oos_vfid);
+  ASSERT_EQ (err, NO_ERROR);
+
+  const int large_size = 160 * 1024; // spans many chunks
+  auto large_data = test_oos_utils::make_repeated_pattern_string (large_size);
+
+  RECDES rec_in{};
+  err = test_oos_utils::from_string_into_recdes (large_data, rec_in); // includes trailing NUL
+  ASSERT_EQ (err, NO_ERROR);
+
+  OID oid;
+  err = test_oos_utils::oos_insert_from_recdes (thread_p, oos_vfid, rec_in, oid);
+  ASSERT_EQ (err, NO_ERROR);
+
+  const int total_len = rec_in.length;
+
+  // Pull the payload back in small fixed pieces and reassemble. The 100-byte
+  // buffer does not align to chunk boundaries, so this exercises copies that
+  // straddle the OOS chunk chain.
+  OOS_READER reader;
+  err = oos_read_open (thread_p, oid, reader);
+  ASSERT_EQ (err, NO_ERROR);
+
+  std::string assembled;
+  char buf[100];
+  int nread = 0;
+  int guard = 0;
+  do
+    {
+      err = oos_read_pull (thread_p, reader, oos_buffer (buf, sizeof (buf)), nread);
+      ASSERT_EQ (err, NO_ERROR);
+      ASSERT_GE (nread, 0);
+      ASSERT_LE (nread, (int) sizeof (buf));
+      assembled.append (buf, static_cast<std::size_t> (nread));
+      ASSERT_LT (++guard, total_len + 10); // guard against a non-advancing cursor
+    }
+  while (nread > 0);
+
+  ASSERT_EQ (static_cast<int> (assembled.size ()), total_len);
+  ASSERT_EQ (std::memcmp (assembled.data (), rec_in.data, static_cast<std::size_t> (total_len)), 0);
+
+  recdes_free_data_area (&rec_in);
+  ASSERT_EQ (rec_in.data, nullptr);
+}
+
 TEST (OosTest, OosInsertAndRead100LargeStringsAroundMaxOosChunkSize)
 {
   int err;

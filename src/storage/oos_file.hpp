@@ -87,7 +87,7 @@ extern int oos_create_file_with_type (THREAD_ENTRY *thread_p, int file_type, VFI
 extern int oos_create_file (THREAD_ENTRY *thread_p, VFID &oos_vfid);
 extern int oos_remove_file (THREAD_ENTRY *thread_p, const VFID &oos_vfid);
 extern int oos_remove_page_with_type (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid,
-                                      int file_type);
+				      int file_type);
 extern int oos_remove_page (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid);
 /* Inserts src.size() bytes; on multi-page payloads, oid is the head-chunk OID. */
 extern int oos_insert (THREAD_ENTRY *thread_p, const VFID &oos_vfid, oos_buffer src, OID &oid);
@@ -99,6 +99,22 @@ extern int oos_delete (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const OID &
  * or a removed slot both report "gone" with NO_ERROR; any other failure is propagated. */
 extern int oos_chunk_exists (THREAD_ENTRY *thread_p, const OID &oid, bool *out_exists);
 extern int oos_get_length (THREAD_ENTRY *thread_p, const OID &oid);
+
+/* Forward-only streaming reader over an OOS chunk chain. Lets a caller pull an
+ * arbitrarily large payload in bounded pieces without materializing the whole
+ * value: open with oos_read_open on the head OID, then call oos_read_pull
+ * repeatedly until it reports nread == 0 (chain exhausted). Sequential pulls walk
+ * the chain once (O(total)), unlike repeated oos_read calls from the head. */
+struct oos_reader
+{
+  OID current;			/* chunk currently being read; NULL OID once exhausted */
+  int chunk_consumed;		/* bytes already returned from current chunk's payload */
+  int next_index;		/* expected chunk_index of `current` (0 at head) */
+};
+using OOS_READER = struct oos_reader;
+
+extern int oos_read_open (THREAD_ENTRY *thread_p, const OID &head_oid, OOS_READER &reader);
+extern int oos_read_pull (THREAD_ENTRY *thread_p, OOS_READER &reader, oos_buffer dest, int &nread);
 
 extern int oos_rv_redo_delete (THREAD_ENTRY *thread_p, LOG_RCV *rcv);
 extern int oos_rv_redo_insert (THREAD_ENTRY *thread_p, LOG_RCV *rcv);
