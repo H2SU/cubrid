@@ -528,6 +528,119 @@ internal_lob_read (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, 
 }
 
 int
+internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT offset, oos_buffer dest,
+			 int &nread)
+{
+  char skip_buffer[64 * 1024];
+  INTERNAL_LOB_READER reader;
+  DB_BIGINT segment_start = 0;
+  DB_BIGINT to_skip;
+  DB_BIGINT max_to_read;
+  int err;
+  int segment_index = 0;
+
+  nread = 0;
+
+  if (offset < 0 || locator.length < 0 || (dest.data () == NULL && dest.size () > 0))
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  if (dest.size () == 0 || offset >= locator.length)
+    {
+      return NO_ERROR;
+    }
+
+  max_to_read = locator.length - offset;
+  if (max_to_read > (DB_BIGINT) dest.size ())
+    {
+      max_to_read = (DB_BIGINT) dest.size ();
+    }
+  if (max_to_read > (DB_BIGINT) INT_MAX)
+    {
+      max_to_read = (DB_BIGINT) INT_MAX;
+    }
+
+  err = internal_lob_read_open (thread_p, locator, reader);
+  if (err != NO_ERROR)
+    {
+      return err;
+    }
+
+  while (segment_index < (int) reader.segments.size ())
+    {
+      const INTERNAL_LOB_SEGMENT &segment = reader.segments[static_cast<std::size_t> (segment_index)];
+
+      if (segment.length < 0 || segment_start > DB_BIGINT_MAX - (DB_BIGINT) segment.length)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+      if (offset < segment_start + (DB_BIGINT) segment.length)
+	{
+	  break;
+	}
+
+      segment_start += (DB_BIGINT) segment.length;
+      segment_index++;
+    }
+  if (segment_index >= (int) reader.segments.size ())
+    {
+      return NO_ERROR;
+    }
+
+  if (segment_index != reader.current_segment)
+    {
+      reader.current_segment = segment_index;
+      reader.total_read = segment_start;
+      err = internal_lob_reader_open_current_segment (thread_p, reader);
+      if (err != NO_ERROR)
+	{
+	  return err;
+	}
+    }
+
+  to_skip = offset - segment_start;
+  while (to_skip > 0)
+    {
+      int skip_size = (to_skip > (DB_BIGINT) sizeof (skip_buffer)) ? (int) sizeof (skip_buffer) : (int) to_skip;
+      int skipped = 0;
+
+      err = internal_lob_read_pull (thread_p, reader, oos_buffer (skip_buffer, (std::size_t) skip_size), skipped);
+      if (err != NO_ERROR)
+	{
+	  return err;
+	}
+      if (skipped <= 0)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+
+      to_skip -= (DB_BIGINT) skipped;
+    }
+
+  while (nread < (int) max_to_read)
+    {
+      int pulled = 0;
+      const int pull_size = (int) max_to_read - nread;
+
+      err = internal_lob_read_pull (thread_p, reader, dest.subspan ((std::size_t) nread, (std::size_t) pull_size),
+				    pulled);
+      if (err != NO_ERROR)
+	{
+	  return err;
+	}
+      if (pulled <= 0)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+
+      nread += pulled;
+    }
+
+  return NO_ERROR;
+}
+
+int
 internal_lob_read_open (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, INTERNAL_LOB_READER &reader)
 {
   int err;
