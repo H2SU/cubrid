@@ -19,6 +19,8 @@
 #ifndef _INTERNAL_LOB_FILE_HPP_
 #define _INTERNAL_LOB_FILE_HPP_
 
+#include <vector>
+
 #include "dbtype_def.h"
 #include "oos_file.hpp"
 #include "object_domain.h"
@@ -27,16 +29,53 @@ struct internal_lob_locator
 {
   OID oid;
   DB_BIGINT length;
+  bool is_manifest = false;
 };
 using INTERNAL_LOB_LOCATOR = struct internal_lob_locator;
+
+struct internal_lob_segment
+{
+  OID oid;
+  int length;
+};
+using INTERNAL_LOB_SEGMENT = struct internal_lob_segment;
+
+struct internal_lob_writer
+{
+  VFID lob_vfid;
+  char *segment_buffer = NULL;
+  int segment_size = 0;
+  int segment_buffer_length = 0;
+  DB_BIGINT total_length = 0;
+  std::vector<INTERNAL_LOB_SEGMENT> segments;
+};
+using INTERNAL_LOB_WRITER = struct internal_lob_writer;
+
+struct internal_lob_reader
+{
+  std::vector<INTERNAL_LOB_SEGMENT> segments;
+  int current_segment = 0;
+  int current_segment_read = 0;
+  DB_BIGINT total_length = 0;
+  DB_BIGINT total_read = 0;
+  OOS_READER oos_reader;
+};
+using INTERNAL_LOB_READER = struct internal_lob_reader;
 
 #define INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
 
 extern int internal_lob_create_file (THREAD_ENTRY *thread_p, VFID &lob_vfid);
 extern int internal_lob_remove_file (THREAD_ENTRY *thread_p, const VFID &lob_vfid);
 extern int internal_lob_insert (THREAD_ENTRY *thread_p, const VFID &lob_vfid, oos_buffer src,
-                                INTERNAL_LOB_LOCATOR &locator);
+				INTERNAL_LOB_LOCATOR &locator);
+extern int internal_lob_insert_begin (THREAD_ENTRY *thread_p, const VFID &lob_vfid, INTERNAL_LOB_WRITER &writer);
+extern int internal_lob_insert_append (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, oos_buffer chunk);
+extern int internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer,
+				    INTERNAL_LOB_LOCATOR &locator);
 extern int internal_lob_read (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, oos_buffer dest);
+extern int internal_lob_read_open (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator,
+				   INTERNAL_LOB_READER &reader);
+extern int internal_lob_read_pull (THREAD_ENTRY *thread_p, INTERNAL_LOB_READER &reader, oos_buffer dest, int &nread);
 extern int internal_lob_delete (THREAD_ENTRY *thread_p, const VFID &lob_vfid, const INTERNAL_LOB_LOCATOR &locator);
 extern int internal_lob_get_length (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator);
 
@@ -44,6 +83,6 @@ extern bool internal_lob_parse_locator_string (const char *data, int size, INTER
 extern bool internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *locator);
 extern int internal_lob_make_locator_db_value (DB_VALUE *value, DB_TYPE lob_type, const INTERNAL_LOB_LOCATOR &locator);
 extern int internal_lob_read_db_value (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_TYPE lob_type,
-                                       DB_VALUE *value, TP_DOMAIN *domain);
+				       DB_VALUE *value, TP_DOMAIN *domain);
 
 #endif /* _INTERNAL_LOB_FILE_HPP_ */
