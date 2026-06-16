@@ -10767,14 +10767,20 @@ heap_attrvalue_transform_to_dbvalue (HEAP_ATTRVALUE * value, OR_ATTRIBUTE * attr
       if (internal_lob_locator)
 	{
 	  INTERNAL_LOB_LOCATOR locator;
+	  DB_BIGINT disk_length;
 	  int rc = NO_ERROR;
 
 	  or_get_oid (&buf, &locator.oid);
-	  locator.length = or_get_bigint (&buf, &rc);
+	  disk_length = or_get_bigint (&buf, &rc);
 	  if (rc != NO_ERROR)
 	    {
 	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
 	      return ER_GENERIC_ERROR;
+	    }
+	  rv = internal_lob_decode_disk_length (locator, disk_length);
+	  if (rv != NO_ERROR)
+	    {
+	      return rv;
 	    }
 
 	  rv = internal_lob_make_locator_db_value (&value->dbvalue, TP_DOMAIN_TYPE (attrepr->domain), locator);
@@ -10970,11 +10976,16 @@ heap_midxkey_get_value (RECDES * recdes, OR_ATTRIBUTE * att, DB_VALUE * value, H
       if (internal_lob_locator)
 	{
 	  INTERNAL_LOB_LOCATOR locator;
+	  DB_BIGINT disk_length;
 	  int rc = NO_ERROR;
 
 	  or_get_oid (&buf, &locator.oid);
-	  locator.length = or_get_bigint (&buf, &rc);
+	  disk_length = or_get_bigint (&buf, &rc);
 	  if (rc != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  if (internal_lob_decode_disk_length (locator, disk_length) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -12581,16 +12592,18 @@ int
 heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, const DB_VALUE * value,
 				INTERNAL_LOB_LOCATOR * locator)
 {
-  char recbuf[IO_MAX_PAGE_SIZE + MAX_ALIGNMENT];
-  char *record_data = NULL;
-  char *alloc_record_data = NULL;
   HFID hfid;
   VFID lob_vfid;
-  OR_BUF buf;
-  const PR_TYPE *pr_type;
+  INTERNAL_LOB_WRITER writer;
+  INTERNAL_LOB_LOCATOR source_locator;
+  DB_VALUE materialized_value;
+  const DB_VALUE *source_value = value;
+  const char *raw_data = NULL;
   DB_TYPE type;
-  int length;
+  int raw_length = 0;
+  int raw_bit_length = -1;
   int error = NO_ERROR;
+  bool need_clear_materialized = false;
 
   if (class_oid == NULL || value == NULL || locator == NULL || DB_IS_NULL (value))
     {
@@ -12600,70 +12613,90 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
     }
 
   type = DB_VALUE_DOMAIN_TYPE (value);
-  if (!TP_IS_LOB_TYPE (type))
+
+  db_make_null (&materialized_value);
+  if (internal_lob_db_value_is_locator (value, &source_locator))
+    {
+      error = internal_lob_read_db_value (thread_p, source_locator, type, &materialized_value, NULL);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+      source_value = &materialized_value;
+      need_clear_materialized = true;
+    }
+
+  if (type == DB_TYPE_CLOB)
+    {
+      raw_data = db_get_string (source_value);
+      raw_length = db_get_string_size (source_value);
+    }
+  else if (type == DB_TYPE_BLOB)
+    {
+      int bit_length = 0;
+
+      raw_data = (const char *) db_get_bit (source_value, &bit_length);
+      raw_length = db_get_string_size (source_value);
+      raw_bit_length = bit_length;
+      if (bit_length < 0)
+	{
+	  error = ER_GENERIC_ERROR;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+	  goto exit;
+	}
+    }
+  else
     {
       error = ER_GENERIC_ERROR;
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
-      return error;
+      goto exit;
+    }
+
+  if (raw_length < 0 || (raw_length > 0 && raw_data == NULL))
+    {
+      error = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+      goto exit;
     }
 
   if (heap_get_class_info (thread_p, class_oid, &hfid, NULL, NULL) != NO_ERROR)
     {
       ASSERT_ERROR_AND_SET (error);
-      return error;
+      goto exit;
     }
 
   VFID_SET_NULL (&lob_vfid);
   if (!heap_internal_lob_find_vfid (thread_p, &hfid, &lob_vfid, true))
     {
       ASSERT_ERROR_AND_SET (error);
-      return error;
-    }
-
-  pr_type = pr_type_from_id (type);
-  if (pr_type == NULL)
-    {
-      error = ER_GENERIC_ERROR;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
-      return error;
-    }
-
-  length = pr_type->get_disk_size_of_value (value);
-  if (length < 0)
-    {
-      error = ER_GENERIC_ERROR;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
-      return error;
-    }
-
-  if ((size_t) length <= IO_MAX_PAGE_SIZE)
-    {
-      record_data = PTR_ALIGN (recbuf, MAX_ALIGNMENT);
-    }
-  else
-    {
-      alloc_record_data = (char *) malloc (length);
-      if (alloc_record_data == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) length);
-	  return ER_OUT_OF_VIRTUAL_MEMORY;
-	}
-      record_data = alloc_record_data;
-    }
-
-  or_init (&buf, record_data, length);
-  if (pr_type->data_writeval (&buf, value) != NO_ERROR)
-    {
-      ASSERT_ERROR_AND_SET (error);
       goto exit;
     }
 
-  error = internal_lob_insert (thread_p, lob_vfid, oos_buffer (record_data, (size_t) length), *locator);
+  error = internal_lob_insert_begin (thread_p, lob_vfid, writer);
+  if (error != NO_ERROR)
+    {
+      goto exit;
+    }
+
+  if (raw_length > 0)
+    {
+      error = internal_lob_insert_append (thread_p, writer, oos_buffer ((char *) raw_data, (size_t) raw_length));
+      if (error != NO_ERROR)
+	{
+	  goto exit;
+	}
+    }
+
+  error = internal_lob_insert_end (thread_p, writer, *locator);
+  if (error == NO_ERROR && type == DB_TYPE_BLOB)
+    {
+      locator->bit_length = raw_bit_length;
+    }
 
 exit:
-  if (alloc_record_data != NULL)
+  if (need_clear_materialized)
     {
-      free_and_init (alloc_record_data);
+      pr_clear_value (&materialized_value);
     }
 
   return error;
@@ -12761,7 +12794,6 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
   char recbuf[IO_MAX_PAGE_SIZE + MAX_ALIGNMENT];
   HFID oos_hfid;
   VFID oos_vfid;
-  VFID lob_vfid;
   OID oos_oid;
   INTERNAL_LOB_LOCATOR lob_locator;
   RECDES recdes;
@@ -12769,14 +12801,12 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
   int tran_index;
   int i;
   bool have_oos_vfid = false;
-  bool have_lob_vfid = false;
 
   recdes.area_size = IO_MAX_PAGE_SIZE;
   recdes.length = 0;
   recdes.data = PTR_ALIGN (recbuf, MAX_ALIGNMENT);
   recdes.type = REC_HOME;
   VFID_SET_NULL (&oos_vfid);
-  VFID_SET_NULL (&lob_vfid);
 
   if (heap_get_class_info (thread_p, &attr_info->class_oid, &oos_hfid, NULL, NULL) != NO_ERROR)
     {
@@ -12808,11 +12838,19 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
 
 	  if (is_internal_lob)
 	    {
-	      if (!have_lob_vfid && !heap_internal_lob_find_vfid (thread_p, &oos_hfid, &lob_vfid, true))
+	      DB_BIGINT disk_length;
+
+	      if (heap_internal_lob_insert_value
+		  (thread_p, &attr_info->class_oid, &attr_info->values[i].dbvalue, &lob_locator) != NO_ERROR)
 		{
 		  goto error_oos;
 		}
-	      have_lob_vfid = true;
+	      if (internal_lob_encode_disk_length (lob_locator, disk_length) != NO_ERROR)
+		{
+		  goto error_oos;
+		}
+	      oos_oid = lob_locator.oid;
+	      (*oos_lengths)[i] = disk_length;
 	    }
 	  else
 	    {
@@ -12821,45 +12859,33 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
 		  goto error_oos;
 		}
 	      have_oos_vfid = true;
-	    }
 
-	  /* heap_attrinfo_dbvalue_to_recdes may replace recdes.data with a malloc'd
-	   * buffer when the dbvalue doesn't fit the stack scratch. Both failure
-	   * branches below must reach the cleanup at error_oos. */
-	  if (heap_attrinfo_dbvalue_to_recdes (thread_p, &attr_info->values[i], attr_info->class_oid, lobfile_create_flag,
-					       &recdes) != S_SUCCESS)
-	    {
-	      goto error_oos;
-	    }
-
-	  if (is_internal_lob)
-	    {
-	      if (internal_lob_insert (thread_p, lob_vfid, oos_buffer (recdes.data, (size_t) recdes.length),
-				       lob_locator) != NO_ERROR)
+	      /* heap_attrinfo_dbvalue_to_recdes may replace recdes.data with a malloc'd
+	       * buffer when the dbvalue doesn't fit the stack scratch. Both failure
+	       * branches below must reach the cleanup at error_oos. */
+	      if (heap_attrinfo_dbvalue_to_recdes
+		  (thread_p, &attr_info->values[i], attr_info->class_oid, lobfile_create_flag, &recdes) != S_SUCCESS)
 		{
 		  goto error_oos;
 		}
-	      oos_oid = lob_locator.oid;
-	      (*oos_lengths)[i] = lob_locator.length;
-	    }
-	  else
-	    {
+
 	      if (oos_insert (thread_p, oos_vfid, oos_buffer (recdes.data, (size_t) recdes.length), oos_oid)
 		  != NO_ERROR)
 		{
 		  goto error_oos;
 		}
 	      (*oos_lengths)[i] = (DB_BIGINT) recdes.length;
+
+	      if (recdes.data != PTR_ALIGN (recbuf, MAX_ALIGNMENT))
+		{
+		  free_and_init (recdes.data);
+		  recdes.area_size = IO_MAX_PAGE_SIZE;
+		  recdes.data = PTR_ALIGN (recbuf, MAX_ALIGNMENT);
+		}
 	    }
 
 	  thread_p->oos_oids.push_back (oos_oid);	/* for replication log */
 	  (*oos_oids)[i] = oos_oid;
-	  if (recdes.data != PTR_ALIGN (recbuf, MAX_ALIGNMENT))
-	    {
-	      free_and_init (recdes.data);
-	      recdes.area_size = IO_MAX_PAGE_SIZE;
-	      recdes.data = PTR_ALIGN (recbuf, MAX_ALIGNMENT);
-	    }
 	}
     }
 
