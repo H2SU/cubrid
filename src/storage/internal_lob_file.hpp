@@ -74,6 +74,8 @@ extern int internal_lob_insert_append (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRIT
 extern int internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer,
 				    INTERNAL_LOB_LOCATOR &locator);
 extern int internal_lob_read (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, oos_buffer dest);
+extern int internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT offset,
+				    oos_buffer dest, int &nread);
 extern int internal_lob_read_open (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator,
 				   INTERNAL_LOB_READER &reader);
 extern int internal_lob_read_pull (THREAD_ENTRY *thread_p, INTERNAL_LOB_READER &reader, oos_buffer dest, int &nread);

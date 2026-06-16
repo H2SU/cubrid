@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include <float.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -1152,6 +1153,175 @@ csql_is_internal_lob_locator (const char *data, int size)
   int prefix_len = (int) strlen (CSQL_INTERNAL_LOB_LOCATOR_PREFIX);
 
   return data != NULL && size > prefix_len && memcmp (data, CSQL_INTERNAL_LOB_LOCATOR_PREFIX, prefix_len) == 0;
+}
+
+static bool
+csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT * length, DB_BIGINT * bit_length)
+{
+  char locator_buf[128];
+  int volid = 0;
+  int pageid = 0;
+  int slotid = 0;
+  long long parsed_length = 0;
+  long long parsed_bit_length = -1;
+  int consumed = 0;
+  int bit_length_consumed = 0;
+  int prefix_len = (int) strlen (CSQL_INTERNAL_LOB_LOCATOR_PREFIX);
+  int marker_len = 0;
+  char *oid_part = NULL;
+
+  if (length != NULL)
+    {
+      *length = 0;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = -1;
+    }
+
+  if (data == NULL || size <= prefix_len || size >= (int) sizeof (locator_buf))
+    {
+      return false;
+    }
+  if (memcmp (data, CSQL_INTERNAL_LOB_LOCATOR_PREFIX, (size_t) prefix_len) != 0)
+    {
+      return false;
+    }
+
+  memcpy (locator_buf, data, (size_t) size);
+  locator_buf[size] = '\0';
+
+  oid_part = locator_buf + prefix_len;
+  if (oid_part[0] == 'M' && oid_part[1] == ':')
+    {
+      marker_len = 2;
+      oid_part += marker_len;
+    }
+
+  if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &parsed_length, &consumed) != 4
+      || parsed_length < 0)
+    {
+      return false;
+    }
+  (void) volid;
+  (void) pageid;
+  (void) slotid;
+
+  if (prefix_len + marker_len + consumed != size)
+    {
+      if (oid_part[consumed] != ':'
+	  || sscanf (oid_part + consumed + 1, "%lld%n", &parsed_bit_length, &bit_length_consumed) != 1
+	  || parsed_bit_length < 0 || prefix_len + marker_len + consumed + 1 + bit_length_consumed != size)
+	{
+	  return false;
+	}
+    }
+
+  if (length != NULL)
+    {
+      *length = (DB_BIGINT) parsed_length;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = (DB_BIGINT) parsed_bit_length;
+    }
+  return true;
+}
+
+bool
+csql_db_value_is_internal_lob_locator (DB_VALUE * value, char *lob_type, const char **locator, int *locator_len,
+				       DB_BIGINT * data_len, DB_BIGINT * bit_length)
+{
+  DB_TYPE type;
+  const char *data = NULL;
+  int size = 0;
+  int locator_bit_length = 0;
+  DB_BIGINT parsed_length = 0;
+  DB_BIGINT parsed_bit_length = -1;
+
+  if (locator != NULL)
+    {
+      *locator = NULL;
+    }
+  if (locator_len != NULL)
+    {
+      *locator_len = 0;
+    }
+  if (data_len != NULL)
+    {
+      *data_len = 0;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = -1;
+    }
+
+  if (value == NULL || DB_IS_NULL (value))
+    {
+      return false;
+    }
+
+  type = DB_VALUE_TYPE (value);
+  if (type == DB_TYPE_CLOB)
+    {
+      data = db_get_string (value);
+      size = db_get_string_size (value);
+      if (lob_type != NULL)
+	{
+	  *lob_type = 'C';
+	}
+    }
+  else if (type == DB_TYPE_BLOB)
+    {
+      data = (const char *) db_get_bit (value, &locator_bit_length);
+      size = (locator_bit_length + 7) / 8;
+      if (lob_type != NULL)
+	{
+	  *lob_type = 'B';
+	}
+    }
+  else
+    {
+      return false;
+    }
+
+  if (!csql_parse_internal_lob_locator_metadata (data, size, &parsed_length, &parsed_bit_length))
+    {
+      return false;
+    }
+
+  if (locator != NULL)
+    {
+      *locator = data;
+    }
+  if (locator_len != NULL)
+    {
+      *locator_len = size;
+    }
+  if (data_len != NULL)
+    {
+      *data_len = parsed_length;
+    }
+  if (bit_length != NULL)
+    {
+      if (type == DB_TYPE_CLOB)
+	{
+	  *bit_length = 0;
+	}
+      else if (parsed_bit_length >= 0)
+	{
+	  *bit_length = parsed_bit_length;
+	}
+      else
+	{
+	  if (parsed_length > DB_BIGINT_MAX / 8)
+	    {
+	      return false;
+	    }
+	  *bit_length = parsed_length * 8;
+	}
+    }
+  return true;
 }
 
 static char *

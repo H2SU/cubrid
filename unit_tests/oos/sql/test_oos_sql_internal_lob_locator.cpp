@@ -23,6 +23,7 @@
  */
 
 #include <string>
+#include <vector>
 
 #include "internal_lob_file.hpp"
 #include "object_primitive.h"
@@ -295,6 +296,84 @@ TEST_F (OosSqlInternalLobLocator, SegmentedRawStorageRoundTrip)
 
   pr_clear_value (&char_value);
   pr_clear_value (&bit_value);
+}
+
+TEST_F (OosSqlInternalLobLocator, RangedReadReturnsRequestedSlices)
+{
+  struct segment_size_guard
+  {
+    ~segment_size_guard ()
+    {
+      prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 128ULL * 1024ULL * 1024ULL);
+    }
+  } guard;
+
+  const int payload_size = 4096;
+  std::string clob_payload;
+  std::string blob_hex_payload;
+  int rc;
+  DB_VALUE clob_locator_value, blob_locator_value;
+  INTERNAL_LOB_LOCATOR clob_locator, blob_locator;
+  std::vector<char> buffer (777);
+  int nread = 0;
+
+  prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 1024ULL);
+
+  clob_payload.reserve ((std::size_t) payload_size);
+  blob_hex_payload.reserve ((std::size_t) payload_size * 2);
+  for (int i = 0; i < payload_size; i++)
+    {
+      static const char hex[] = "0123456789ABCDEF";
+
+      clob_payload.push_back ((char) ('a' + (i % 26)));
+      blob_hex_payload.push_back (hex[ (i >> 4) & 0x0f]);
+      blob_hex_payload.push_back (hex[i & 0x0f]);
+    }
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB, b BLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  std::string insert_sql = "INSERT INTO t_internal_lob_locator VALUES (1, char_to_clob('" + clob_payload
+			   + "'), bit_to_blob(X'" + blob_hex_payload + "'))";
+  rc = exec_sql (insert_sql.c_str ());
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = fetch_internal_lob_pair ("SELECT c, b FROM t_internal_lob_locator WHERE id = 1", &clob_locator_value,
+				&blob_locator_value);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_TRUE (internal_lob_db_value_is_locator (&clob_locator_value, &clob_locator));
+  ASSERT_TRUE (internal_lob_db_value_is_locator (&blob_locator_value, &blob_locator));
+
+  rc = internal_lob_read_range (thread_get_thread_entry_info (), clob_locator, 123,
+				oos_buffer (buffer.data (), buffer.size ()), nread);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_EQ (nread, 777);
+  EXPECT_EQ (std::string (buffer.data (), buffer.data () + nread), clob_payload.substr (123, (std::size_t) nread));
+
+  rc = internal_lob_read_range (thread_get_thread_entry_info (), blob_locator, 2048,
+				oos_buffer (buffer.data (), buffer.size ()), nread);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_EQ (nread, 777);
+  for (int i = 0; i < nread; i++)
+    {
+      EXPECT_EQ ((unsigned char) buffer[ (std::size_t) i], (unsigned char) ((2048 + i) & 0xff));
+    }
+
+  rc = internal_lob_read_range (thread_get_thread_entry_info (), clob_locator, payload_size - 5,
+				oos_buffer (buffer.data (), buffer.size ()), nread);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_EQ (nread, 5);
+  EXPECT_EQ (std::string (buffer.data (), buffer.data () + nread), clob_payload.substr (payload_size - 5));
+
+  rc = internal_lob_read_range (thread_get_thread_entry_info (), clob_locator, payload_size,
+				oos_buffer (buffer.data (), buffer.size ()), nread);
+  ASSERT_EQ (rc, NO_ERROR);
+  EXPECT_EQ (nread, 0);
+
+  pr_clear_value (&clob_locator_value);
+  pr_clear_value (&blob_locator_value);
 }
 
 int

@@ -9974,10 +9974,10 @@ soos_stats (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 }
 
 /*
- * sinternal_lob_read - Server handler to materialize an internal LOB locator.
- *   Request : lob_type (int) + locator string
+ * sinternal_lob_read - Server handler to read raw bytes from an internal LOB locator.
+ *   Request : offset (int64) + count (int) + locator string
  *   Reply   : data_size (int) + err (int)
- *   Data    : packed DB_VALUE when err is NO_ERROR
+ *   Data    : raw bytes when err is NO_ERROR
  */
 void
 sinternal_lob_read (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
@@ -9987,23 +9987,19 @@ sinternal_lob_read (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int
   char *ptr = NULL;
   char *locator_string = NULL;
   char *buffer = NULL;
-  int lob_type_int = 0;
-  int buffer_length = 0;
+  INT64 offset = 0;
+  int count = 0;
+  int nread = 0;
   int err = NO_ERROR;
-  DB_TYPE lob_type;
   INTERNAL_LOB_LOCATOR locator;
-  DB_VALUE materialized;
 
   (void) reqlen;
 
-  db_make_null (&materialized);
-
-  ptr = or_unpack_int (request, &lob_type_int);
+  ptr = or_unpack_int64 (request, &offset);
+  ptr = or_unpack_int (ptr, &count);
   (void) or_unpack_string_nocopy (ptr, &locator_string);
-  lob_type = (DB_TYPE) lob_type_int;
 
-  if ((lob_type != DB_TYPE_CLOB && lob_type != DB_TYPE_BLOB)
-      || locator_string == NULL
+  if (offset < 0 || count < 0 || locator_string == NULL
       || !internal_lob_parse_locator_string (locator_string, (int) strlen (locator_string), &locator))
     {
       err = ER_GENERIC_ERROR;
@@ -10011,29 +10007,26 @@ sinternal_lob_read (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int
       goto reply;
     }
 
-  err = internal_lob_read_db_value (thread_p, locator, lob_type, &materialized, NULL);
+  if (count > 0)
+    {
+      buffer = (char *) malloc ((size_t) count);
+      if (buffer == NULL)
+	{
+	  err = ER_OUT_OF_VIRTUAL_MEMORY;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 1, (size_t) count);
+	  goto reply;
+	}
+    }
+
+  err = internal_lob_read_range (thread_p, locator, (DB_BIGINT) offset, oos_buffer (buffer, (std::size_t) count), nread);
   if (err != NO_ERROR)
     {
-      goto reply;
+      nread = 0;
     }
-
-  buffer_length = or_db_value_size (&materialized);
-  buffer = (char *) malloc (buffer_length);
-  if (buffer == NULL)
-    {
-      err = ER_OUT_OF_VIRTUAL_MEMORY;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 1, (size_t) buffer_length);
-      buffer_length = 0;
-      goto reply;
-    }
-
-  (void) or_pack_value (buffer, &materialized);
 
 reply:
-  ptr = or_pack_int (reply, buffer_length);
+  ptr = or_pack_int (reply, nread);
   (void) or_pack_int (ptr, err);
-
-  db_value_clear (&materialized);
 
   auto deleter = [buffer]() noexcept
   {
@@ -10042,8 +10035,8 @@ reply:
 	free (buffer);
       }
   };
-  css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), buffer,
-				     buffer_length, std::move (deleter));
+  css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), buffer, nread,
+				     std::move (deleter));
 }
 
 /*

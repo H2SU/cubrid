@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
 
 #include <algorithm>
 
@@ -111,6 +112,8 @@ static char *pack_const_string (char *buffer, const char *cstring);
 static char *pack_string_with_null_padding (char *buffer, const char *stream, int len);
 static int length_const_string (const char *cstring, int *strlen);
 static int length_string_with_null_padding (int len);
+static bool internal_lob_parse_locator_metadata (const char *data, int size, DB_BIGINT * length,
+						 DB_BIGINT * bit_length);
 #endif /* CS_MODE */
 #if defined (SA_MODE)
 static void enter_server_no_thread_entry (void);
@@ -254,6 +257,89 @@ static int
 length_string_with_null_padding (int len)
 {
   return or_packed_stream_length (len + 1);	/* 1 for NULL padding */
+}
+
+
+/*
+ * internal_lob_parse_locator_metadata () - parse locator length metadata without linking server-side storage helpers.
+ * return       : true if the locator syntax is valid
+ * data(in)     : locator bytes
+ * size(in)     : locator byte length
+ * length(out)  : raw byte length
+ * bit_length(out): optional BLOB bit length, or -1 when not encoded
+ */
+static bool
+internal_lob_parse_locator_metadata (const char *data, int size, DB_BIGINT * length, DB_BIGINT * bit_length)
+{
+  const char *prefix = "@internal_lob:";
+  char locator_buf[128];
+  int prefix_len = (int) strlen (prefix);
+  int marker_len = 0;
+  int volid = 0;
+  int pageid = 0;
+  int slotid = 0;
+  long long parsed_length = 0;
+  long long parsed_bit_length = -1;
+  int consumed = 0;
+  int bit_length_consumed = 0;
+  char *oid_part = NULL;
+
+  if (length != NULL)
+    {
+      *length = 0;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = -1;
+    }
+
+  if (data == NULL || size <= prefix_len || size >= (int) sizeof (locator_buf))
+    {
+      return false;
+    }
+  if (memcmp (data, prefix, (size_t) prefix_len) != 0)
+    {
+      return false;
+    }
+
+  memcpy (locator_buf, data, (size_t) size);
+  locator_buf[size] = '\0';
+
+  oid_part = locator_buf + prefix_len;
+  if (oid_part[0] == 'M' && oid_part[1] == ':')
+    {
+      marker_len = 2;
+      oid_part += marker_len;
+    }
+
+  if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &parsed_length, &consumed) != 4
+      || parsed_length < 0)
+    {
+      return false;
+    }
+  (void) volid;
+  (void) pageid;
+  (void) slotid;
+
+  if (prefix_len + marker_len + consumed != size)
+    {
+      if (oid_part[consumed] != ':'
+	  || sscanf (oid_part + consumed + 1, "%lld%n", &parsed_bit_length, &bit_length_consumed) != 1
+	  || parsed_bit_length < 0 || prefix_len + marker_len + consumed + 1 + bit_length_consumed != size)
+	{
+	  return false;
+	}
+    }
+
+  if (length != NULL)
+    {
+      *length = (DB_BIGINT) parsed_length;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = (DB_BIGINT) parsed_bit_length;
+    }
+  return true;
 }
 #endif /* CS_MODE */
 
@@ -4945,6 +5031,93 @@ int
 internal_lob_read_db_value_from_server (const char *locator_data, int locator_len, DB_TYPE lob_type, DB_VALUE * value)
 {
 #if defined(CS_MODE)
+  char *raw_value = NULL;
+  DB_BIGINT locator_length = 0;
+  DB_BIGINT locator_bit_length = -1;
+  int raw_length = 0;
+  int nread = 0;
+  int err = NO_ERROR;
+
+  if (value == NULL)
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+  db_make_null (value);
+
+  if (locator_data == NULL || locator_len <= 0 || (lob_type != DB_TYPE_CLOB && lob_type != DB_TYPE_BLOB)
+      || !internal_lob_parse_locator_metadata (locator_data, locator_len, &locator_length, &locator_bit_length)
+      || locator_length < 0 || locator_length > (DB_BIGINT) INT_MAX)
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+
+  raw_length = (int) locator_length;
+  raw_value = (char *) db_private_alloc (NULL, (size_t) (raw_length > 0 ? raw_length : 1));
+  if (raw_value == NULL)
+    {
+      ASSERT_ERROR_AND_SET (err);
+      return err;
+    }
+
+  if (raw_length > 0)
+    {
+      err = internal_lob_read_from_server (locator_data, locator_len, 0, raw_value, raw_length, &nread);
+      if (err != NO_ERROR)
+	{
+	  db_private_free_and_init (NULL, raw_value);
+	  return err;
+	}
+      if (nread != raw_length)
+	{
+	  db_private_free_and_init (NULL, raw_value);
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	  return ER_FAILED;
+	}
+    }
+
+  if (lob_type == DB_TYPE_CLOB)
+    {
+      err = db_make_clob (value, DB_MAX_LOB_PRECISION, raw_value, raw_length);
+    }
+  else
+    {
+      DB_BIGINT bit_length = (locator_bit_length >= 0) ? locator_bit_length : (DB_BIGINT) raw_length * 8;
+
+      if (bit_length < 0 || bit_length > (DB_BIGINT) INT_MAX)
+	{
+	  db_private_free_and_init (NULL, raw_value);
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+	  return ER_FAILED;
+	}
+      err = db_make_blob (value, DB_MAX_LOB_PRECISION, (DB_CONST_C_BIT) raw_value, (int) bit_length);
+    }
+
+  if (err != NO_ERROR)
+    {
+      db_private_free_and_init (NULL, raw_value);
+      return err;
+    }
+
+  value->need_clear = true;
+  return NO_ERROR;
+#else
+  if (value != NULL)
+    {
+      db_make_null (value);
+    }
+  (void) locator_data;
+  (void) locator_len;
+  (void) lob_type;
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
+int
+internal_lob_read_from_server (const char *locator_data, int locator_len, DB_BIGINT offset, char *buf, int count,
+			       int *nread)
+{
+#if defined(CS_MODE)
   OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
   char *reply = OR_ALIGNED_BUF_START (a_reply);
   char *request = NULL;
@@ -4954,15 +5127,16 @@ internal_lob_read_db_value_from_server (const char *locator_data, int locator_le
   int locator_strlen = 0;
   int request_size = 0;
   int data_size = 0;
+  int received = 0;
   int err = NO_ERROR;
 
-  if (value == NULL)
+  if (nread == NULL)
     {
       return ER_OBJ_INVALID_ARGUMENTS;
     }
-  db_make_null (value);
+  *nread = 0;
 
-  if (locator_data == NULL || locator_len <= 0 || (lob_type != DB_TYPE_CLOB && lob_type != DB_TYPE_BLOB))
+  if (locator_data == NULL || locator_len <= 0 || offset < 0 || count < 0 || (buf == NULL && count > 0))
     {
       return ER_OBJ_INVALID_ARGUMENTS;
     }
@@ -4976,7 +5150,7 @@ internal_lob_read_db_value_from_server (const char *locator_data, int locator_le
   memcpy (locator_buf, locator_data, (size_t) locator_len);
   locator_buf[locator_len] = '\0';
 
-  request_size = OR_INT_SIZE + length_const_string (locator_buf, &locator_strlen);
+  request_size = OR_INT64_SIZE + OR_INT_SIZE + length_const_string (locator_buf, &locator_strlen);
   request = (char *) malloc (request_size);
   if (request == NULL)
     {
@@ -4985,7 +5159,8 @@ internal_lob_read_db_value_from_server (const char *locator_data, int locator_le
       goto cleanup;
     }
 
-  ptr = or_pack_int (request, (int) lob_type);
+  ptr = or_pack_int64 (request, (INT64) offset);
+  ptr = or_pack_int (ptr, count);
   (void) pack_const_string_with_length (ptr, locator_buf, locator_strlen);
 
   err =
@@ -4997,20 +5172,24 @@ internal_lob_read_db_value_from_server (const char *locator_data, int locator_le
       goto cleanup;
     }
 
-  ptr = or_unpack_int (reply, &data_size);
+  ptr = or_unpack_int (reply, &received);
   (void) or_unpack_int (ptr, &err);
   if (err != NO_ERROR)
     {
       goto cleanup;
     }
-  if (data_reply == NULL || data_size <= 0)
+  if (received < 0 || received > count || data_size != received || (received > 0 && data_reply == NULL))
     {
       err = ER_FAILED;
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
       goto cleanup;
     }
 
-  (void) or_unpack_value (data_reply, value);
+  if (received > 0)
+    {
+      memcpy (buf, data_reply, (size_t) received);
+    }
+  *nread = received;
 
 cleanup:
   if (request != NULL)
@@ -5028,13 +5207,15 @@ cleanup:
 
   return err;
 #else
-  if (value != NULL)
-    {
-      db_make_null (value);
-    }
   (void) locator_data;
   (void) locator_len;
-  (void) lob_type;
+  (void) offset;
+  (void) buf;
+  (void) count;
+  if (nread != NULL)
+    {
+      *nread = 0;
+    }
   er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
   return ER_FAILED;
 #endif
