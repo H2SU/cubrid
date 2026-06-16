@@ -252,6 +252,8 @@ static const char sysprm_ha_conf_file_name[] = "cubrid_ha.conf";
 
 #define PRM_NAME_UPDATE_STATISTICS_UPDATE_HISTOGRAM "update_statistics_update_histogram"
 
+#define PRM_NAME_INTERNAL_LOB_SEGMENT_SIZE "internal_lob_segment_size"
+
 #define PRM_NAME_ENABLE_HISTO "communication_histogram"
 
 #define PRM_NAME_MUTEX_BUSY_WAITING_CNT "mutex_busy_waiting_cnt"
@@ -5380,6 +5382,18 @@ SYSPRM_PARAM prm_Def[] = {
    {false, {.b = false}},
    NULL_SYSPRM_PARAM_VALUE,
    NULL_SYSPRM_PARAM_VALUE,
+   (char *) NULL,
+   (DUP_PRM_FUNC) NULL,
+   (DUP_PRM_FUNC) NULL},
+  {PRM_ID_INTERNAL_LOB_SEGMENT_SIZE,
+   PRM_NAME_INTERNAL_LOB_SEGMENT_SIZE,
+   (PRM_FOR_SERVER | PRM_SIZE_UNIT),
+   PRM_BIGINT,
+   PRM_CLEAR_DYNAMIC_FLAG,
+   {false, {.bi = 134217728ULL /* 128M */ }},
+   {false, {.bi = 134217728ULL}},
+   {false, {.bi = 1073741824ULL /* 1G */ }},
+   {false, {.bi = 1048576ULL /* 1M */ }},
    (char *) NULL,
    (DUP_PRM_FUNC) NULL,
    (DUP_PRM_FUNC) NULL}
