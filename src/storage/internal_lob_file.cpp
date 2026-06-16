@@ -40,14 +40,24 @@ static const int INTERNAL_LOB_MANIFEST_SEGMENT_SIZE = OR_OID_SIZE + OR_INT_SIZE;
 static int
 internal_lob_format_locator (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size)
 {
+  const bool has_bit_length = locator.bit_length >= 0;
+
   if (locator.is_manifest)
     {
-      return snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "M:%d|%d|%d:%lld", (int) locator.oid.volid,
-		       (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length);
+      return has_bit_length ?
+	     snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "M:%d|%d|%d:%lld:%lld", (int) locator.oid.volid,
+		       (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length,
+		       (long long) locator.bit_length)
+	     : snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "M:%d|%d|%d:%lld", (int) locator.oid.volid,
+			 (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length);
     }
 
-  return snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld", (int) locator.oid.volid,
-		   (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length);
+  return has_bit_length ?
+	 snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld:%lld", (int) locator.oid.volid,
+		   (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length,
+		   (long long) locator.bit_length)
+	 : snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld", (int) locator.oid.volid,
+		     (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length);
 }
 
 static int
@@ -82,6 +92,43 @@ internal_lob_get_segment_size (int &segment_size)
     }
 
   segment_size = (int) prm_segment_size;
+  return NO_ERROR;
+}
+
+static int
+internal_lob_get_bit_remainder (const INTERNAL_LOB_LOCATOR &locator, int &bit_remainder)
+{
+  bit_remainder = 0;
+
+  if (locator.bit_length < 0)
+    {
+      return NO_ERROR;
+    }
+
+  if (locator.length == 0)
+    {
+      if (locator.bit_length != 0)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+      return NO_ERROR;
+    }
+
+  if (locator.length > DB_BIGINT_MAX / 8 || locator.bit_length <= (locator.length - 1) * 8
+      || locator.bit_length > locator.length * 8)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  if (locator.bit_length != locator.length * 8)
+    {
+      bit_remainder = (int) (locator.bit_length - (locator.length - 1) * 8);
+      if (bit_remainder <= 0 || bit_remainder >= 8)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+    }
+
   return NO_ERROR;
 }
 
@@ -277,6 +324,7 @@ internal_lob_insert (THREAD_ENTRY *thread_p, const VFID &lob_vfid, oos_buffer sr
 
   OID_SET_NULL (&locator.oid);
   locator.length = (DB_BIGINT) src.size ();
+  locator.bit_length = -1;
   locator.is_manifest = false;
 
   if (src.size () == 0)
@@ -388,6 +436,7 @@ internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, IN
 
   OID_SET_NULL (&locator.oid);
   locator.length = 0;
+  locator.bit_length = -1;
   locator.is_manifest = false;
 
   if (writer.segment_buffer == NULL || writer.segment_size <= 0)
@@ -662,7 +711,9 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
   char locator_buf[128];
   int volid, pageid, slotid;
   long long length;
+  long long bit_length = -1;
   int consumed = 0;
+  int bit_length_consumed = 0;
   int prefix_len = (int) strlen (INTERNAL_LOB_LOCATOR_PREFIX);
   int marker_len = 0;
   bool is_manifest = false;
@@ -692,9 +743,18 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
     {
       return false;
     }
-  if (prefix_len + marker_len + consumed != size || length < 0)
+  if (length < 0)
     {
       return false;
+    }
+  if (prefix_len + marker_len + consumed != size)
+    {
+      if (oid_part[consumed] != ':'
+	  || sscanf (oid_part + consumed + 1, "%lld%n", &bit_length, &bit_length_consumed) != 1
+	  || bit_length < 0 || prefix_len + marker_len + consumed + 1 + bit_length_consumed != size)
+	{
+	  return false;
+	}
     }
 
   if (locator != NULL)
@@ -703,6 +763,7 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
       locator->oid.pageid = (PAGEID) pageid;
       locator->oid.slotid = (PGSLOTID) slotid;
       locator->length = (DB_BIGINT) length;
+      locator->bit_length = (DB_BIGINT) bit_length;
       locator->is_manifest = is_manifest;
     }
   return true;
@@ -738,6 +799,80 @@ internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *l
     }
 
   return internal_lob_parse_locator_string (data, size, locator);
+}
+
+int
+internal_lob_encode_disk_length (const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT &disk_length)
+{
+  int bit_remainder;
+  DB_BIGINT encoded;
+
+  if (locator.length < 0)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  if (internal_lob_get_bit_remainder (locator, bit_remainder) != NO_ERROR)
+    {
+      return ER_GENERIC_ERROR;
+    }
+
+  if (!locator.is_manifest && bit_remainder == 0)
+    {
+      disk_length = locator.length;
+      return NO_ERROR;
+    }
+
+  /* Keep the heap inline locator at OR_OOS_INLINE_SIZE.  Non-negative values are the legacy raw-byte length.
+   * Negative values pack raw-byte length, manifest flag and BLOB tail bit count:
+   *   -((length * 18) + (manifest ? 9 : 0) + bit_remainder + 1)
+   */
+  if (locator.length > (DB_BIGINT_MAX - 17) / 18)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  encoded = locator.length * 18 + (locator.is_manifest ? 9 : 0) + bit_remainder;
+  disk_length = -encoded - 1;
+  return NO_ERROR;
+}
+
+int
+internal_lob_decode_disk_length (INTERNAL_LOB_LOCATOR &locator, DB_BIGINT disk_length)
+{
+  DB_BIGINT encoded;
+  int bit_remainder;
+
+  locator.is_manifest = false;
+  locator.bit_length = -1;
+
+  if (disk_length >= 0)
+    {
+      locator.length = disk_length;
+      return NO_ERROR;
+    }
+
+  if (disk_length == DB_BIGINT_MIN)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  encoded = -disk_length - 1;
+  bit_remainder = (int) (encoded % 9);
+  encoded /= 9;
+  locator.is_manifest = (encoded % 2) != 0;
+  locator.length = encoded / 2;
+
+  if (bit_remainder != 0)
+    {
+      if (locator.length <= 0 || locator.length > DB_BIGINT_MAX / 8)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+      locator.bit_length = (locator.length - 1) * 8 + bit_remainder;
+    }
+
+  return NO_ERROR;
 }
 
 int
@@ -791,44 +926,62 @@ int
 internal_lob_read_db_value (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_TYPE lob_type,
 			    DB_VALUE *value, TP_DOMAIN *domain)
 {
-  char *disk_value = NULL;
-  OR_BUF buf;
-  const PR_TYPE *pr_type;
-  TP_DOMAIN *read_domain;
+  char *raw_value = NULL;
+  int raw_length;
+  int precision;
   int err;
 
-  if (locator.length <= 0 || locator.length > (DB_BIGINT) INT_MAX)
+  if (locator.length < 0 || locator.length > (DB_BIGINT) INT_MAX)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
       return ER_GENERIC_ERROR;
     }
 
-  disk_value = (char *) db_private_alloc (NULL, (size_t) locator.length);
-  if (disk_value == NULL)
+  raw_length = (int) locator.length;
+  raw_value = (char *) db_private_alloc (NULL, (size_t) (raw_length > 0 ? raw_length : 1));
+  if (raw_value == NULL)
     {
       ASSERT_ERROR_AND_SET (err);
       return err;
     }
 
-  err = internal_lob_read (thread_p, locator, oos_buffer (disk_value, (std::size_t) locator.length));
+  if (raw_length > 0)
+    {
+      err = internal_lob_read (thread_p, locator, oos_buffer (raw_value, (std::size_t) raw_length));
+      if (err != NO_ERROR)
+	{
+	  db_private_free_and_init (NULL, raw_value);
+	  return err;
+	}
+    }
+
+  precision = (domain != NULL) ? domain->precision : DB_MAX_LOB_PRECISION;
+  if (lob_type == DB_TYPE_CLOB)
+    {
+      err = db_make_clob (value, precision, raw_value, raw_length);
+    }
+  else if (lob_type == DB_TYPE_BLOB)
+    {
+      DB_BIGINT bit_length = (locator.bit_length >= 0) ? locator.bit_length : (DB_BIGINT) raw_length * 8;
+
+      if (bit_length < 0 || bit_length > (DB_BIGINT) INT_MAX)
+	{
+	  db_private_free_and_init (NULL, raw_value);
+	  return internal_lob_set_generic_error ();
+	}
+      err = db_make_blob (value, precision, (DB_CONST_C_BIT) raw_value, (int) bit_length);
+    }
+  else
+    {
+      err = internal_lob_set_generic_error ();
+    }
+
   if (err != NO_ERROR)
     {
-      db_private_free_and_init (NULL, disk_value);
+      db_private_free_and_init (NULL, raw_value);
       return err;
     }
 
-  pr_type = pr_type_from_id (lob_type);
-  read_domain = (domain != NULL) ? domain : tp_domain_resolve_default (lob_type);
-  if (pr_type == NULL || read_domain == NULL)
-    {
-      db_private_free_and_init (NULL, disk_value);
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
-      return ER_GENERIC_ERROR;
-    }
-
-  or_init (&buf, disk_value, (int) locator.length);
-  err = pr_type->data_readval (&buf, value, read_domain, (int) locator.length, true, NULL, 0);
-  db_private_free_and_init (NULL, disk_value);
-
-  return err;
+  value->need_clear = true;
+  return NO_ERROR;
 }

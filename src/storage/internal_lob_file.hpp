@@ -29,6 +29,7 @@ struct internal_lob_locator
 {
   OID oid;
   DB_BIGINT length;
+  DB_BIGINT bit_length = -1;
   bool is_manifest = false;
 };
 using INTERNAL_LOB_LOCATOR = struct internal_lob_locator;
@@ -81,6 +82,8 @@ extern int internal_lob_get_length (THREAD_ENTRY *thread_p, const INTERNAL_LOB_L
 
 extern bool internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCATOR *locator);
 extern bool internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *locator);
+extern int internal_lob_encode_disk_length (const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT &disk_length);
+extern int internal_lob_decode_disk_length (INTERNAL_LOB_LOCATOR &locator, DB_BIGINT disk_length);
 extern int internal_lob_make_locator_db_value (DB_VALUE *value, DB_TYPE lob_type, const INTERNAL_LOB_LOCATOR &locator);
 extern int internal_lob_read_db_value (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_TYPE lob_type,
 				       DB_VALUE *value, TP_DOMAIN *domain);

@@ -108,7 +108,10 @@ desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type
   OR_BUF locator_buf;
   OID oid;
   DB_BIGINT length;
+  DB_BIGINT bit_length = -1;
+  bool is_manifest = false;
   char stack_buf[128];
+  char bit_length_buf[32];
   char *locator_buf_string = NULL;
   int locator_len;
   int err;
@@ -131,8 +134,44 @@ desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type
 
   or_advance (buf, OR_OOS_INLINE_SIZE);
 
-  locator_len = snprintf (stack_buf, sizeof (stack_buf), DESC_INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld",
-			  (int) oid.volid, (int) oid.pageid, (int) oid.slotid, (long long) length);
+  if (length < 0)
+    {
+      DB_BIGINT encoded;
+      int bit_remainder;
+
+      if (length == DB_BIGINT_MIN)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	  return ER_GENERIC_ERROR;
+	}
+      encoded = -length - 1;
+      bit_remainder = (int) (encoded % 9);
+      encoded /= 9;
+      is_manifest = (encoded % 2) != 0;
+      length = encoded / 2;
+      if (bit_remainder != 0)
+	{
+	  if (length <= 0 || length > DB_BIGINT_MAX / 8)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	      return ER_GENERIC_ERROR;
+	    }
+	  bit_length = (length - 1) * 8 + bit_remainder;
+	}
+    }
+
+  if (bit_length >= 0)
+    {
+      snprintf (bit_length_buf, sizeof (bit_length_buf), ":%lld", (long long) bit_length);
+    }
+  else
+    {
+      bit_length_buf[0] = '\0';
+    }
+
+  locator_len = snprintf (stack_buf, sizeof (stack_buf), DESC_INTERNAL_LOB_LOCATOR_PREFIX "%s%d|%d|%d:%lld%s",
+			  is_manifest ? "M:" : "", (int) oid.volid, (int) oid.pageid, (int) oid.slotid,
+			  (long long) length, bit_length_buf);
   if (locator_len <= 0 || locator_len >= (int) sizeof (stack_buf))
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);

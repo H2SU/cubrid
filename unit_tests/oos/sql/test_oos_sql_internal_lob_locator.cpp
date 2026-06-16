@@ -22,8 +22,11 @@
  * CBRD-26914
  */
 
+#include <string>
+
 #include "internal_lob_file.hpp"
 #include "object_primitive.h"
+#include "system_parameter.h"
 #include "test_oos_sql_common.hpp"
 
 class OosSqlInternalLobLocator : public ::testing::Test
@@ -31,11 +34,13 @@ class OosSqlInternalLobLocator : public ::testing::Test
   protected:
     void SetUp () override
     {
+      exec_sql ("DROP TABLE IF EXISTS t_internal_lob_locator_copy");
       exec_sql ("DROP TABLE IF EXISTS t_internal_lob_locator");
       db_commit_transaction ();
     }
     void TearDown () override
     {
+      exec_sql ("DROP TABLE IF EXISTS t_internal_lob_locator_copy");
       exec_sql ("DROP TABLE IF EXISTS t_internal_lob_locator");
       db_commit_transaction ();
     }
@@ -140,6 +145,153 @@ TEST_F (OosSqlInternalLobLocator, ConversionFunctionsReadActualData)
   EXPECT_EQ (bit_length, 16);
   EXPECT_EQ ((unsigned char) bits[0], 0xab);
   EXPECT_EQ ((unsigned char) bits[1], 0xcd);
+
+  pr_clear_value (&char_value);
+  pr_clear_value (&bit_value);
+}
+
+TEST_F (OosSqlInternalLobLocator, InsertSelectCopiesLocatorPayload)
+{
+  int rc;
+  DB_VALUE char_value, bit_value;
+  const char *text;
+  const char *bits;
+  int bit_length = 0;
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB, b BLOB)");
+  ASSERT_GE (rc, 0);
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator_copy (id INT PRIMARY KEY, c CLOB, b BLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = exec_sql ("INSERT INTO t_internal_lob_locator VALUES "
+		 "(1, char_to_clob('ORIGINAL_CLOB_DATA'), bit_to_blob(X'ABCD'))");
+  ASSERT_GE (rc, 0);
+  rc = exec_sql ("INSERT INTO t_internal_lob_locator_copy SELECT id, c, b FROM t_internal_lob_locator");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = exec_sql ("DROP TABLE t_internal_lob_locator");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = fetch_internal_lob_pair ("SELECT clob_to_char(c), blob_to_bit(b) "
+				"FROM t_internal_lob_locator_copy WHERE id = 1", &char_value, &bit_value);
+  ASSERT_EQ (rc, NO_ERROR);
+
+  text = db_get_string (&char_value);
+  ASSERT_NE (text, nullptr);
+  EXPECT_STREQ (text, "ORIGINAL_CLOB_DATA");
+
+  bits = (const char *) db_get_bit (&bit_value, &bit_length);
+  ASSERT_NE (bits, nullptr);
+  EXPECT_EQ (bit_length, 16);
+  EXPECT_EQ ((unsigned char) bits[0], 0xab);
+  EXPECT_EQ ((unsigned char) bits[1], 0xcd);
+
+  pr_clear_value (&char_value);
+  pr_clear_value (&bit_value);
+}
+
+TEST_F (OosSqlInternalLobLocator, CharToBlobBitLengthIsPreserved)
+{
+  int rc;
+  DB_VALUE length_value, bit_value;
+  const char *bits;
+  int bit_length = 0;
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, b BLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = exec_sql ("INSERT INTO t_internal_lob_locator VALUES (1, char_to_blob('binary-small'))");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = fetch_internal_lob_pair ("SELECT blob_length(b), blob_to_bit(b) "
+				"FROM t_internal_lob_locator WHERE id = 1", &length_value, &bit_value);
+  ASSERT_EQ (rc, NO_ERROR);
+
+  ASSERT_EQ (DB_VALUE_DOMAIN_TYPE (&length_value), DB_TYPE_BIGINT);
+  EXPECT_EQ (db_get_bigint (&length_value), 12);
+
+  bits = (const char *) db_get_bit (&bit_value, &bit_length);
+  ASSERT_NE (bits, nullptr);
+  EXPECT_EQ (bit_length, 12);
+
+  pr_clear_value (&length_value);
+  pr_clear_value (&bit_value);
+}
+
+TEST_F (OosSqlInternalLobLocator, SegmentedRawStorageRoundTrip)
+{
+  struct segment_size_guard
+  {
+    ~segment_size_guard ()
+    {
+      prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 128ULL * 1024ULL * 1024ULL);
+    }
+  } guard;
+
+  const int payload_size = 5000;
+  std::string clob_payload ((std::size_t) payload_size, 'x');
+  std::string blob_hex_payload;
+  int rc;
+  DB_VALUE clob_locator_value, blob_locator_value;
+  DB_VALUE char_value, bit_value;
+  INTERNAL_LOB_LOCATOR clob_locator, blob_locator;
+  const char *text;
+  const char *bits;
+  int bit_length = 0;
+
+  prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 1024ULL);
+
+  blob_hex_payload.reserve ((std::size_t) payload_size * 2);
+  for (int i = 0; i < payload_size; i++)
+    {
+      blob_hex_payload += "AB";
+    }
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB, b BLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  std::string insert_sql = "INSERT INTO t_internal_lob_locator VALUES (1, char_to_clob('" + clob_payload
+			   + "'), bit_to_blob(X'" + blob_hex_payload + "'))";
+  rc = exec_sql (insert_sql.c_str ());
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = fetch_internal_lob_pair ("SELECT c, b FROM t_internal_lob_locator WHERE id = 1", &clob_locator_value,
+				&blob_locator_value);
+  ASSERT_EQ (rc, NO_ERROR);
+
+  ASSERT_TRUE (internal_lob_db_value_is_locator (&clob_locator_value, &clob_locator));
+  ASSERT_TRUE (internal_lob_db_value_is_locator (&blob_locator_value, &blob_locator));
+  EXPECT_TRUE (clob_locator.is_manifest);
+  EXPECT_TRUE (blob_locator.is_manifest);
+  EXPECT_EQ (clob_locator.length, (DB_BIGINT) payload_size);
+  EXPECT_EQ (blob_locator.length, (DB_BIGINT) payload_size);
+  pr_clear_value (&clob_locator_value);
+  pr_clear_value (&blob_locator_value);
+
+  rc = fetch_internal_lob_pair ("SELECT clob_to_char(c), blob_to_bit(b) "
+				"FROM t_internal_lob_locator WHERE id = 1", &char_value, &bit_value);
+  ASSERT_EQ (rc, NO_ERROR);
+
+  text = db_get_string (&char_value);
+  ASSERT_NE (text, nullptr);
+  ASSERT_EQ (db_get_string_size (&char_value), payload_size);
+  EXPECT_EQ (std::string (text, (std::size_t) payload_size), clob_payload);
+
+  bits = (const char *) db_get_bit (&bit_value, &bit_length);
+  ASSERT_NE (bits, nullptr);
+  EXPECT_EQ (bit_length, payload_size * 8);
+  EXPECT_EQ (db_get_string_size (&bit_value), payload_size);
+  for (int i = 0; i < payload_size; i += 997)
+    {
+      EXPECT_EQ ((unsigned char) bits[i], 0xab);
+    }
 
   pr_clear_value (&char_value);
   pr_clear_value (&bit_value);
