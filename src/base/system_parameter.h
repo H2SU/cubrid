@@ -535,8 +535,9 @@ enum param_id
 
   PRM_ID_HARDWARE_AFFINITY,
 
-  /* change PRM_LAST_ID when adding new system parameters */
-  PRM_LAST_ID = PRM_ID_HARDWARE_AFFINITY
+  PRM_ID_INTERNAL_LOB_SEGMENT_SIZE,
+
+  PRM_LAST_ID = PRM_ID_INTERNAL_LOB_SEGMENT_SIZE
 };
 typedef enum param_id PARAM_ID;
 
