@@ -11115,6 +11115,39 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	      break;
 	    }
 	}
+
+      /* Flag clob_from_file/blob_from_file nodes that are the direct value for an internal LOB column before
+       * pt_semantic_type () runs constant folding.  Only these direct INSERT values may produce streaming markers. */
+      if (node != NULL && node->info.insert.value_clauses != NULL)
+	{
+	  PT_NODE *value_clause;
+
+	  for (value_clause = node->info.insert.value_clauses; value_clause != NULL; value_clause = value_clause->next)
+	    {
+	      PT_NODE *ins_attr = node->info.insert.attr_list;
+	      PT_NODE *ins_val;
+
+	      if (value_clause->info.node_list.list_type != PT_IS_VALUE)
+		{
+		  continue;
+		}
+	      ins_val = value_clause->info.node_list.list;
+
+	      for (; ins_attr != NULL && ins_val != NULL; ins_attr = ins_attr->next, ins_val = ins_val->next)
+		{
+		  if (!PT_IS_LOB_TYPE (ins_attr->type_enum) || ins_val->node_type != PT_EXPR)
+		    {
+		      continue;
+		    }
+		  if ((ins_attr->type_enum == PT_TYPE_CLOB && ins_val->info.expr.op == PT_CLOB_FROM_FILE)
+		      || (ins_attr->type_enum == PT_TYPE_BLOB && ins_val->info.expr.op == PT_BLOB_FROM_FILE))
+		    {
+		      PT_EXPR_INFO_SET_FLAG (ins_val, PT_EXPR_INFO_LOB_DIRECT_INSERT);
+		    }
+		}
+	    }
+	}
+
       /* semantic check value clause for SELECT and INSERT subclauses */
       if (node)
 	{
@@ -11479,6 +11512,36 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
       /* Replace left to right attribute references in assignments before doing semantic check. The type checking phase
        * might have to perform some coercions on the replaced names. */
       node = pt_replace_names_in_update_values (parser, node);
+
+      /* Flag clob_from_file/blob_from_file nodes that are the direct RHS of an assignment to an internal LOB column
+       * before pt_semantic_type () runs constant folding. */
+      if (node != NULL)
+	{
+	  PT_NODE *upd_assign;
+
+	  for (upd_assign = node->info.update.assignment; upd_assign != NULL; upd_assign = upd_assign->next)
+	    {
+	      PT_NODE *lhs;
+	      PT_NODE *rhs;
+
+	      if (!PT_IS_ASSIGN_NODE (upd_assign))
+		{
+		  continue;
+		}
+
+	      lhs = upd_assign->info.expr.arg1;
+	      rhs = upd_assign->info.expr.arg2;
+	      if (lhs == NULL || rhs == NULL || !PT_IS_LOB_TYPE (lhs->type_enum) || rhs->node_type != PT_EXPR)
+		{
+		  continue;
+		}
+	      if ((lhs->type_enum == PT_TYPE_CLOB && rhs->info.expr.op == PT_CLOB_FROM_FILE)
+		  || (lhs->type_enum == PT_TYPE_BLOB && rhs->info.expr.op == PT_BLOB_FROM_FILE))
+		{
+		  PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
+		}
+	    }
+	}
 
       node = pt_semantic_type (parser, node, info);
 
