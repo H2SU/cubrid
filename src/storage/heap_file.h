@@ -619,6 +619,10 @@ extern int heap_rv_mark_deleted_on_postpone (THREAD_ENTRY * thread_p, LOG_RCV * 
 
 extern int heap_get_class_info (THREAD_ENTRY * thread_p, const OID * class_oid, HFID * hfid_out,
 				FILE_TYPE * ftype_out, char **classname_out);
+typedef int (*HEAP_INTERNAL_LOB_STREAM_READER) (void *ctx, char *buf, int buf_size, int *nread);
+extern int heap_internal_lob_insert_stream (THREAD_ENTRY * thread_p, const OID * class_oid,
+					    HEAP_INTERNAL_LOB_STREAM_READER reader, void *reader_ctx,
+					    DB_BIGINT bit_length, INTERNAL_LOB_LOCATOR * locator);
 extern int heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, const DB_VALUE * value,
 					   INTERNAL_LOB_LOCATOR * locator);
 extern int heap_cache_class_info (THREAD_ENTRY * thread_p, const OID * class_oid, HFID * hfid,

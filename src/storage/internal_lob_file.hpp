@@ -19,6 +19,7 @@
 #ifndef _INTERNAL_LOB_FILE_HPP_
 #define _INTERNAL_LOB_FILE_HPP_
 
+#include <limits.h>
 #include <vector>
 
 #include "dbtype_def.h"
@@ -31,6 +32,7 @@ struct internal_lob_locator
   DB_BIGINT length;
   DB_BIGINT bit_length = -1;
   bool is_manifest = false;
+  bool adopted = false;
 };
 using INTERNAL_LOB_LOCATOR = struct internal_lob_locator;
 
@@ -64,6 +66,16 @@ struct internal_lob_reader
 using INTERNAL_LOB_READER = struct internal_lob_reader;
 
 #define INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
+#define INTERNAL_LOB_FILE_SOURCE_PREFIX "@internal_lob_file:"
+#define INTERNAL_LOB_PENDING_PREFIX "@internal_lob_pending:"
+
+struct internal_lob_pending
+{
+  DB_TYPE lob_type;
+  DB_BIGINT size;
+  char locator[PATH_MAX + 16];
+};
+using INTERNAL_LOB_PENDING = struct internal_lob_pending;
 
 extern int internal_lob_create_file (THREAD_ENTRY *thread_p, VFID &lob_vfid);
 extern int internal_lob_remove_file (THREAD_ENTRY *thread_p, const VFID &lob_vfid);
@@ -84,9 +96,32 @@ extern int internal_lob_get_length (THREAD_ENTRY *thread_p, const INTERNAL_LOB_L
 
 extern bool internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCATOR *locator);
 extern bool internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *locator);
+extern bool internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *pending);
+inline bool
+internal_lob_is_valid_blob_bit_length (DB_BIGINT data_length, DB_BIGINT bit_length)
+{
+  if (data_length < 0 || bit_length < 0)
+    {
+      return false;
+    }
+
+  if (data_length == 0)
+    {
+      return bit_length == 0;
+    }
+
+  if (data_length > DB_BIGINT_MAX / 8)
+    {
+      return false;
+    }
+
+  return bit_length > (data_length - 1) * 8 && bit_length <= data_length * 8;
+}
 extern int internal_lob_encode_disk_length (const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT &disk_length);
 extern int internal_lob_decode_disk_length (INTERNAL_LOB_LOCATOR &locator, DB_BIGINT disk_length);
 extern int internal_lob_make_locator_db_value (DB_VALUE *value, DB_TYPE lob_type, const INTERNAL_LOB_LOCATOR &locator);
+extern int internal_lob_make_adopt_locator_db_value (DB_VALUE *value, DB_TYPE lob_type,
+    const INTERNAL_LOB_LOCATOR &locator);
 extern int internal_lob_read_db_value (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_TYPE lob_type,
 				       DB_VALUE *value, TP_DOMAIN *domain);
 
