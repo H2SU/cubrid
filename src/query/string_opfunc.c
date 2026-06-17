@@ -24951,6 +24951,27 @@ internal_lob_make_scalar_stream_marker (const INTERNAL_LOB_LOCATOR & locator, ch
 }
 
 static int
+internal_lob_get_locator_bit_length (const INTERNAL_LOB_LOCATOR & locator, INT64 * bit_length)
+{
+  assert (bit_length != NULL);
+
+  if (locator.bit_length >= 0)
+    {
+      *bit_length = locator.bit_length;
+      return NO_ERROR;
+    }
+
+  if (locator.length > DB_BIGINT_MAX / 8)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QSTR_BAD_LENGTH, 1, locator.length);
+      return ER_QSTR_BAD_LENGTH;
+    }
+
+  *bit_length = locator.length * 8;
+  return NO_ERROR;
+}
+
+static int
 internal_lob_materialize_if_locator (const DB_VALUE * src_value, DB_TYPE lob_type, DB_VALUE * materialized_value,
 				     bool * is_locator)
 {
@@ -25028,23 +25049,26 @@ db_blob_to_bit (const DB_VALUE * src_value, const DB_VALUE * length_value, DB_VA
     bool is_locator = false;
 
     if ((length_value == NULL || DB_VALUE_TYPE (length_value) == DB_TYPE_NULL)
-	&& internal_lob_db_value_is_locator (src_value, &locator)
-	&& (locator.length > INT_MAX || locator.bit_length > INT_MAX))
+	&& internal_lob_db_value_is_locator (src_value, &locator))
       {
-	if (!internal_lob_scalar_stream_is_csql_client ())
+	INT64 bit_length = 0LL;
+
+	error_status = internal_lob_get_locator_bit_length (locator, &bit_length);
+	if (error_status != NO_ERROR)
 	  {
-	    if (locator.bit_length >= 0)
-	      {
-		return lobfile_set_too_large_error (locator.bit_length);
-	      }
-	    if (locator.length > DB_BIGINT_MAX / 8)
-	      {
-		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QSTR_BAD_LENGTH, 1, locator.length);
-		return ER_QSTR_BAD_LENGTH;
-	      }
-	    return lobfile_set_too_large_error (locator.length * 8);
+	    return error_status;
 	  }
-	return internal_lob_make_scalar_stream_marker (locator, 'B', result_value);
+
+	/* blob_to_bit () returns VARBIT. Stream before materialization when the full locator exceeds VARBIT
+	 * precision, even if the byte count still fits in an int. */
+	if (bit_length > DB_MAX_VARBIT_PRECISION)
+	  {
+	    if (!internal_lob_scalar_stream_is_csql_client ())
+	      {
+		return lobfile_set_too_large_error (bit_length);
+	      }
+	    return internal_lob_make_scalar_stream_marker (locator, 'B', result_value);
+	  }
       }
 
     error_status = internal_lob_materialize_if_locator (src_value, DB_TYPE_BLOB, &materialized, &is_locator);
@@ -25400,7 +25424,9 @@ db_clob_to_char (const DB_VALUE * src_value, const DB_VALUE * codeset_value, DB_
 	INTERNAL_LOB_LOCATOR locator;
 	bool is_locator = false;
 
-	if (internal_lob_db_value_is_locator (src_value, &locator) && locator.length > INT_MAX)
+	/* clob_to_char () returns VARCHAR. Stream before materialization when the full locator exceeds VARCHAR
+	 * precision, even if the byte count still fits in an int. */
+	if (internal_lob_db_value_is_locator (src_value, &locator) && locator.length > DB_MAX_VARCHAR_PRECISION)
 	  {
 	    if (!internal_lob_scalar_stream_is_csql_client ())
 	      {
