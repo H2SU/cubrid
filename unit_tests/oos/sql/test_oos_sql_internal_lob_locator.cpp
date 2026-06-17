@@ -22,12 +22,21 @@
  * CBRD-26914
  */
 
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
+#include "db_elo.h"
+#include "elo.h"
+#include "es_common.h"
+#include "heap_file.h"
 #include "internal_lob_file.hpp"
 #include "object_primitive.h"
+#include "string_opfunc.h"
 #include "system_parameter.h"
+#include "work_space.h"
 #include "test_oos_sql_common.hpp"
 
 class OosSqlInternalLobLocator : public ::testing::Test
@@ -83,6 +92,92 @@ fetch_internal_lob_pair (const char *sql, DB_VALUE *first, DB_VALUE *second)
   rc = db_query_get_tuple_value (result, 1, second);
   db_query_end (result);
   return rc;
+}
+
+struct internal_lob_string_reader_context
+{
+  const std::string *payload = nullptr;
+  std::size_t offset = 0;
+};
+
+static int
+internal_lob_string_reader (void *ctx, char *buf, int buf_size, int *nread)
+{
+  internal_lob_string_reader_context *reader_ctx = (internal_lob_string_reader_context *) ctx;
+  std::size_t remaining;
+  std::size_t read_size;
+
+  if (reader_ctx == nullptr || reader_ctx->payload == nullptr || buf == nullptr || buf_size < 0 || nread == nullptr)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+
+  *nread = 0;
+  if (reader_ctx->offset >= reader_ctx->payload->size () || buf_size == 0)
+    {
+      return NO_ERROR;
+    }
+
+  remaining = reader_ctx->payload->size () - reader_ctx->offset;
+  read_size = remaining < (std::size_t) buf_size ? remaining : (std::size_t) buf_size;
+  std::memcpy (buf, reader_ctx->payload->data () + reader_ctx->offset, read_size);
+  reader_ctx->offset += read_size;
+  *nread = (int) read_size;
+  return NO_ERROR;
+}
+
+static std::string
+internal_lob_test_path (const char *suffix)
+{
+  return std::string ("/tmp/cbrd26914_internal_lob_") + std::to_string ((long long) getpid ()) + "_" + suffix;
+}
+
+static void
+write_test_file (const std::string &path, const std::string &payload)
+{
+  FILE *fp = fopen (path.c_str (), "wb");
+  ASSERT_NE (fp, nullptr);
+  if (!payload.empty ())
+    {
+      ASSERT_EQ (fwrite (payload.data (), 1, payload.size (), fp), payload.size ());
+    }
+  ASSERT_EQ (fclose (fp), 0);
+}
+
+static void
+create_sparse_test_file (const std::string &path, long long size)
+{
+  FILE *fp = fopen (path.c_str (), "wb");
+  ASSERT_NE (fp, nullptr);
+  if (size > 0)
+    {
+      ASSERT_EQ (fseeko (fp, (off_t) size - 1, SEEK_SET), 0);
+      ASSERT_NE (fputc ('\0', fp), EOF);
+    }
+  ASSERT_EQ (fclose (fp), 0);
+}
+
+static DB_VALUE
+make_path_value (const std::string &path)
+{
+  DB_VALUE value;
+
+  db_make_varchar (&value, DB_MAX_VARCHAR_PRECISION, path.c_str (), (int) path.size (), LANG_SYS_CODESET,
+		   LANG_COLL_DEFAULT);
+  return value;
+}
+
+static void
+delete_pending_lob_for_test (const INTERNAL_LOB_PENDING &pending)
+{
+  DB_ELO elo;
+
+  elo_init_structure (&elo);
+  elo.type = ELO_FBO;
+  elo.locator = (char *) pending.locator;
+  elo.es_type = es_get_type (pending.locator);
+  EXPECT_EQ (db_elo_delete (&elo), NO_ERROR);
 }
 
 TEST_F (OosSqlInternalLobLocator, RawSelectReturnsLocators)
@@ -194,6 +289,184 @@ TEST_F (OosSqlInternalLobLocator, InsertSelectCopiesLocatorPayload)
   pr_clear_value (&bit_value);
 }
 
+TEST_F (OosSqlInternalLobLocator, DirectFromFileInsertUsesPendingMarkerAndStreamsPayload)
+{
+  struct segment_size_guard
+  {
+    ~segment_size_guard ()
+    {
+      prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 128ULL * 1024ULL * 1024ULL);
+    }
+  } guard;
+
+  std::string clob_path = internal_lob_test_path ("direct_clob.txt");
+  std::string blob_path = internal_lob_test_path ("direct_blob.bin");
+  std::string clob_payload (3000, 'p');
+  std::string blob_payload;
+  DB_VALUE path_value, pending_value;
+  INTERNAL_LOB_PENDING pending;
+  DB_VALUE char_value, bit_value;
+  const char *text;
+  const char *bits;
+  int bit_length = 0;
+  int rc;
+
+  prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 1024ULL);
+
+  for (std::size_t i = 0; i < clob_payload.size (); i++)
+    {
+      clob_payload[i] = (char) ('a' + (i % 26));
+    }
+  blob_payload.push_back ((char) 0xde);
+  blob_payload.push_back ((char) 0xad);
+  blob_payload.push_back ((char) 0xbe);
+  blob_payload.push_back ((char) 0xef);
+
+  write_test_file (clob_path, clob_payload);
+  write_test_file (blob_path, blob_payload);
+
+  path_value = make_path_value (clob_path);
+  db_make_null (&pending_value);
+  rc = db_clob_from_file_pending (&path_value, &pending_value);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_TRUE (internal_lob_db_value_is_pending (&pending_value, &pending));
+  EXPECT_EQ (pending.lob_type, DB_TYPE_CLOB);
+  EXPECT_EQ (pending.size, (DB_BIGINT) clob_payload.size ());
+  delete_pending_lob_for_test (pending);
+  pr_clear_value (&pending_value);
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB, b BLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  std::string insert_sql = "INSERT INTO t_internal_lob_locator VALUES (1, clob_from_file('" + clob_path
+			   + "'), blob_from_file('" + blob_path + "'))";
+  rc = exec_sql (insert_sql.c_str ());
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = fetch_internal_lob_pair ("SELECT clob_to_char(c), blob_to_bit(b) FROM t_internal_lob_locator WHERE id = 1",
+				&char_value, &bit_value);
+  ASSERT_EQ (rc, NO_ERROR);
+
+  text = db_get_string (&char_value);
+  ASSERT_NE (text, nullptr);
+  ASSERT_EQ (db_get_string_size (&char_value), (int) clob_payload.size ());
+  EXPECT_EQ (std::string (text, (std::size_t) db_get_string_size (&char_value)), clob_payload);
+
+  bits = (const char *) db_get_bit (&bit_value, &bit_length);
+  ASSERT_NE (bits, nullptr);
+  EXPECT_EQ (bit_length, (int) blob_payload.size () * 8);
+  EXPECT_EQ (std::memcmp (bits, blob_payload.data (), blob_payload.size ()), 0);
+
+  pr_clear_value (&char_value);
+  pr_clear_value (&bit_value);
+  std::remove (clob_path.c_str ());
+  std::remove (blob_path.c_str ());
+}
+
+TEST_F (OosSqlInternalLobLocator, DirectFromFileUpdateUsesPendingMarkerAndStreamsPayload)
+{
+  struct segment_size_guard
+  {
+    ~segment_size_guard ()
+    {
+      prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 128ULL * 1024ULL * 1024ULL);
+    }
+  } guard;
+
+  std::string clob_path = internal_lob_test_path ("update_clob.txt");
+  std::string blob_path = internal_lob_test_path ("update_blob.bin");
+  std::string clob_payload (4096, 'u');
+  std::string blob_payload;
+  DB_VALUE char_value, bit_value;
+  const char *text;
+  const char *bits;
+  int bit_length = 0;
+  int rc;
+
+  prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 1024ULL);
+
+  for (std::size_t i = 0; i < clob_payload.size (); i++)
+    {
+      clob_payload[i] = (char) ('A' + (i % 26));
+    }
+  blob_payload.push_back ((char) 0xca);
+  blob_payload.push_back ((char) 0xfe);
+  blob_payload.push_back ((char) 0xba);
+  blob_payload.push_back ((char) 0xbe);
+
+  write_test_file (clob_path, clob_payload);
+  write_test_file (blob_path, blob_payload);
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB, b BLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = exec_sql ("INSERT INTO t_internal_lob_locator VALUES (1, char_to_clob('before'), bit_to_blob(X'ABCD'))");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  std::string update_sql = "UPDATE t_internal_lob_locator SET c = clob_from_file('" + clob_path
+			   + "'), b = blob_from_file('" + blob_path + "') WHERE id = 1";
+  rc = exec_sql (update_sql.c_str ());
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = fetch_internal_lob_pair ("SELECT clob_to_char(c), blob_to_bit(b) FROM t_internal_lob_locator WHERE id = 1",
+				&char_value, &bit_value);
+  ASSERT_EQ (rc, NO_ERROR);
+
+  text = db_get_string (&char_value);
+  ASSERT_NE (text, nullptr);
+  ASSERT_EQ (db_get_string_size (&char_value), (int) clob_payload.size ());
+  EXPECT_EQ (std::string (text, (std::size_t) db_get_string_size (&char_value)), clob_payload);
+
+  bits = (const char *) db_get_bit (&bit_value, &bit_length);
+  ASSERT_NE (bits, nullptr);
+  EXPECT_EQ (bit_length, (int) blob_payload.size () * 8);
+  EXPECT_EQ (std::memcmp (bits, blob_payload.data (), blob_payload.size ()), 0);
+
+  pr_clear_value (&char_value);
+  pr_clear_value (&bit_value);
+  std::remove (clob_path.c_str ());
+  std::remove (blob_path.c_str ());
+}
+
+TEST_F (OosSqlInternalLobLocator, NonDirectLargeFromFileDoesNotReturnStreamingMarker)
+{
+  std::string clob_path = internal_lob_test_path ("large_non_direct_clob.dat");
+  std::string blob_path = internal_lob_test_path ("large_non_direct_blob.dat");
+  DB_VALUE path_value, result_value;
+  INTERNAL_LOB_PENDING pending;
+  INTERNAL_LOB_LOCATOR locator;
+  int rc;
+
+  create_sparse_test_file (clob_path, (long long) DB_MAX_LOB_PRECISION + 1LL);
+  create_sparse_test_file (blob_path, ((long long) DB_MAX_LOB_PRECISION / 8LL) + 1LL);
+
+  path_value = make_path_value (clob_path);
+  db_make_null (&result_value);
+  rc = db_clob_from_file (&path_value, &result_value);
+  EXPECT_EQ (rc, ER_QPROC_STRING_SIZE_TOO_BIG);
+  EXPECT_FALSE (internal_lob_db_value_is_pending (&result_value, &pending));
+  EXPECT_FALSE (internal_lob_db_value_is_locator (&result_value, &locator));
+  pr_clear_value (&result_value);
+  er_clear ();
+
+  path_value = make_path_value (blob_path);
+  db_make_null (&result_value);
+  rc = db_blob_from_file (&path_value, &result_value);
+  EXPECT_EQ (rc, ER_QPROC_STRING_SIZE_TOO_BIG);
+  EXPECT_FALSE (internal_lob_db_value_is_pending (&result_value, &pending));
+  EXPECT_FALSE (internal_lob_db_value_is_locator (&result_value, &locator));
+  pr_clear_value (&result_value);
+  er_clear ();
+
+  std::remove (clob_path.c_str ());
+  std::remove (blob_path.c_str ());
+}
+
 TEST_F (OosSqlInternalLobLocator, CharToBlobBitLengthIsPreserved)
 {
   int rc;
@@ -296,6 +569,146 @@ TEST_F (OosSqlInternalLobLocator, SegmentedRawStorageRoundTrip)
 
   pr_clear_value (&char_value);
   pr_clear_value (&bit_value);
+}
+
+TEST_F (OosSqlInternalLobLocator, StreamedAdoptLocatorPreservesPayload)
+{
+  struct segment_size_guard
+  {
+    ~segment_size_guard ()
+    {
+      prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 128ULL * 1024ULL * 1024ULL);
+    }
+  } guard;
+
+  const int payload_size = 4097;
+  std::string clob_payload ((std::size_t) payload_size, 's');
+  std::string blob_payload;
+  DB_OBJECT *class_obj;
+  OID *class_oid;
+  INTERNAL_LOB_LOCATOR streamed_clob_locator, adopted_clob_locator, parsed_locator;
+  INTERNAL_LOB_LOCATOR streamed_blob_locator, adopted_blob_locator;
+  DB_VALUE adopt_value, materialized_value;
+  internal_lob_string_reader_context reader_ctx;
+  int rc;
+
+  prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 1024ULL);
+
+  for (int i = 0; i < payload_size; i++)
+    {
+      clob_payload[ (std::size_t) i] = (char) ('a' + (i % 26));
+    }
+
+  blob_payload.push_back ((char) 0xab);
+  blob_payload.push_back ((char) 0xcd);
+  blob_payload.push_back ((char) 0x80);
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB, b BLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  class_obj = db_find_class ("t_internal_lob_locator");
+  ASSERT_NE (class_obj, nullptr);
+  class_oid = WS_OID (class_obj);
+  ASSERT_NE (class_oid, nullptr);
+  ASSERT_FALSE (OID_ISNULL (class_oid));
+
+  reader_ctx.payload = &clob_payload;
+  reader_ctx.offset = 0;
+  rc = heap_internal_lob_insert_stream (thread_get_thread_entry_info (), class_oid, internal_lob_string_reader,
+					&reader_ctx, -1, &streamed_clob_locator);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_TRUE (streamed_clob_locator.is_manifest);
+  ASSERT_EQ (streamed_clob_locator.length, (DB_BIGINT) clob_payload.size ());
+
+  db_make_null (&adopt_value);
+  rc = internal_lob_make_adopt_locator_db_value (&adopt_value, DB_TYPE_CLOB, streamed_clob_locator);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_TRUE (internal_lob_db_value_is_locator (&adopt_value, &parsed_locator));
+  ASSERT_TRUE (parsed_locator.adopted);
+
+  rc = heap_internal_lob_insert_value (thread_get_thread_entry_info (), class_oid, &adopt_value, &adopted_clob_locator);
+  ASSERT_EQ (rc, NO_ERROR);
+  EXPECT_TRUE (OID_EQ (&adopted_clob_locator.oid, &streamed_clob_locator.oid));
+  EXPECT_FALSE (adopted_clob_locator.adopted);
+  pr_clear_value (&adopt_value);
+
+  db_make_null (&materialized_value);
+  rc = internal_lob_read_db_value (thread_get_thread_entry_info (), adopted_clob_locator, DB_TYPE_CLOB,
+				   &materialized_value, NULL);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_EQ (db_get_string_size (&materialized_value), payload_size);
+  ASSERT_EQ (std::memcmp (db_get_string (&materialized_value), clob_payload.data (), clob_payload.size ()), 0);
+  pr_clear_value (&materialized_value);
+
+  reader_ctx.payload = &blob_payload;
+  reader_ctx.offset = 0;
+  rc = heap_internal_lob_insert_stream (thread_get_thread_entry_info (), class_oid, internal_lob_string_reader,
+					&reader_ctx, 17, &streamed_blob_locator);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_EQ (streamed_blob_locator.length, (DB_BIGINT) blob_payload.size ());
+  ASSERT_EQ (streamed_blob_locator.bit_length, 17);
+
+  db_make_null (&adopt_value);
+  rc = internal_lob_make_adopt_locator_db_value (&adopt_value, DB_TYPE_BLOB, streamed_blob_locator);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_TRUE (internal_lob_db_value_is_locator (&adopt_value, &parsed_locator));
+  ASSERT_TRUE (parsed_locator.adopted);
+  ASSERT_EQ (parsed_locator.bit_length, 17);
+
+  rc = heap_internal_lob_insert_value (thread_get_thread_entry_info (), class_oid, &adopt_value, &adopted_blob_locator);
+  ASSERT_EQ (rc, NO_ERROR);
+  EXPECT_TRUE (OID_EQ (&adopted_blob_locator.oid, &streamed_blob_locator.oid));
+  EXPECT_FALSE (adopted_blob_locator.adopted);
+  EXPECT_EQ (adopted_blob_locator.bit_length, 17);
+  pr_clear_value (&adopt_value);
+
+  db_make_null (&materialized_value);
+  rc = internal_lob_read_db_value (thread_get_thread_entry_info (), adopted_blob_locator, DB_TYPE_BLOB,
+				   &materialized_value, NULL);
+  ASSERT_EQ (rc, NO_ERROR);
+  int bit_length = 0;
+  const char *bits = (const char *) db_get_bit (&materialized_value, &bit_length);
+  ASSERT_NE (bits, nullptr);
+  EXPECT_EQ (bit_length, 17);
+  ASSERT_EQ (db_get_string_size (&materialized_value), (int) blob_payload.size ());
+  EXPECT_EQ (std::memcmp (bits, blob_payload.data (), blob_payload.size ()), 0);
+  pr_clear_value (&materialized_value);
+}
+
+TEST_F (OosSqlInternalLobLocator, InvalidStreamedBlobBitLengthIsRejected)
+{
+  std::string blob_payload;
+  DB_OBJECT *class_obj;
+  OID *class_oid;
+  INTERNAL_LOB_LOCATOR locator;
+  internal_lob_string_reader_context reader_ctx;
+  int rc;
+
+  EXPECT_TRUE (internal_lob_is_valid_blob_bit_length (1, 1));
+  EXPECT_TRUE (internal_lob_is_valid_blob_bit_length (1, 8));
+  EXPECT_FALSE (internal_lob_is_valid_blob_bit_length (1, 0));
+  EXPECT_FALSE (internal_lob_is_valid_blob_bit_length (1, 9));
+  EXPECT_FALSE (internal_lob_is_valid_blob_bit_length (0, 1));
+
+  blob_payload.push_back ((char) 0xff);
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, b BLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  class_obj = db_find_class ("t_internal_lob_locator");
+  ASSERT_NE (class_obj, nullptr);
+  class_oid = WS_OID (class_obj);
+  ASSERT_NE (class_oid, nullptr);
+  ASSERT_FALSE (OID_ISNULL (class_oid));
+
+  reader_ctx.payload = &blob_payload;
+  reader_ctx.offset = 0;
+  rc = heap_internal_lob_insert_stream (thread_get_thread_entry_info (), class_oid, internal_lob_string_reader,
+					&reader_ctx, 9, &locator);
+  EXPECT_NE (rc, NO_ERROR);
+  er_clear ();
 }
 
 TEST_F (OosSqlInternalLobLocator, RangedReadReturnsRequestedSlices)
