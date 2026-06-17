@@ -227,6 +227,10 @@ extern void svacuum (THREAD_ENTRY * thread_p, unsigned int rid, char *request, i
 extern void svacuum_dump (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
 extern void soos_stats (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
 extern void sinternal_lob_read (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
+extern void sloaddb_internal_lob_upload_begin (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
+extern void sloaddb_internal_lob_upload_append (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
+extern void sloaddb_internal_lob_upload_end (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
+extern void sloaddb_internal_lob_upload_abort (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
 extern void slogtb_get_mvcc_snapshot (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
 extern void stran_lock_rep_read (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);
 extern void sboot_get_timezone_checksum (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen);

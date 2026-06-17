@@ -5214,6 +5214,160 @@ cleanup:
 #endif
 }
 
+int
+loaddb_internal_lob_upload_begin (cubload::class_id clsid, char type, DB_BIGINT data_length, DB_BIGINT bit_length,
+				  INT64 * token)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT_SIZE * 2 + OR_INT64_SIZE * 2) a_request;
+  OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT64_SIZE) a_reply;
+  char *request = OR_ALIGNED_BUF_START (a_request);
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *ptr = NULL;
+  int err = NO_ERROR;
+
+  if (token == NULL || clsid <= 0 || (type != 'B' && type != 'C') || data_length < 0 || bit_length < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OBJ_INVALID_ARGUMENTS, 0);
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+  *token = 0;
+
+  ptr = or_pack_int (request, clsid);
+  ptr = or_pack_int (ptr, (int) type);
+  ptr = or_pack_int64 (ptr, (INT64) data_length);
+  (void) or_pack_int64 (ptr, (INT64) bit_length);
+
+  err = net_client_request (NET_SERVER_INTERNAL_LOB_UPLOAD_BEGIN, request, OR_ALIGNED_BUF_SIZE (a_request), reply,
+			    OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, NULL, 0);
+  if (err != NO_ERROR)
+    {
+      return err;
+    }
+
+  ptr = or_unpack_int64 (reply, token);
+  (void) or_unpack_int (ptr, &err);
+  return err;
+#else
+  (void) clsid;
+  (void) type;
+  (void) data_length;
+  (void) bit_length;
+  if (token != NULL)
+    {
+      *token = 0;
+    }
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
+int
+loaddb_internal_lob_upload_append (INT64 token, const char *data, int data_size)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT64_SIZE + OR_INT_SIZE) a_request;
+  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
+  char *request = OR_ALIGNED_BUF_START (a_request);
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *ptr = NULL;
+  int err = NO_ERROR;
+
+  if (token <= 0 || data_size < 0 || (data == NULL && data_size > 0))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OBJ_INVALID_ARGUMENTS, 0);
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+
+  ptr = or_pack_int64 (request, token);
+  (void) or_pack_int (ptr, data_size);
+
+  err = net_client_request (NET_SERVER_INTERNAL_LOB_UPLOAD_APPEND, request, OR_ALIGNED_BUF_SIZE (a_request), reply,
+			    OR_ALIGNED_BUF_SIZE (a_reply), (char *) data, data_size, NULL, 0);
+  if (err != NO_ERROR)
+    {
+      return err;
+    }
+
+  (void) or_unpack_int (reply, &err);
+  return err;
+#else
+  (void) token;
+  (void) data;
+  (void) data_size;
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
+int
+loaddb_internal_lob_upload_end (INT64 token)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT64_SIZE) a_request;
+  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
+  char *request = OR_ALIGNED_BUF_START (a_request);
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  int err = NO_ERROR;
+
+  if (token <= 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OBJ_INVALID_ARGUMENTS, 0);
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+
+  (void) or_pack_int64 (request, token);
+
+  err = net_client_request (NET_SERVER_INTERNAL_LOB_UPLOAD_END, request, OR_ALIGNED_BUF_SIZE (a_request), reply,
+			    OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, NULL, 0);
+  if (err != NO_ERROR)
+    {
+      return err;
+    }
+
+  (void) or_unpack_int (reply, &err);
+  return err;
+#else
+  (void) token;
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
+int
+loaddb_internal_lob_upload_abort (INT64 token)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT64_SIZE) a_request;
+  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
+  char *request = OR_ALIGNED_BUF_START (a_request);
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  int err = NO_ERROR;
+
+  if (token <= 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OBJ_INVALID_ARGUMENTS, 0);
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+
+  (void) or_pack_int64 (request, token);
+
+  err = net_client_request (NET_SERVER_INTERNAL_LOB_UPLOAD_ABORT, request, OR_ALIGNED_BUF_SIZE (a_request), reply,
+			    OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, NULL, 0);
+  if (err != NO_ERROR)
+    {
+      return err;
+    }
+
+  (void) or_unpack_int (reply, &err);
+  return err;
+#else
+  (void) token;
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
 /*
  * csession_create_prepared_statement () - create a prepared session statement
  * return	  : error code or NO_ERROR
