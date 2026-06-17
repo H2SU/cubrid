@@ -35,6 +35,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
 
 #include "heap_file.h"
 #include "heap_oos.hpp"
@@ -12445,6 +12447,382 @@ end:
   return success;
 }
 
+typedef struct heap_internal_lob_file_source HEAP_INTERNAL_LOB_FILE_SOURCE;
+struct heap_internal_lob_file_source
+{
+  DB_TYPE lob_type;
+  DB_BIGINT data_length;
+  DB_BIGINT bit_length;
+  char path[PATH_MAX + 1];
+};
+
+typedef struct heap_internal_lob_file_reader_context HEAP_INTERNAL_LOB_FILE_READER_CONTEXT;
+struct heap_internal_lob_file_reader_context
+{
+  DB_ELO elo;
+  DB_BIGINT offset;
+  DB_BIGINT length;
+};
+
+static bool
+heap_internal_lob_parse_file_source (const DB_VALUE * value, HEAP_INTERNAL_LOB_FILE_SOURCE * source)
+{
+  DB_TYPE value_type;
+  const char *data = NULL;
+  int size = 0;
+  int prefix_len = (int) strlen (INTERNAL_LOB_FILE_SOURCE_PREFIX);
+  char marker_buf[PATH_MAX + 128];
+  char *p = NULL;
+  char *endptr = NULL;
+  long long data_length;
+  long long bit_length;
+  size_t path_len;
+
+  if (value == NULL || source == NULL || DB_IS_NULL (value))
+    {
+      return false;
+    }
+
+  value_type = DB_VALUE_DOMAIN_TYPE (value);
+  if (value_type == DB_TYPE_CLOB)
+    {
+      data = db_get_string (value);
+      size = db_get_string_size (value);
+    }
+  else if (value_type == DB_TYPE_BLOB)
+    {
+      int bit_count = 0;
+
+      data = (const char *) db_get_bit (value, &bit_count);
+      if (bit_count < 0 || bit_count % 8 != 0)
+	{
+	  return false;
+	}
+      size = bit_count / 8;
+    }
+  else
+    {
+      return false;
+    }
+
+  if (data == NULL || size <= prefix_len || size >= (int) sizeof (marker_buf))
+    {
+      return false;
+    }
+  if (memcmp (data, INTERNAL_LOB_FILE_SOURCE_PREFIX, prefix_len) != 0)
+    {
+      return false;
+    }
+
+  memcpy (marker_buf, data, size);
+  marker_buf[size] = '\0';
+
+  p = marker_buf + prefix_len;
+  if (p[0] == 'C')
+    {
+      source->lob_type = DB_TYPE_CLOB;
+    }
+  else if (p[0] == 'B')
+    {
+      source->lob_type = DB_TYPE_BLOB;
+    }
+  else
+    {
+      return false;
+    }
+  if (source->lob_type != value_type || p[1] != ':')
+    {
+      return false;
+    }
+  p += 2;
+
+  data_length = strtoll (p, &endptr, 10);
+  if (endptr == p || *endptr != ':' || data_length < 0)
+    {
+      return false;
+    }
+  p = endptr + 1;
+
+  bit_length = strtoll (p, &endptr, 10);
+  if (endptr == p || *endptr != ':')
+    {
+      return false;
+    }
+  if (source->lob_type == DB_TYPE_CLOB && bit_length != -1)
+    {
+      return false;
+    }
+  if (source->lob_type == DB_TYPE_BLOB && bit_length < 0)
+    {
+      return false;
+    }
+  p = endptr + 1;
+
+  path_len = strlen (p);
+  if (path_len == 0 || path_len > PATH_MAX)
+    {
+      return false;
+    }
+
+  source->data_length = (DB_BIGINT) data_length;
+  source->bit_length = (DB_BIGINT) bit_length;
+  memcpy (source->path, p, path_len + 1);
+  return true;
+}
+
+static int
+heap_internal_lob_file_reader (void *ctx, char *buf, int buf_size, int *nread)
+{
+  HEAP_INTERNAL_LOB_FILE_READER_CONTEXT *reader_ctx = (HEAP_INTERNAL_LOB_FILE_READER_CONTEXT *) ctx;
+  DB_BIGINT remaining;
+  DB_BIGINT read_bytes = 0;
+  int read_size;
+  int error;
+
+  if (reader_ctx == NULL || buf == NULL || buf_size <= 0 || nread == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+
+  if (reader_ctx->offset >= reader_ctx->length)
+    {
+      *nread = 0;
+      return NO_ERROR;
+    }
+
+  remaining = reader_ctx->length - reader_ctx->offset;
+  read_size = (remaining < (DB_BIGINT) buf_size) ? (int) remaining : buf_size;
+  error = db_elo_read (&reader_ctx->elo, (off_t) reader_ctx->offset, buf, (size_t) read_size, &read_bytes);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+  if (read_bytes != (DB_BIGINT) read_size)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_GENERAL, 2, "LOB",
+	      "unexpected end of file while reading external storage");
+      return ER_ES_GENERAL;
+    }
+
+  reader_ctx->offset += read_bytes;
+  *nread = read_size;
+  return NO_ERROR;
+}
+
+static int
+heap_internal_lob_insert_file_source (THREAD_ENTRY * thread_p, const OID * class_oid,
+				      const HEAP_INTERNAL_LOB_FILE_SOURCE * source, INTERNAL_LOB_LOCATOR * locator)
+{
+  HEAP_INTERNAL_LOB_FILE_READER_CONTEXT reader_ctx;
+  INT64 current_size;
+  DB_BIGINT bit_length;
+
+  if (source == NULL || locator == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+
+  elo_init_structure (&reader_ctx.elo);
+  reader_ctx.elo.type = ELO_FBO;
+  reader_ctx.elo.locator = (char *) source->path;
+  current_size = db_elo_size (&reader_ctx.elo);
+  if (current_size < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_INVALID_PATH, 1, source->path);
+      return ER_ES_INVALID_PATH;
+    }
+  if ((DB_BIGINT) current_size != source->data_length)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_GENERAL, 2, "LOB", "external file size changed");
+      return ER_ES_GENERAL;
+    }
+  if (source->lob_type == DB_TYPE_BLOB
+      && (source->data_length > DB_BIGINT_MAX / 8 || source->bit_length != source->data_length * 8))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+
+  reader_ctx.offset = 0;
+  reader_ctx.length = source->data_length;
+  bit_length = (source->lob_type == DB_TYPE_BLOB) ? source->bit_length : -1;
+  return heap_internal_lob_insert_stream (thread_p, class_oid, heap_internal_lob_file_reader, &reader_ctx,
+					  bit_length, locator);
+}
+
+static int
+heap_internal_lob_insert_pending_source (THREAD_ENTRY * thread_p, const OID * class_oid,
+					 const INTERNAL_LOB_PENDING * pending, INTERNAL_LOB_LOCATOR * locator)
+{
+  HEAP_INTERNAL_LOB_FILE_READER_CONTEXT reader_ctx;
+  INT64 current_size;
+  DB_BIGINT bit_length = -1;
+  int error;
+
+  if (pending == NULL || locator == NULL || (pending->lob_type != DB_TYPE_CLOB && pending->lob_type != DB_TYPE_BLOB)
+      || pending->size < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+
+  elo_init_structure (&reader_ctx.elo);
+  reader_ctx.elo.type = ELO_FBO;
+  reader_ctx.elo.locator = (char *) pending->locator;
+  reader_ctx.elo.es_type = es_get_type (pending->locator);
+  reader_ctx.elo.size = -1;
+
+  current_size = db_elo_size (&reader_ctx.elo);
+  if (current_size < 0)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+  if ((DB_BIGINT) current_size != pending->size)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_GENERAL, 2, "LOB", "pending LOB size changed");
+      return ER_ES_GENERAL;
+    }
+  if (pending->lob_type == DB_TYPE_BLOB)
+    {
+      if (pending->size > DB_BIGINT_MAX / 8)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	  return ER_GENERIC_ERROR;
+	}
+      bit_length = pending->size * 8;
+    }
+
+  reader_ctx.offset = 0;
+  reader_ctx.length = pending->size;
+  error = heap_internal_lob_insert_stream (thread_p, class_oid, heap_internal_lob_file_reader, &reader_ctx,
+					   bit_length, locator);
+  if (error != NO_ERROR)
+    {
+      if (db_elo_delete (&reader_ctx.elo) != NO_ERROR)
+	{
+	  er_log_debug (ARG_FILE_LINE,
+			"heap_internal_lob_insert_pending_source: temp ELO delete after insert failure failed "
+			"(err=%d); ES file may be orphaned\n", er_errid ());
+	  er_clear ();
+	}
+      return error;
+    }
+
+  if (db_elo_delete (&reader_ctx.elo) != NO_ERROR)
+    {
+      er_log_debug (ARG_FILE_LINE,
+		    "heap_internal_lob_insert_pending_source: temp ELO delete failed (err=%d); ES file may be orphaned\n",
+		    er_errid ());
+      er_clear ();
+    }
+
+  return NO_ERROR;
+}
+
+/*
+ * heap_internal_lob_insert_stream () - Insert a raw byte stream into a class internal LOB file.
+ *   return: NO_ERROR, or error code
+ *   thread_p(in): thread entry
+ *   class_oid(in): class OID owning the target heap
+ *   reader(in): callback that fills buf and sets nread; nread == 0 means EOF
+ *   reader_ctx(in): callback context
+ *   bit_length(in): BLOB bit length, or -1 for CLOB byte-length data
+ *   locator(out): newly inserted internal LOB locator
+ */
+int
+heap_internal_lob_insert_stream (THREAD_ENTRY * thread_p, const OID * class_oid,
+				 HEAP_INTERNAL_LOB_STREAM_READER reader, void *reader_ctx, DB_BIGINT bit_length,
+				 INTERNAL_LOB_LOCATOR * locator)
+{
+  HFID hfid;
+  VFID lob_vfid;
+  INTERNAL_LOB_WRITER writer;
+  char buffer[64 * 1024];
+  int error = NO_ERROR;
+
+  if (class_oid == NULL || reader == NULL || locator == NULL || bit_length < -1)
+    {
+      error = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+      return error;
+    }
+
+  if (heap_get_class_info (thread_p, class_oid, &hfid, NULL, NULL) != NO_ERROR)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+
+  VFID_SET_NULL (&lob_vfid);
+  if (!heap_internal_lob_find_vfid (thread_p, &hfid, &lob_vfid, true))
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+
+  error = internal_lob_insert_begin (thread_p, lob_vfid, writer);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  while (true)
+    {
+      int nread = 0;
+
+      error = reader (reader_ctx, buffer, (int) sizeof (buffer), &nread);
+      if (error != NO_ERROR)
+	{
+	  goto error_exit;
+	}
+      if (nread < 0 || nread > (int) sizeof (buffer))
+	{
+	  error = ER_GENERIC_ERROR;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+	  goto error_exit;
+	}
+      if (nread == 0)
+	{
+	  break;
+	}
+
+      error = internal_lob_insert_append (thread_p, writer, oos_buffer (buffer, (std::size_t) nread));
+      if (error != NO_ERROR)
+	{
+	  goto error_exit;
+	}
+    }
+
+  error = internal_lob_insert_end (thread_p, writer, *locator);
+  if (error == NO_ERROR && bit_length >= 0)
+    {
+      if (!internal_lob_is_valid_blob_bit_length (locator->length, bit_length))
+	{
+	  error = ER_GENERIC_ERROR;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+	  if (!OID_ISNULL (&locator->oid))
+	    {
+	      (void) internal_lob_delete (thread_p, lob_vfid, *locator);
+	    }
+	  goto error_exit;
+	}
+      locator->bit_length = bit_length;
+    }
+
+  return error;
+
+error_exit:
+  if (writer.segment_buffer != NULL)
+    {
+      db_private_free_and_init (NULL, writer.segment_buffer);
+    }
+  writer.segments.clear ();
+  return error;
+}
+
 /*
  * heap_internal_lob_insert_value () - Insert a BLOB/CLOB DB_VALUE into a class internal LOB file.
  *   return: NO_ERROR, or error code
@@ -12468,6 +12846,8 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
   DB_VALUE materialized_value;
   const DB_VALUE *source_value = value;
   const char *raw_data = NULL;
+  INTERNAL_LOB_PENDING pending_source;
+  HEAP_INTERNAL_LOB_FILE_SOURCE file_source;
   DB_TYPE type;
   int raw_length = 0;
   int raw_bit_length = -1;
@@ -12484,8 +12864,37 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
   type = DB_VALUE_DOMAIN_TYPE (value);
 
   db_make_null (&materialized_value);
+  if (internal_lob_db_value_is_pending (value, &pending_source))
+    {
+      if (pending_source.lob_type != type)
+	{
+	  error = ER_GENERIC_ERROR;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+	  return error;
+	}
+      return heap_internal_lob_insert_pending_source (thread_p, class_oid, &pending_source, locator);
+    }
+
+  if (heap_internal_lob_parse_file_source (value, &file_source))
+    {
+      if (file_source.lob_type != type)
+	{
+	  error = ER_GENERIC_ERROR;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+	  return error;
+	}
+      return heap_internal_lob_insert_file_source (thread_p, class_oid, &file_source, locator);
+    }
+
   if (internal_lob_db_value_is_locator (value, &source_locator))
     {
+      if (source_locator.adopted)
+	{
+	  *locator = source_locator;
+	  locator->adopted = false;
+	  return NO_ERROR;
+	}
+
       error = internal_lob_read_db_value (thread_p, source_locator, type, &materialized_value, NULL);
       if (error != NO_ERROR)
 	{

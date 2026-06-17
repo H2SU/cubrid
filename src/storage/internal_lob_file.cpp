@@ -38,27 +38,23 @@ static const int INTERNAL_LOB_MANIFEST_HEADER_SIZE = OR_INT_SIZE + OR_BIGINT_SIZ
 static const int INTERNAL_LOB_MANIFEST_SEGMENT_SIZE = OR_OID_SIZE + OR_INT_SIZE;
 
 static int
-internal_lob_format_locator (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size)
+internal_lob_format_locator (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size, bool adopted = false)
 {
   const bool has_bit_length = locator.bit_length >= 0;
-
-  if (locator.is_manifest)
-    {
-      return has_bit_length ?
-	     snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "M:%d|%d|%d:%lld:%lld", (int) locator.oid.volid,
-		       (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length,
-		       (long long) locator.bit_length)
-	     : snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "M:%d|%d|%d:%lld", (int) locator.oid.volid,
-			 (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length);
-    }
+  const char *adopt_marker = adopted ? "A:" : "";
+  const char *manifest_marker = locator.is_manifest ? "M:" : "";
 
   return has_bit_length ?
-	 snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld:%lld", (int) locator.oid.volid,
-		   (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length,
-		   (long long) locator.bit_length)
-	 : snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld", (int) locator.oid.volid,
-		     (int) locator.oid.pageid, (int) locator.oid.slotid, (long long) locator.length);
+	 snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%s%s%d|%d|%d:%lld:%lld", adopt_marker,
+		   manifest_marker, (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
+		   (long long) locator.length, (long long) locator.bit_length)
+	 : snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%s%s%d|%d|%d:%lld", adopt_marker, manifest_marker,
+		     (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
+		     (long long) locator.length);
 }
+
+static int internal_lob_make_locator_db_value_internal (DB_VALUE *value, DB_TYPE lob_type,
+    const INTERNAL_LOB_LOCATOR &locator, bool adopted);
 
 static int
 internal_lob_set_generic_error (void)
@@ -830,6 +826,7 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
   int prefix_len = (int) strlen (INTERNAL_LOB_LOCATOR_PREFIX);
   int marker_len = 0;
   bool is_manifest = false;
+  bool adopted = false;
   char *oid_part;
 
   if (data == NULL || size <= prefix_len || size >= (int) sizeof (locator_buf))
@@ -845,11 +842,17 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
   locator_buf[size] = '\0';
 
   oid_part = locator_buf + prefix_len;
+  if (oid_part[0] == 'A' && oid_part[1] == ':')
+    {
+      adopted = true;
+      marker_len += 2;
+      oid_part += 2;
+    }
   if (oid_part[0] == 'M' && oid_part[1] == ':')
     {
       is_manifest = true;
-      marker_len = 2;
-      oid_part += marker_len;
+      marker_len += 2;
+      oid_part += 2;
     }
 
   if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &length, &consumed) != 4)
@@ -878,6 +881,7 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
       locator->length = (DB_BIGINT) length;
       locator->bit_length = (DB_BIGINT) bit_length;
       locator->is_manifest = is_manifest;
+      locator->adopted = adopted;
     }
   return true;
 }
@@ -912,6 +916,84 @@ internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *l
     }
 
   return internal_lob_parse_locator_string (data, size, locator);
+}
+
+bool
+internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *pending)
+{
+  DB_TYPE type;
+  const char *data = NULL;
+  int size = 0;
+  int prefix_len = (int) strlen (INTERNAL_LOB_PENDING_PREFIX);
+  char marker_buf[PATH_MAX + 64];
+  char type_char;
+  long long pending_size;
+  int locator_offset = 0;
+  const char *locator;
+  size_t locator_len;
+
+  if (value == NULL || DB_IS_NULL (value))
+    {
+      return false;
+    }
+
+  type = DB_VALUE_DOMAIN_TYPE (value);
+  if (type == DB_TYPE_CLOB)
+    {
+      data = db_get_string (value);
+      size = db_get_string_size (value);
+    }
+  else if (type == DB_TYPE_BLOB)
+    {
+      int bit_length = 0;
+
+      data = (const char *) db_get_bit (value, &bit_length);
+      if (bit_length < 0 || bit_length % 8 != 0)
+	{
+	  return false;
+	}
+      size = bit_length / 8;
+    }
+  else
+    {
+      return false;
+    }
+
+  if (data == NULL || size <= prefix_len || size >= (int) sizeof (marker_buf)
+      || memcmp (data, INTERNAL_LOB_PENDING_PREFIX, prefix_len) != 0)
+    {
+      return false;
+    }
+
+  memcpy (marker_buf, data, size);
+  marker_buf[size] = '\0';
+
+  if (sscanf (marker_buf + prefix_len, "%c:%lld:%n", &type_char, &pending_size, &locator_offset) < 2
+      || locator_offset <= 0 || pending_size < 0 || (type_char != 'C' && type_char != 'B'))
+    {
+      return false;
+    }
+
+  if ((type_char == 'C' && type != DB_TYPE_CLOB) || (type_char == 'B' && type != DB_TYPE_BLOB))
+    {
+      return false;
+    }
+
+  locator = marker_buf + prefix_len + locator_offset;
+  locator_len = strlen (locator);
+  if (locator_len == 0 || locator_len >= PATH_MAX + 16)
+    {
+      return false;
+    }
+
+  if (pending != NULL)
+    {
+      pending->lob_type = (type_char == 'C') ? DB_TYPE_CLOB : DB_TYPE_BLOB;
+      pending->size = (DB_BIGINT) pending_size;
+      memcpy (pending->locator, locator, locator_len + 1);
+    }
+
+  return true;
 }
 
 int
@@ -991,12 +1073,25 @@ internal_lob_decode_disk_length (INTERNAL_LOB_LOCATOR &locator, DB_BIGINT disk_l
 int
 internal_lob_make_locator_db_value (DB_VALUE *value, DB_TYPE lob_type, const INTERNAL_LOB_LOCATOR &locator)
 {
+  return internal_lob_make_locator_db_value_internal (value, lob_type, locator, false);
+}
+
+int
+internal_lob_make_adopt_locator_db_value (DB_VALUE *value, DB_TYPE lob_type, const INTERNAL_LOB_LOCATOR &locator)
+{
+  return internal_lob_make_locator_db_value_internal (value, lob_type, locator, true);
+}
+
+static int
+internal_lob_make_locator_db_value_internal (DB_VALUE *value, DB_TYPE lob_type, const INTERNAL_LOB_LOCATOR &locator,
+    bool adopted)
+{
   char stack_buf[128];
   char *locator_buf = NULL;
   int locator_len;
   int err;
 
-  locator_len = internal_lob_format_locator (locator, stack_buf, sizeof (stack_buf));
+  locator_len = internal_lob_format_locator (locator, stack_buf, sizeof (stack_buf), adopted);
   if (locator_len <= 0 || locator_len >= (int) sizeof (stack_buf))
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
