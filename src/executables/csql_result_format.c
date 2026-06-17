@@ -60,6 +60,7 @@
 #define OID_LENGTH      15
 
 #define CSQL_INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
+#define CSQL_INTERNAL_LOB_SCALAR_STREAM_PREFIX "@internal_lob_stream:"
 
 #define COMMA_CHAR      ','
 
@@ -1305,6 +1306,124 @@ csql_db_value_is_internal_lob_locator (DB_VALUE * value, char *lob_type, const c
   if (bit_length != NULL)
     {
       if (type == DB_TYPE_CLOB)
+	{
+	  *bit_length = 0;
+	}
+      else if (parsed_bit_length >= 0)
+	{
+	  *bit_length = parsed_bit_length;
+	}
+      else
+	{
+	  if (parsed_length > DB_BIGINT_MAX / 8)
+	    {
+	      return false;
+	    }
+	  *bit_length = parsed_length * 8;
+	}
+    }
+  return true;
+}
+
+bool
+csql_db_value_is_internal_lob_stream_marker (DB_VALUE * value, char *lob_type, const char **locator, int *locator_len,
+					     DB_BIGINT * data_len, DB_BIGINT * bit_length)
+{
+  DB_TYPE type;
+  const char *data = NULL;
+  const char *locator_data = NULL;
+  int size = 0;
+  int locator_size = 0;
+  int marker_prefix_len = (int) strlen (CSQL_INTERNAL_LOB_SCALAR_STREAM_PREFIX);
+  int marker_bit_length = 0;
+  DB_BIGINT parsed_length = 0;
+  DB_BIGINT parsed_bit_length = -1;
+  char marker_type = '\0';
+
+  if (locator != NULL)
+    {
+      *locator = NULL;
+    }
+  if (locator_len != NULL)
+    {
+      *locator_len = 0;
+    }
+  if (data_len != NULL)
+    {
+      *data_len = 0;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = -1;
+    }
+
+  if (value == NULL || DB_IS_NULL (value))
+    {
+      return false;
+    }
+
+  type = DB_VALUE_TYPE (value);
+  if (TP_IS_CHAR_TYPE (type))
+    {
+      data = db_get_string (value);
+      size = db_get_string_size (value);
+    }
+  else if (TP_IS_BIT_TYPE (type))
+    {
+      data = (const char *) db_get_bit (value, &marker_bit_length);
+      if (marker_bit_length < 0 || marker_bit_length % 8 != 0)
+	{
+	  return false;
+	}
+      size = marker_bit_length / 8;
+    }
+  else
+    {
+      return false;
+    }
+
+  if (data == NULL || size <= marker_prefix_len + 2
+      || memcmp (data, CSQL_INTERNAL_LOB_SCALAR_STREAM_PREFIX, (size_t) marker_prefix_len) != 0)
+    {
+      return false;
+    }
+
+  marker_type = data[marker_prefix_len];
+  if (data[marker_prefix_len + 1] != ':' || (marker_type != 'C' && marker_type != 'B'))
+    {
+      return false;
+    }
+  if ((marker_type == 'C' && !TP_IS_CHAR_TYPE (type)) || (marker_type == 'B' && !TP_IS_BIT_TYPE (type)))
+    {
+      return false;
+    }
+
+  locator_data = data + marker_prefix_len + 2;
+  locator_size = size - marker_prefix_len - 2;
+  if (!csql_parse_internal_lob_locator_metadata (locator_data, locator_size, &parsed_length, &parsed_bit_length))
+    {
+      return false;
+    }
+
+  if (lob_type != NULL)
+    {
+      *lob_type = marker_type;
+    }
+  if (locator != NULL)
+    {
+      *locator = locator_data;
+    }
+  if (locator_len != NULL)
+    {
+      *locator_len = locator_size;
+    }
+  if (data_len != NULL)
+    {
+      *data_len = parsed_length;
+    }
+  if (bit_length != NULL)
+    {
+      if (marker_type == 'C')
 	{
 	  *bit_length = 0;
 	}

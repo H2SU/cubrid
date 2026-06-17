@@ -574,7 +574,9 @@ fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * c
   THREAD_ENTRY *thread_p = thread_get_thread_entry_info ();
 #endif /* SA_MODE */
 
-  if (!csql_db_value_is_internal_lob_locator (value, &lob_type, &locator, &locator_len, &data_len, &bit_length))
+  if (!csql_db_value_is_internal_lob_locator (value, &lob_type, &locator, &locator_len, &data_len, &bit_length)
+      && !csql_db_value_is_internal_lob_stream_marker (value, &lob_type, &locator, &locator_len, &data_len,
+						       &bit_length))
     {
       return CSQL_FAILURE;
     }
@@ -762,7 +764,8 @@ write_current_result_to_delimited_stream (FILE * pf, const CUR_RESULT_INFO * res
 	    {
 	      temp = (char *) "INFINITE";
 	    }
-	  else if (csql_db_value_is_internal_lob_locator (&db_value, NULL, NULL, NULL, NULL, NULL))
+	  else if (csql_db_value_is_internal_lob_locator (&db_value, NULL, NULL, NULL, NULL, NULL)
+		   || csql_db_value_is_internal_lob_stream_marker (&db_value, NULL, NULL, NULL, NULL, NULL))
 	    {
 	      if (fprint_internal_lob_stream (pf, &db_value, csql_arg) != CSQL_SUCCESS)
 		{
