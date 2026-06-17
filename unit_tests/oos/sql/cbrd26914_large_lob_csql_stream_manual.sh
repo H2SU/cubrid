@@ -27,6 +27,7 @@ LOGDIR="$ROOT/logs"
 mkdir -p "$LOGDIR"
 SUMMARY="$LOGDIR/summary.log"
 : > "$SUMMARY"
+RUN_ID=${CBRD26914_RUN_ID:-$$}
 
 log()
 {
@@ -38,7 +39,8 @@ run_case()
   local label="$1"
   local lob_kind="$2"
   local size="$3"
-  local db="$4"
+  local db_base="$4"
+  local db="${db_base}_${RUN_ID}"
   local dbdir="$ROOT/$db"
   local src="$ROOT/${label}_${lob_kind}.dat"
   local sql="$LOGDIR/${label}_${lob_kind}.sql"
@@ -97,12 +99,26 @@ SQL
     return 1
   fi
 
+  (cd "$dbdir" 2>/dev/null && cubrid deletedb "$db" >/dev/null 2>&1) || true
   rm -rf "$dbdir" "$src"
   log "PASS $label $lob_kind"
 }
 
-run_case 2GiB clob 2147483648 d2c
-run_case 2GiB blob 2147483648 d2b
-run_case 4GiB_minus_1 clob 4294967295 d4c
-run_case 4GiB_minus_1 blob 4294967295 d4b
+should_run_case()
+{
+  local label="$1"
+  local lob_kind="$2"
+  local filter="${CBRD26914_CASES:-}"
+
+  if [[ -z "$filter" ]]; then
+    return 0
+  fi
+
+  [[ ",$filter," == *",$label,"* || ",$filter," == *",$label:$lob_kind,"* ]]
+}
+
+should_run_case 2GiB clob && run_case 2GiB clob 2147483648 d2c
+should_run_case 2GiB blob && run_case 2GiB blob 2147483648 d2b
+should_run_case 4GiB_minus_1 clob && run_case 4GiB_minus_1 clob 4294967295 d4c
+should_run_case 4GiB_minus_1 blob && run_case 4GiB_minus_1 blob 4294967295 d4b
 log "ALL_PASS root=$ROOT"
