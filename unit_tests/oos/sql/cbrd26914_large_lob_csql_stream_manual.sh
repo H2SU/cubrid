@@ -117,6 +117,8 @@ should_run_case()
   [[ ",$filter," == *",$label,"* || ",$filter," == *",$label:$lob_kind,"* ]]
 }
 
+should_run_case 1GiB clob && run_case 1GiB clob 1073741824 d1c
+should_run_case 1GiB blob && run_case 1GiB blob 1073741824 d1b
 should_run_case 2GiB clob && run_case 2GiB clob 2147483648 d2c
 should_run_case 2GiB blob && run_case 2GiB blob 2147483648 d2b
 should_run_case 4GiB_minus_1 clob && run_case 4GiB_minus_1 clob 4294967295 d4c
