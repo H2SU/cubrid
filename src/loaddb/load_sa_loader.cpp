@@ -81,19 +81,10 @@
 using namespace cubload;
 
 const std::size_t LDR_MAX_ARGS = 32;
-static const char *LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX = "_internal_lob";
-static const char *LDR_INTERNAL_LOB_SIDE_CAR_MAGIC = "CUBRID_INTERNAL_LOB_UNLOAD 1";
-
-struct internal_lob_sidecar_entry
-{
-  char type;
-  int bit_length;
-  std::vector<char> data;
-};
 
 static bool ldr_internal_lob_sidecar_loaded = false;
 static bool ldr_internal_lob_sidecar_available = false;
-static std::unordered_map<std::string, internal_lob_sidecar_entry> ldr_internal_lob_sidecar;
+static internal_lob_sidecar_map ldr_internal_lob_sidecar;
 
 /* filter out ignorable errid */
 #define FILTER_OUT_ERR_INTERNAL(err, expr)                              \
@@ -1942,187 +1933,42 @@ ldr_internal_lob_sidecar_clear ()
   ldr_internal_lob_sidecar_available = false;
 }
 
-static std::string
-ldr_internal_lob_sidecar_path (const std::string &object_file)
-{
-  const std::string object_suffix = "_objects";
-
-  if (object_file.size () >= object_suffix.size ()
-      && object_file.compare (object_file.size () - object_suffix.size (), object_suffix.size (), object_suffix) == 0)
-    {
-      return object_file.substr (0, object_file.size () - object_suffix.size ()) + LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX;
-    }
-
-  return object_file + LDR_INTERNAL_LOB_SIDE_CAR_SUFFIX;
-}
-
-static bool
-ldr_internal_lob_sidecar_next_field (const std::string &line, size_t &pos, std::string &field)
-{
-  size_t end = line.find ('\t', pos);
-
-  if (end == std::string::npos)
-    {
-      field = line.substr (pos);
-      pos = line.size ();
-      return true;
-    }
-
-  field = line.substr (pos, end - pos);
-  pos = end + 1;
-  return true;
-}
-
-static int
-ldr_internal_lob_sidecar_hex_to_bytes (const std::string &hex, std::vector<char> &data)
-{
-  auto hex_value = [] (char ch) -> int
-  {
-    if (ch >= '0' && ch <= '9')
-      {
-	return ch - '0';
-      }
-    if (ch >= 'a' && ch <= 'f')
-      {
-	return ch - 'a' + 10;
-      }
-    if (ch >= 'A' && ch <= 'F')
-      {
-	return ch - 'A' + 10;
-      }
-    return -1;
-  };
-
-  if ((hex.size () % 2) != 0)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
-      return ER_FAILED;
-    }
-
-  data.resize (hex.size () / 2);
-  for (size_t i = 0; i < data.size (); i++)
-    {
-      int hi = hex_value (hex[i * 2]);
-      int lo = hex_value (hex[i * 2 + 1]);
-      if (hi < 0 || lo < 0)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
-	  return ER_FAILED;
-	}
-      data[i] = (char) ((hi << 4) | lo);
-    }
-
-  return NO_ERROR;
-}
-
-static int
-ldr_internal_lob_sidecar_parse_entry (const std::string &line)
-{
-  size_t pos = 0;
-  std::string type_field, key_len_field, key, data_len_field, bit_len_field, data_hex;
-  char *endptr = NULL;
-  unsigned long key_len;
-  unsigned long long data_len;
-  long bit_length;
-  internal_lob_sidecar_entry entry;
-
-  if (!ldr_internal_lob_sidecar_next_field (line, pos, type_field)
-      || !ldr_internal_lob_sidecar_next_field (line, pos, key_len_field)
-      || !ldr_internal_lob_sidecar_next_field (line, pos, key)
-      || !ldr_internal_lob_sidecar_next_field (line, pos, data_len_field)
-      || !ldr_internal_lob_sidecar_next_field (line, pos, bit_len_field)
-      || !ldr_internal_lob_sidecar_next_field (line, pos, data_hex))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
-      return ER_FAILED;
-    }
-
-  if (type_field.size () != 1 || (type_field[0] != 'B' && type_field[0] != 'C'))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
-      return ER_FAILED;
-    }
-
-  key_len = strtoul (key_len_field.c_str (), &endptr, 10);
-  if (endptr == key_len_field.c_str () || *endptr != '\0' || key_len != key.size ())
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
-      return ER_FAILED;
-    }
-
-  data_len = strtoull (data_len_field.c_str (), &endptr, 10);
-  if (endptr == data_len_field.c_str () || *endptr != '\0')
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
-      return ER_FAILED;
-    }
-
-  bit_length = strtol (bit_len_field.c_str (), &endptr, 10);
-  if (endptr == bit_len_field.c_str () || *endptr != '\0' || bit_length < 0)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
-      return ER_FAILED;
-    }
-
-  if (data_hex.size () != (size_t) data_len * 2)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
-      return ER_FAILED;
-    }
-
-  entry.type = type_field[0];
-  entry.bit_length = (int) bit_length;
-  if (ldr_internal_lob_sidecar_hex_to_bytes (data_hex, entry.data) != NO_ERROR)
-    {
-      return ER_FAILED;
-    }
-
-  ldr_internal_lob_sidecar[key] = std::move (entry);
-  return NO_ERROR;
-}
-
 static int
 ldr_internal_lob_sidecar_load (const std::string &object_file)
 {
-  std::string path;
-  std::ifstream sidecar;
-  std::string line;
+  int error;
 
   ldr_internal_lob_sidecar_clear ();
   ldr_internal_lob_sidecar_loaded = true;
 
-  if (object_file.empty ())
-    {
-      return NO_ERROR;
-    }
+  error = load_internal_lob_sidecar (object_file, ldr_internal_lob_sidecar, ldr_internal_lob_sidecar_available);
+  return error;
+}
 
-  path = ldr_internal_lob_sidecar_path (object_file);
-  sidecar.open (path, std::ios::in | std::ios::binary);
-  if (!sidecar.is_open ())
-    {
-      return NO_ERROR;
-    }
+struct ldr_internal_lob_sidecar_stream_context
+{
+  const internal_lob_sidecar_entry *entry = NULL;
+  DB_BIGINT offset = 0;
+};
 
-  if (!std::getline (sidecar, line) || line != LDR_INTERNAL_LOB_SIDE_CAR_MAGIC)
+static int
+ldr_internal_lob_sidecar_stream_reader (void *ctx, char *buf, int buf_size, int *nread)
+{
+  ldr_internal_lob_sidecar_stream_context *stream_ctx = (ldr_internal_lob_sidecar_stream_context *) ctx;
+  int error;
+
+  if (stream_ctx == NULL || stream_ctx->entry == NULL)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
       return ER_FAILED;
     }
 
-  while (std::getline (sidecar, line))
+  error = internal_lob_sidecar_read_raw_chunk (*stream_ctx->entry, stream_ctx->offset, buf, buf_size, nread);
+  if (error == NO_ERROR)
     {
-      if (line.empty ())
-	{
-	  continue;
-	}
-      if (ldr_internal_lob_sidecar_parse_entry (line) != NO_ERROR)
-	{
-	  return ER_FAILED;
-	}
+      stream_ctx->offset += *nread;
     }
-
-  ldr_internal_lob_sidecar_available = true;
-  return NO_ERROR;
+  return error;
 }
 
 /*
@@ -3151,13 +2997,12 @@ ldr_internal_lob_ref_make_value (LDR_CONTEXT *context, const char *str, size_t l
   std::string key;
   auto found = ldr_internal_lob_sidecar.end ();
   int max_length;
-  char *bstring = NULL;
-  DB_VALUE materialized;
   INTERNAL_LOB_LOCATOR locator;
   OID *class_oid = NULL;
+  ldr_internal_lob_sidecar_stream_context stream_ctx;
+  DB_BIGINT bit_length = -1;
 
   db_make_null (val);
-  db_make_null (&materialized);
   OID_SET_NULL (&locator.oid);
   locator.length = 0;
 
@@ -3202,15 +3047,11 @@ ldr_internal_lob_ref_make_value (LDR_CONTEXT *context, const char *str, size_t l
 
   if (expected_type == DB_TYPE_CLOB)
     {
-      if (found->second.data.size () > (size_t) max_length)
+      if (found->second.data_length > (DB_BIGINT) max_length)
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IT_DATA_OVERFLOW, 1, db_get_type_name (DB_TYPE_CLOB));
 	  CHECK_PARSE_ERR (err, ER_IT_DATA_OVERFLOW, context, DB_TYPE_CLOB, str);
 	}
-
-      CHECK_ERR (err,
-		 db_make_clob (&materialized, max_length, found->second.data.empty () ? "" : found->second.data.data (),
-			       (int) found->second.data.size ()));
     }
   else
     {
@@ -3220,15 +3061,7 @@ ldr_internal_lob_ref_make_value (LDR_CONTEXT *context, const char *str, size_t l
 	  CHECK_PARSE_ERR (err, ER_IT_DATA_OVERFLOW, context, DB_TYPE_BLOB, str);
 	}
 
-      CHECK_PTR (err, bstring = (char *) db_private_alloc (NULL, found->second.data.size () + 1));
-      if (!found->second.data.empty ())
-	{
-	  memcpy (bstring, found->second.data.data (), found->second.data.size ());
-	}
-      CHECK_ERR (err, db_make_blob (&materialized, max_length, bstring, found->second.bit_length));
-
-      materialized.need_clear = true;
-      bstring = NULL;
+      bit_length = found->second.bit_length;
     }
 
   class_oid = WS_OID (context->cls);
@@ -3238,15 +3071,14 @@ ldr_internal_lob_ref_make_value (LDR_CONTEXT *context, const char *str, size_t l
       CHECK_PARSE_ERR (err, ER_FAILED, context, expected_type, str);
     }
 
-  CHECK_ERR (err, heap_internal_lob_insert_value (thread_get_thread_entry_info (), class_oid, &materialized, &locator));
-  CHECK_ERR (err, internal_lob_make_locator_db_value (val, expected_type, locator));
+  stream_ctx.entry = &found->second;
+  stream_ctx.offset = 0;
+  CHECK_ERR (err,
+	     heap_internal_lob_insert_stream (thread_get_thread_entry_info (), class_oid,
+		 ldr_internal_lob_sidecar_stream_reader, &stream_ctx, bit_length, &locator));
+  CHECK_ERR (err, internal_lob_make_adopt_locator_db_value (val, expected_type, locator));
 
 error_exit:
-  if (bstring != NULL)
-    {
-      db_private_free_and_init (NULL, bstring);
-    }
-  db_value_clear (&materialized);
   return err;
 }
 
