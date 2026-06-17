@@ -2364,6 +2364,7 @@ struct pt_expr_info
 #define PT_EXPR_INFO_ROWNUM_ONLY 262144	/* 0x40000, rownum only predicate */
 #define PT_EXPR_INFO_SP_NUMERIC 524288	/* 0x80000, CAST as NUMERIC for SP */
 #define PT_EXPR_INFO_REMOVABLE 1048576	/* 0x100000, expression is removable */
+#define PT_EXPR_INFO_LOB_DIRECT_INSERT 2097152	/* 0x200000, clob_from_file/blob_from_file is direct INSERT/UPDATE target */
   int flag;			/* flags */
 #define PT_EXPR_INFO_IS_FLAGED(e, f)    ((e)->info.expr.flag & (int) (f))
 #define PT_EXPR_INFO_SET_FLAG(e, f)     (e)->info.expr.flag |= (int) (f)
