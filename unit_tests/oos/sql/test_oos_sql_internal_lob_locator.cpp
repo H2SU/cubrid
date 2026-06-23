@@ -542,10 +542,8 @@ TEST_F (OosSqlInternalLobLocator, SegmentedRawStorageRoundTrip)
 
   ASSERT_TRUE (internal_lob_db_value_is_locator (&clob_locator_value, &clob_locator));
   ASSERT_TRUE (internal_lob_db_value_is_locator (&blob_locator_value, &blob_locator));
-  EXPECT_TRUE (clob_locator.is_manifest);
-  EXPECT_TRUE (blob_locator.is_manifest);
   EXPECT_EQ (clob_locator.length, (DB_BIGINT) payload_size);
-  EXPECT_EQ (blob_locator.length, (DB_BIGINT) payload_size);
+  EXPECT_EQ (blob_locator.length, (DB_BIGINT) payload_size * 8);
   pr_clear_value (&clob_locator_value);
   pr_clear_value (&blob_locator_value);
 
@@ -618,7 +616,6 @@ TEST_F (OosSqlInternalLobLocator, StreamedAdoptLocatorPreservesPayload)
   rc = heap_internal_lob_insert_stream (thread_get_thread_entry_info (), class_oid, internal_lob_string_reader,
 					&reader_ctx, -1, &streamed_clob_locator);
   ASSERT_EQ (rc, NO_ERROR);
-  ASSERT_TRUE (streamed_clob_locator.is_manifest);
   ASSERT_EQ (streamed_clob_locator.length, (DB_BIGINT) clob_payload.size ());
 
   db_make_null (&adopt_value);
@@ -646,21 +643,20 @@ TEST_F (OosSqlInternalLobLocator, StreamedAdoptLocatorPreservesPayload)
   rc = heap_internal_lob_insert_stream (thread_get_thread_entry_info (), class_oid, internal_lob_string_reader,
 					&reader_ctx, 17, &streamed_blob_locator);
   ASSERT_EQ (rc, NO_ERROR);
-  ASSERT_EQ (streamed_blob_locator.length, (DB_BIGINT) blob_payload.size ());
-  ASSERT_EQ (streamed_blob_locator.bit_length, 17);
+  ASSERT_EQ (streamed_blob_locator.length, 17);
 
   db_make_null (&adopt_value);
   rc = internal_lob_make_adopt_locator_db_value (&adopt_value, DB_TYPE_BLOB, streamed_blob_locator);
   ASSERT_EQ (rc, NO_ERROR);
   ASSERT_TRUE (internal_lob_db_value_is_locator (&adopt_value, &parsed_locator));
   ASSERT_TRUE (parsed_locator.adopted);
-  ASSERT_EQ (parsed_locator.bit_length, 17);
+  ASSERT_EQ (parsed_locator.length, 17);
 
   rc = heap_internal_lob_insert_value (thread_get_thread_entry_info (), class_oid, &adopt_value, &adopted_blob_locator);
   ASSERT_EQ (rc, NO_ERROR);
   EXPECT_TRUE (OID_EQ (&adopted_blob_locator.oid, &streamed_blob_locator.oid));
   EXPECT_FALSE (adopted_blob_locator.adopted);
-  EXPECT_EQ (adopted_blob_locator.bit_length, 17);
+  EXPECT_EQ (adopted_blob_locator.length, 17);
   pr_clear_value (&adopt_value);
 
   db_make_null (&materialized_value);

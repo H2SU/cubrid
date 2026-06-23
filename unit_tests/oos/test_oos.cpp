@@ -232,7 +232,7 @@ TEST (OosTest, OosStreamingReadPullAcrossChunks)
   ASSERT_EQ (rec_in.data, nullptr);
 }
 
-TEST (OosTest, InternalLobSegmentedInsertReadWithManifest)
+TEST (OosTest, InternalLobSegmentedInsertReadWithHeadChain)
 {
   struct segment_size_guard
   {
@@ -273,11 +273,10 @@ TEST (OosTest, InternalLobSegmentedInsertReadWithManifest)
     }
 
   INTERNAL_LOB_LOCATOR locator;
-  err = internal_lob_insert_end (thread_p, writer, locator);
+  err = internal_lob_insert_end (thread_p, writer, locator, DB_TYPE_BLOB, (DB_BIGINT) total_size * 8);
   ASSERT_EQ (err, NO_ERROR);
-  ASSERT_TRUE (locator.is_manifest);
   ASSERT_FALSE (OID_ISNULL (&locator.oid));
-  ASSERT_EQ (locator.length, (DB_BIGINT) total_size);
+  ASSERT_EQ (locator.length, (DB_BIGINT) total_size * 8);
 
   DB_VALUE locator_value;
   db_make_null (&locator_value);
@@ -288,11 +287,11 @@ TEST (OosTest, InternalLobSegmentedInsertReadWithManifest)
   const char *locator_data = (const char *) db_get_bit (&locator_value, &locator_bit_length);
   ASSERT_NE (locator_data, nullptr);
   std::string locator_string (locator_data, (std::size_t) ((locator_bit_length + 7) / 8));
-  EXPECT_EQ (locator_string.find (INTERNAL_LOB_LOCATOR_PREFIX "M:"), 0U);
+  EXPECT_EQ (locator_string.find (INTERNAL_LOB_LOCATOR_PREFIX), 0U);
+  EXPECT_EQ (locator_string.find ("M:"), std::string::npos);
 
   INTERNAL_LOB_LOCATOR parsed_locator;
   ASSERT_TRUE (internal_lob_db_value_is_locator (&locator_value, &parsed_locator));
-  EXPECT_TRUE (parsed_locator.is_manifest);
   EXPECT_TRUE (OID_EQ (&parsed_locator.oid, &locator.oid));
   EXPECT_EQ (parsed_locator.length, locator.length);
   pr_clear_value (&locator_value);
