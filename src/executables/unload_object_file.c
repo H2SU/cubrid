@@ -816,11 +816,8 @@ internal_lob_unload_parse_locator_metadata (const char *data, int size, DB_BIGIN
   int pageid = 0;
   int slotid = 0;
   long long parsed_length = 0;
-  long long parsed_bit_length = -1;
   int consumed = 0;
-  int bit_length_consumed = 0;
   int prefix_len = (int) strlen (INTERNAL_LOB_UNLOAD_LOCATOR_PREFIX);
-  int marker_len = 0;
   char *oid_part = NULL;
 
   if (length != NULL)
@@ -845,11 +842,6 @@ internal_lob_unload_parse_locator_metadata (const char *data, int size, DB_BIGIN
   locator_buf[size] = '\0';
 
   oid_part = locator_buf + prefix_len;
-  if (oid_part[0] == 'M' && oid_part[1] == ':')
-    {
-      marker_len = 2;
-      oid_part += marker_len;
-    }
 
   if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &parsed_length, &consumed) != 4
       || parsed_length < 0)
@@ -860,14 +852,9 @@ internal_lob_unload_parse_locator_metadata (const char *data, int size, DB_BIGIN
   (void) pageid;
   (void) slotid;
 
-  if (prefix_len + marker_len + consumed != size)
+  if (prefix_len + consumed != size)
     {
-      if (oid_part[consumed] != ':'
-	  || sscanf (oid_part + consumed + 1, "%lld%n", &parsed_bit_length, &bit_length_consumed) != 1
-	  || parsed_bit_length < 0 || prefix_len + marker_len + consumed + 1 + bit_length_consumed != size)
-	{
-	  return false;
-	}
+      return false;
     }
 
   if (length != NULL)
@@ -876,7 +863,7 @@ internal_lob_unload_parse_locator_metadata (const char *data, int size, DB_BIGIN
     }
   if (bit_length != NULL)
     {
-      *bit_length = (DB_BIGINT) parsed_bit_length;
+      *bit_length = -1;
     }
   return true;
 }
@@ -1020,7 +1007,6 @@ fprint_internal_lob_ref_if_locator (TEXT_OUTPUT * tout, DB_VALUE * value, bool *
   int key_bit_length = 0;
   DB_BIGINT data_len = 0;
   DB_BIGINT bit_length = 0;
-  DB_BIGINT locator_bit_length = -1;
 
   *printed = false;
 
@@ -1053,7 +1039,7 @@ fprint_internal_lob_ref_if_locator (TEXT_OUTPUT * tout, DB_VALUE * value, bool *
       return ER_FAILED;
     }
 
-  if (!internal_lob_unload_parse_locator_metadata (key, key_len, &data_len, &locator_bit_length))
+  if (!internal_lob_unload_parse_locator_metadata (key, key_len, &data_len, NULL))
     {
       return NO_ERROR;
     }
@@ -1062,18 +1048,15 @@ fprint_internal_lob_ref_if_locator (TEXT_OUTPUT * tout, DB_VALUE * value, bool *
     {
       bit_length = 0;
     }
-  else if (locator_bit_length >= 0)
-    {
-      bit_length = locator_bit_length;
-    }
   else
     {
-      if (data_len > DB_BIGINT_MAX / 8)
+      if (data_len > DB_BIGINT_MAX - 7)
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
 	  return ER_FAILED;
 	}
-      bit_length = data_len * 8;
+      bit_length = data_len;
+      data_len = (data_len + 7) / 8;
     }
 
   error = internal_lob_unload_sidecar_write_stream (lob_type_char, key, key_len, data_len, bit_length);

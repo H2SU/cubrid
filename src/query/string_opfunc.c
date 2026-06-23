@@ -25070,18 +25070,9 @@ internal_lob_make_scalar_stream_marker (const INTERNAL_LOB_LOCATOR & locator, ch
   assert (result_value != NULL);
   assert (lob_type == 'B' || lob_type == 'C');
 
-  if (locator.bit_length >= 0)
-    {
-      locator_len = snprintf (locator_buf, sizeof (locator_buf), INTERNAL_LOB_LOCATOR_PREFIX "%s%d|%d|%d:%lld:%lld",
-			      locator.is_manifest ? "M:" : "", (int) locator.oid.volid, (int) locator.oid.pageid,
-			      (int) locator.oid.slotid, (long long) locator.length, (long long) locator.bit_length);
-    }
-  else
-    {
-      locator_len = snprintf (locator_buf, sizeof (locator_buf), INTERNAL_LOB_LOCATOR_PREFIX "%s%d|%d|%d:%lld",
-			      locator.is_manifest ? "M:" : "", (int) locator.oid.volid, (int) locator.oid.pageid,
-			      (int) locator.oid.slotid, (long long) locator.length);
-    }
+  locator_len = snprintf (locator_buf, sizeof (locator_buf), INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld",
+			  (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
+			  (long long) locator.length);
   if (locator_len <= 0 || locator_len >= (int) sizeof (locator_buf))
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
@@ -25130,19 +25121,7 @@ internal_lob_get_locator_bit_length (const INTERNAL_LOB_LOCATOR & locator, INT64
 {
   assert (bit_length != NULL);
 
-  if (locator.bit_length >= 0)
-    {
-      *bit_length = locator.bit_length;
-      return NO_ERROR;
-    }
-
-  if (locator.length > DB_BIGINT_MAX / 8)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QSTR_BAD_LENGTH, 1, locator.length);
-      return ER_QSTR_BAD_LENGTH;
-    }
-
-  *bit_length = locator.length * 8;
+  *bit_length = locator.length;
   return NO_ERROR;
 }
 
@@ -25450,19 +25429,7 @@ db_blob_length (const DB_VALUE * src_value, DB_VALUE * result_value)
 
       if (internal_lob_db_value_is_locator (src_value, &locator))
 	{
-	  if (locator.bit_length >= 0)
-	    {
-	      db_make_bigint (result_value, locator.bit_length);
-	    }
-	  else
-	    {
-	      if (locator.length > DB_BIGINT_MAX / 8)
-		{
-		  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QSTR_BAD_LENGTH, 1, locator.length);
-		  return ER_QSTR_BAD_LENGTH;
-		}
-	      db_make_bigint (result_value, locator.length * 8);
-	    }
+	  db_make_bigint (result_value, locator.length);
 	  return NO_ERROR;
 	}
 
