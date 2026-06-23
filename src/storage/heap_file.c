@@ -12796,30 +12796,34 @@ heap_internal_lob_insert_stream (THREAD_ENTRY * thread_p, const OID * class_oid,
 	}
     }
 
-  error = internal_lob_insert_end (thread_p, writer, *locator);
-  if (error == NO_ERROR && bit_length >= 0)
+  if (bit_length >= 0 && !internal_lob_is_valid_blob_bit_length (writer.total_bytes, bit_length))
     {
-      if (!internal_lob_is_valid_blob_bit_length (locator->length, bit_length))
-	{
-	  error = ER_GENERIC_ERROR;
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
-	  if (!OID_ISNULL (&locator->oid))
-	    {
-	      (void) internal_lob_delete (thread_p, lob_vfid, *locator);
-	    }
-	  goto error_exit;
-	}
-      locator->bit_length = bit_length;
+      error = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+      goto error_exit;
     }
+
+  error = internal_lob_insert_end (thread_p, writer, *locator,
+				   bit_length >= 0 ? DB_TYPE_BLOB : DB_TYPE_CLOB,
+				   bit_length >= 0 ? bit_length : writer.total_bytes);
 
   return error;
 
 error_exit:
+  if (writer.spill_file != NULL)
+    {
+      fclose (writer.spill_file);
+      writer.spill_file = NULL;
+    }
+  if (!writer.spill_path.empty ())
+    {
+      (void) remove (writer.spill_path.c_str ());
+      writer.spill_path.clear ();
+    }
   if (writer.segment_buffer != NULL)
     {
       db_private_free_and_init (NULL, writer.segment_buffer);
     }
-  writer.segments.clear ();
   return error;
 }
 
@@ -12965,11 +12969,8 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
 	}
     }
 
-  error = internal_lob_insert_end (thread_p, writer, *locator);
-  if (error == NO_ERROR && type == DB_TYPE_BLOB)
-    {
-      locator->bit_length = raw_bit_length;
-    }
+  error = internal_lob_insert_end (thread_p, writer, *locator, type,
+				   type == DB_TYPE_BLOB ? (DB_BIGINT) raw_bit_length : (DB_BIGINT) raw_length);
 
 exit:
   if (need_clear_materialized)

@@ -18,13 +18,16 @@
 
 #include "internal_lob_file.hpp"
 
+#include <cerrno>
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <tuple>
 
 #include "dbtype.h"
 #include "error_manager.h"
 #include "file_manager.h"
+#include "filesys_temp.hpp"
 #include "memory_alloc.h"
 #include "object_primitive.h"
 #include "object_representation.h"
@@ -33,25 +36,10 @@
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
 #include "memory_wrapper.hpp"
 
-static const int INTERNAL_LOB_MANIFEST_MAGIC = 0x494c4f42;	/* "ILOB" */
-static const int INTERNAL_LOB_MANIFEST_HEADER_SIZE = OR_INT_SIZE + OR_BIGINT_SIZE + OR_INT_SIZE;
-static const int INTERNAL_LOB_MANIFEST_SEGMENT_SIZE = OR_OID_SIZE + OR_INT_SIZE;
-
-static int
-internal_lob_format_locator (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size, bool adopted = false)
-{
-  const bool has_bit_length = locator.bit_length >= 0;
-  const char *adopt_marker = adopted ? "A:" : "";
-  const char *manifest_marker = locator.is_manifest ? "M:" : "";
-
-  return has_bit_length ?
-	 snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%s%s%d|%d|%d:%lld:%lld", adopt_marker,
-		   manifest_marker, (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
-		   (long long) locator.length, (long long) locator.bit_length)
-	 : snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%s%s%d|%d|%d:%lld", adopt_marker, manifest_marker,
-		     (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
-		     (long long) locator.length);
-}
+static const int INTERNAL_LOB_CHAIN_FLAG_BLOB = 0x00000001;
+static const int INTERNAL_LOB_CHAIN_FLAG_CLOB = 0x00000002;
+static const int INTERNAL_LOB_HEAD_HEADER_SIZE = OR_BIGINT_SIZE + OR_INT_SIZE + OR_OID_SIZE;
+static const int INTERNAL_LOB_CHUNK_HEADER_SIZE = OR_OID_SIZE;
 
 static int internal_lob_make_locator_db_value_internal (DB_VALUE *value, DB_TYPE lob_type,
     const INTERNAL_LOB_LOCATOR &locator, bool adopted);
@@ -63,17 +51,79 @@ internal_lob_set_generic_error (void)
   return ER_GENERIC_ERROR;
 }
 
+static int
+internal_lob_lob_type_to_flags (DB_TYPE lob_type, int &flags)
+{
+  if (lob_type == DB_TYPE_BLOB)
+    {
+      flags = INTERNAL_LOB_CHAIN_FLAG_BLOB;
+      return NO_ERROR;
+    }
+  if (lob_type == DB_TYPE_CLOB)
+    {
+      flags = INTERNAL_LOB_CHAIN_FLAG_CLOB;
+      return NO_ERROR;
+    }
+  return internal_lob_set_generic_error ();
+}
+
+static int
+internal_lob_payload_bytes_from_flags (DB_BIGINT logical_length, int flags, DB_BIGINT &payload_bytes)
+{
+  if (logical_length < 0)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  if (flags == INTERNAL_LOB_CHAIN_FLAG_BLOB)
+    {
+      if (logical_length > DB_BIGINT_MAX - 7)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+      payload_bytes = (logical_length + 7) / 8;
+      return NO_ERROR;
+    }
+
+  if (flags == INTERNAL_LOB_CHAIN_FLAG_CLOB)
+    {
+      payload_bytes = logical_length;
+      return NO_ERROR;
+    }
+
+  return internal_lob_set_generic_error ();
+}
+
+static int
+internal_lob_blob_physical_bytes (DB_BIGINT bit_length, DB_BIGINT &payload_bytes)
+{
+  if (bit_length < 0 || bit_length > DB_BIGINT_MAX - 7)
+    {
+      return internal_lob_set_generic_error ();
+    }
+  payload_bytes = (bit_length + 7) / 8;
+  return NO_ERROR;
+}
+
 static void
 internal_lob_writer_clear (INTERNAL_LOB_WRITER &writer)
 {
+  if (writer.spill_file != NULL)
+    {
+      fclose (writer.spill_file);
+      writer.spill_file = NULL;
+    }
+  if (!writer.spill_path.empty ())
+    {
+      (void) remove (writer.spill_path.c_str ());
+      writer.spill_path.clear ();
+    }
   if (writer.segment_buffer != NULL)
     {
       db_private_free_and_init (NULL, writer.segment_buffer);
     }
   writer.segment_size = 0;
-  writer.segment_buffer_length = 0;
-  writer.total_length = 0;
-  writer.segments.clear ();
+  writer.total_bytes = 0;
   VFID_SET_NULL (&writer.lob_vfid);
 }
 
@@ -92,213 +142,167 @@ internal_lob_get_segment_size (int &segment_size)
 }
 
 static int
-internal_lob_get_bit_remainder (const INTERNAL_LOB_LOCATOR &locator, int &bit_remainder)
+internal_lob_format_locator (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size, bool adopted = false)
 {
-  bit_remainder = 0;
+  const char *adopt_marker = adopted ? "A:" : "";
 
-  if (locator.bit_length < 0)
-    {
-      return NO_ERROR;
-    }
+  return snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%s%d|%d|%d:%lld", adopt_marker,
+                   (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
+                   (long long) locator.length);
+}
 
-  if (locator.length == 0)
-    {
-      if (locator.bit_length != 0)
-	{
-	  return internal_lob_set_generic_error ();
-	}
-      return NO_ERROR;
-    }
+static void
+internal_lob_pack_head_header (char *buf, DB_BIGINT logical_length, int flags, const OID &next_oid)
+{
+  OR_PUT_BIGINT (buf, &logical_length);
+  OR_PUT_INT (buf + OR_BIGINT_SIZE, flags);
+  OR_PUT_OID (buf + OR_BIGINT_SIZE + OR_INT_SIZE, &next_oid);
+}
 
-  if (locator.length > DB_BIGINT_MAX / 8 || locator.bit_length <= (locator.length - 1) * 8
-      || locator.bit_length > locator.length * 8)
+static int
+internal_lob_unpack_head_header (const char *buf, DB_BIGINT &logical_length, int &flags, OID &next_oid)
+{
+  OR_GET_BIGINT (buf, &logical_length);
+  flags = OR_GET_INT (buf + OR_BIGINT_SIZE);
+  OR_GET_OID (buf + OR_BIGINT_SIZE + OR_INT_SIZE, &next_oid);
+
+  if (logical_length < 0 || (flags != INTERNAL_LOB_CHAIN_FLAG_BLOB && flags != INTERNAL_LOB_CHAIN_FLAG_CLOB))
     {
       return internal_lob_set_generic_error ();
-    }
-
-  if (locator.bit_length != locator.length * 8)
-    {
-      bit_remainder = (int) (locator.bit_length - (locator.length - 1) * 8);
-      if (bit_remainder <= 0 || bit_remainder >= 8)
-	{
-	  return internal_lob_set_generic_error ();
-	}
     }
 
   return NO_ERROR;
 }
 
-static int
-internal_lob_flush_segment (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer)
+static void
+internal_lob_pack_chunk_header (char *buf, const OID &next_oid)
 {
-  INTERNAL_LOB_SEGMENT segment;
-  int err;
+  OR_PUT_OID (buf, &next_oid);
+}
 
-  if (writer.segment_buffer_length == 0)
-    {
-      return NO_ERROR;
-    }
-
-  segment.length = writer.segment_buffer_length;
-  err = oos_insert (thread_p, writer.lob_vfid, oos_buffer (writer.segment_buffer, (std::size_t) segment.length),
-		    segment.oid);
-  if (err != NO_ERROR)
-    {
-      return err;
-    }
-
-  writer.segments.push_back (segment);
-  writer.segment_buffer_length = 0;
-  return NO_ERROR;
+static void
+internal_lob_unpack_chunk_header (const char *buf, OID &next_oid)
+{
+  OR_GET_OID (buf, &next_oid);
 }
 
 static int
-internal_lob_serialize_manifest (const std::vector<INTERNAL_LOB_SEGMENT> &segments, DB_BIGINT total_length,
-				 std::vector<char> &manifest)
+internal_lob_read_exact_from_oos (THREAD_ENTRY *thread_p, OOS_READER &oos_reader, char *buf, int size)
 {
-  OR_BUF buf;
-  int count;
-  int manifest_size;
+  int total = 0;
 
-  if (segments.empty () || segments.size () > (std::size_t) INT_MAX)
+  while (total < size)
     {
-      return internal_lob_set_generic_error ();
-    }
-
-  count = (int) segments.size ();
-  if (count > (INT_MAX - INTERNAL_LOB_MANIFEST_HEADER_SIZE) / INTERNAL_LOB_MANIFEST_SEGMENT_SIZE)
-    {
-      return internal_lob_set_generic_error ();
-    }
-
-  manifest_size = INTERNAL_LOB_MANIFEST_HEADER_SIZE + count * INTERNAL_LOB_MANIFEST_SEGMENT_SIZE;
-  manifest.resize ((std::size_t) manifest_size);
-
-  or_init (&buf, manifest.data (), manifest_size);
-  (void) or_put_int (&buf, INTERNAL_LOB_MANIFEST_MAGIC);
-  (void) or_put_bigint (&buf, total_length);
-  (void) or_put_int (&buf, count);
-
-  for (const INTERNAL_LOB_SEGMENT &segment : segments)
-    {
-      if (segment.length <= 0 || OID_ISNULL (&segment.oid))
-	{
-	  return internal_lob_set_generic_error ();
-	}
-      (void) or_put_oid (&buf, &segment.oid);
-      (void) or_put_int (&buf, segment.length);
-    }
-
-  assert (buf.ptr == buf.endptr);
-  return NO_ERROR;
-}
-
-static int
-internal_lob_read_manifest (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator,
-			    std::vector<INTERNAL_LOB_SEGMENT> &segments, DB_BIGINT &total_length)
-{
-  std::vector<char> manifest;
-  OR_BUF buf;
-  DB_BIGINT decoded_total_length;
-  DB_BIGINT segment_length_sum = 0;
-  int manifest_length;
-  int magic;
-  int count;
-  int rc = NO_ERROR;
-  int err;
-
-  if (!locator.is_manifest || locator.length < 0 || OID_ISNULL (&locator.oid))
-    {
-      return internal_lob_set_generic_error ();
-    }
-
-  manifest_length = oos_get_length (thread_p, locator.oid);
-  if (manifest_length < INTERNAL_LOB_MANIFEST_HEADER_SIZE)
-    {
-      if (manifest_length >= 0)
-	{
-	  return internal_lob_set_generic_error ();
-	}
-      ASSERT_ERROR_AND_SET (err);
-      return err;
-    }
-
-  if ((manifest_length - INTERNAL_LOB_MANIFEST_HEADER_SIZE) % INTERNAL_LOB_MANIFEST_SEGMENT_SIZE != 0)
-    {
-      return internal_lob_set_generic_error ();
-    }
-
-  manifest.resize ((std::size_t) manifest_length);
-  err = oos_read (thread_p, locator.oid, oos_buffer (manifest.data (), manifest.size ()));
-  if (err != NO_ERROR)
-    {
-      return err;
-    }
-
-  or_init (&buf, manifest.data (), manifest_length);
-  magic = or_get_int (&buf, &rc);
-  if (rc != NO_ERROR || magic != INTERNAL_LOB_MANIFEST_MAGIC)
-    {
-      return internal_lob_set_generic_error ();
-    }
-
-  decoded_total_length = or_get_bigint (&buf, &rc);
-  if (rc != NO_ERROR || decoded_total_length != locator.length || decoded_total_length < 0)
-    {
-      return internal_lob_set_generic_error ();
-    }
-
-  count = or_get_int (&buf, &rc);
-  if (rc != NO_ERROR || count <= 0
-      || manifest_length != INTERNAL_LOB_MANIFEST_HEADER_SIZE + count * INTERNAL_LOB_MANIFEST_SEGMENT_SIZE)
-    {
-      return internal_lob_set_generic_error ();
-    }
-
-  segments.clear ();
-  segments.reserve ((std::size_t) count);
-  for (int i = 0; i < count; i++)
-    {
-      INTERNAL_LOB_SEGMENT segment;
-
-      err = or_get_oid (&buf, &segment.oid);
+      int nread = 0;
+      int err = oos_read_pull (thread_p, oos_reader, oos_buffer (buf + total, (std::size_t) (size - total)), nread);
       if (err != NO_ERROR)
 	{
 	  return err;
 	}
-      segment.length = or_get_int (&buf, &rc);
-      if (rc != NO_ERROR || segment.length <= 0 || OID_ISNULL (&segment.oid))
+      if (nread <= 0 || nread > size - total)
 	{
 	  return internal_lob_set_generic_error ();
 	}
-      if (segment_length_sum > DB_BIGINT_MAX - (DB_BIGINT) segment.length)
-	{
-	  return internal_lob_set_generic_error ();
-	}
-      segment_length_sum += (DB_BIGINT) segment.length;
-      segments.push_back (segment);
+      total += nread;
     }
 
-  if (buf.ptr != buf.endptr || segment_length_sum != decoded_total_length)
-    {
-      return internal_lob_set_generic_error ();
-    }
-
-  total_length = decoded_total_length;
   return NO_ERROR;
 }
 
 static int
-internal_lob_reader_open_current_segment (THREAD_ENTRY *thread_p, INTERNAL_LOB_READER &reader)
+internal_lob_reader_open_lob_node (THREAD_ENTRY *thread_p, INTERNAL_LOB_READER &reader, const OID &oid, bool is_head)
 {
-  if (reader.current_segment >= (int) reader.segments.size ())
+  char header[INTERNAL_LOB_HEAD_HEADER_SIZE];
+  int err;
+
+  if (OID_ISNULL (&oid))
     {
-      return NO_ERROR;
+      return internal_lob_set_generic_error ();
     }
 
-  reader.current_segment_read = 0;
-  return oos_read_open (thread_p, reader.segments[static_cast<std::size_t> (reader.current_segment)].oid,
-			reader.oos_reader);
+  err = oos_read_open (thread_p, oid, reader.oos_reader);
+  if (err != NO_ERROR)
+    {
+      return err;
+    }
+
+  if (is_head)
+    {
+      DB_BIGINT payload_bytes = 0;
+
+      err = internal_lob_read_exact_from_oos (thread_p, reader.oos_reader, header, INTERNAL_LOB_HEAD_HEADER_SIZE);
+      if (err != NO_ERROR)
+	{
+	  return err;
+	}
+      err = internal_lob_unpack_head_header (header, reader.logical_length, reader.flags, reader.next_lob_oid);
+      if (err != NO_ERROR)
+	{
+	  return err;
+	}
+      err = internal_lob_payload_bytes_from_flags (reader.logical_length, reader.flags, payload_bytes);
+      if (err != NO_ERROR)
+	{
+	  return err;
+	}
+      reader.total_bytes = payload_bytes;
+    }
+  else
+    {
+      err = internal_lob_read_exact_from_oos (thread_p, reader.oos_reader, header, INTERNAL_LOB_CHUNK_HEADER_SIZE);
+      if (err != NO_ERROR)
+	{
+	  return err;
+	}
+      internal_lob_unpack_chunk_header (header, reader.next_lob_oid);
+    }
+
+  reader.current_open = true;
+  return NO_ERROR;
+}
+
+static int
+internal_lob_read_next_oid_for_delete (THREAD_ENTRY *thread_p, const OID &oid, bool is_head, DB_BIGINT expected_length,
+                                       OID &next_oid)
+{
+  INTERNAL_LOB_READER reader;
+  int err;
+
+  reader = INTERNAL_LOB_READER ();
+  err = internal_lob_reader_open_lob_node (thread_p, reader, oid, is_head);
+  if (err != NO_ERROR)
+    {
+      return err;
+    }
+
+  if (is_head && reader.logical_length != expected_length)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  next_oid = reader.next_lob_oid;
+  return NO_ERROR;
+}
+
+static int
+internal_lob_read_spill (INTERNAL_LOB_WRITER &writer, DB_BIGINT offset, char *buf, int size)
+{
+  if (offset < 0 || size < 0 || offset > (DB_BIGINT) LONG_MAX)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  if (fseek (writer.spill_file, (long) offset, SEEK_SET) != 0)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  if (size > 0 && fread (buf, 1, (size_t) size, writer.spill_file) != (size_t) size)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  return NO_ERROR;
 }
 
 int
@@ -316,25 +320,26 @@ internal_lob_remove_file (THREAD_ENTRY *thread_p, const VFID &lob_vfid)
 int
 internal_lob_insert (THREAD_ENTRY *thread_p, const VFID &lob_vfid, oos_buffer src, INTERNAL_LOB_LOCATOR &locator)
 {
+  INTERNAL_LOB_WRITER writer;
   int err;
 
-  OID_SET_NULL (&locator.oid);
-  locator.length = (DB_BIGINT) src.size ();
-  locator.bit_length = -1;
-  locator.is_manifest = false;
-
-  if (src.size () == 0)
-    {
-      return NO_ERROR;
-    }
-
-  err = oos_insert (thread_p, lob_vfid, src, locator.oid);
+  err = internal_lob_insert_begin (thread_p, lob_vfid, writer);
   if (err != NO_ERROR)
     {
       return err;
     }
 
-  return NO_ERROR;
+  if (src.size () > 0)
+    {
+      err = internal_lob_insert_append (thread_p, writer, src);
+      if (err != NO_ERROR)
+	{
+	  internal_lob_writer_clear (writer);
+	  return err;
+	}
+    }
+
+  return internal_lob_insert_end (thread_p, writer, locator, DB_TYPE_CLOB, (DB_BIGINT) src.size ());
 }
 
 int
@@ -342,6 +347,8 @@ internal_lob_insert_begin (THREAD_ENTRY *thread_p, const VFID &lob_vfid, INTERNA
 {
   int segment_size;
   int err;
+  std::string filename;
+  FILE *fileptr = NULL;
 
   (void) thread_p;
 
@@ -353,132 +360,168 @@ internal_lob_insert_begin (THREAD_ENTRY *thread_p, const VFID &lob_vfid, INTERNA
       return err;
     }
 
-  writer.segment_buffer = (char *) db_private_alloc (NULL, (size_t) segment_size);
+  std::tie (filename, fileptr) = filesys::open_temp_file ("ilob_", "w+b");
+  if (fileptr == NULL)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  writer.segment_buffer = (char *) db_private_alloc (NULL, (size_t) segment_size + INTERNAL_LOB_HEAD_HEADER_SIZE);
   if (writer.segment_buffer == NULL)
     {
+      fclose (fileptr);
+      (void) remove (filename.c_str ());
       ASSERT_ERROR_AND_SET (err);
       return err;
     }
 
+  writer.spill_file = fileptr;
+  writer.spill_path = filename;
   writer.lob_vfid = lob_vfid;
   writer.segment_size = segment_size;
-  writer.segment_buffer_length = 0;
-  writer.total_length = 0;
-  writer.segments.clear ();
+  writer.total_bytes = 0;
   return NO_ERROR;
 }
 
 int
 internal_lob_insert_append (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, oos_buffer chunk)
 {
-  std::size_t consumed = 0;
-  int err;
+  (void) thread_p;
 
-  if (writer.segment_buffer == NULL || writer.segment_size <= 0 || writer.segment_buffer_length < 0
-      || writer.segment_buffer_length > writer.segment_size || (chunk.data () == NULL && chunk.size () > 0))
+  if (writer.spill_file == NULL || writer.segment_buffer == NULL || writer.segment_size <= 0
+      || (chunk.data () == NULL && chunk.size () > 0))
     {
       internal_lob_writer_clear (writer);
       return internal_lob_set_generic_error ();
     }
 
-  while (consumed < chunk.size ())
+  if (chunk.size () > 0)
     {
-      const int available = writer.segment_size - writer.segment_buffer_length;
-      const std::size_t remaining = chunk.size () - consumed;
-      const std::size_t to_copy = (remaining < (std::size_t) available) ? remaining : (std::size_t) available;
-
-      if (to_copy == 0)
-	{
-	  err = internal_lob_flush_segment (thread_p, writer);
-	  if (err != NO_ERROR)
-	    {
-	      internal_lob_writer_clear (writer);
-	      return err;
-	    }
-	  continue;
-	}
-
-      if (writer.total_length > DB_BIGINT_MAX - (DB_BIGINT) to_copy)
+      if (writer.total_bytes > DB_BIGINT_MAX - (DB_BIGINT) chunk.size ())
 	{
 	  internal_lob_writer_clear (writer);
 	  return internal_lob_set_generic_error ();
 	}
 
-      std::memcpy (writer.segment_buffer + writer.segment_buffer_length, chunk.data () + consumed, to_copy);
-      writer.segment_buffer_length += (int) to_copy;
-      writer.total_length += (DB_BIGINT) to_copy;
-      consumed += to_copy;
-
-      if (writer.segment_buffer_length == writer.segment_size)
+      if (fwrite (chunk.data (), 1, chunk.size (), writer.spill_file) != chunk.size ())
 	{
-	  err = internal_lob_flush_segment (thread_p, writer);
-	  if (err != NO_ERROR)
-	    {
-	      internal_lob_writer_clear (writer);
-	      return err;
-	    }
+	  internal_lob_writer_clear (writer);
+	  return internal_lob_set_generic_error ();
 	}
+      writer.total_bytes += (DB_BIGINT) chunk.size ();
     }
 
   return NO_ERROR;
 }
 
 int
-internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, INTERNAL_LOB_LOCATOR &locator)
+internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, INTERNAL_LOB_LOCATOR &locator,
+                         DB_TYPE lob_type, DB_BIGINT logical_length)
 {
-  std::vector<char> manifest;
-  OID manifest_oid;
+  OID next_oid;
+  int flags;
+  DB_BIGINT expected_bytes = 0;
+  DB_BIGINT remaining;
   int err;
 
   OID_SET_NULL (&locator.oid);
   locator.length = 0;
-  locator.bit_length = -1;
-  locator.is_manifest = false;
+  locator.adopted = false;
+  OID_SET_NULL (&next_oid);
 
-  if (writer.segment_buffer == NULL || writer.segment_size <= 0)
+  if (writer.spill_file == NULL || writer.segment_buffer == NULL || writer.segment_size <= 0)
     {
       internal_lob_writer_clear (writer);
       return internal_lob_set_generic_error ();
     }
 
-  err = internal_lob_flush_segment (thread_p, writer);
+  err = internal_lob_lob_type_to_flags (lob_type, flags);
   if (err != NO_ERROR)
     {
       internal_lob_writer_clear (writer);
       return err;
     }
 
-  locator.length = writer.total_length;
+  if (logical_length < 0)
+    {
+      if (lob_type == DB_TYPE_BLOB)
+	{
+	  if (writer.total_bytes > DB_BIGINT_MAX / 8)
+	    {
+	      internal_lob_writer_clear (writer);
+	      return internal_lob_set_generic_error ();
+	    }
+	  logical_length = writer.total_bytes * 8;
+	}
+      else
+	{
+	  logical_length = writer.total_bytes;
+	}
+    }
 
-  if (writer.segments.empty ())
+  err = internal_lob_payload_bytes_from_flags (logical_length, flags, expected_bytes);
+  if (err != NO_ERROR || expected_bytes != writer.total_bytes)
+    {
+      internal_lob_writer_clear (writer);
+      return (err != NO_ERROR) ? err : internal_lob_set_generic_error ();
+    }
+
+  locator.length = logical_length;
+  if (writer.total_bytes == 0)
     {
       internal_lob_writer_clear (writer);
       return NO_ERROR;
     }
 
-  if (writer.segments.size () == 1)
-    {
-      locator.oid = writer.segments[0].oid;
-      internal_lob_writer_clear (writer);
-      return NO_ERROR;
-    }
-
-  err = internal_lob_serialize_manifest (writer.segments, writer.total_length, manifest);
-  if (err != NO_ERROR)
+  if (fflush (writer.spill_file) != 0)
     {
       internal_lob_writer_clear (writer);
-      return err;
+      return internal_lob_set_generic_error ();
     }
 
-  err = oos_insert (thread_p, writer.lob_vfid, oos_buffer (manifest.data (), manifest.size ()), manifest_oid);
-  if (err != NO_ERROR)
+  remaining = writer.total_bytes;
+  while (remaining > 0)
     {
-      internal_lob_writer_clear (writer);
-      return err;
+      const int chunk_len = (remaining > (DB_BIGINT) writer.segment_size) ? writer.segment_size : (int) remaining;
+      OID current_oid;
+      bool is_head;
+      int header_size;
+      char *record;
+      char *payload;
+
+      remaining -= (DB_BIGINT) chunk_len;
+      is_head = (remaining == 0);
+      header_size = is_head ? INTERNAL_LOB_HEAD_HEADER_SIZE : INTERNAL_LOB_CHUNK_HEADER_SIZE;
+      record = writer.segment_buffer;
+      payload = record + header_size;
+
+      err = internal_lob_read_spill (writer, remaining, payload, chunk_len);
+      if (err != NO_ERROR)
+	{
+	  internal_lob_writer_clear (writer);
+	  return err;
+	}
+
+      if (is_head)
+	{
+	  internal_lob_pack_head_header (record, logical_length, flags, next_oid);
+	}
+      else
+	{
+	  internal_lob_pack_chunk_header (record, next_oid);
+	}
+
+      err = oos_insert (thread_p, writer.lob_vfid, oos_buffer (record, (std::size_t) header_size + chunk_len),
+                        current_oid);
+      if (err != NO_ERROR)
+	{
+	  internal_lob_writer_clear (writer);
+	  return err;
+	}
+      next_oid = current_oid;
     }
 
-  locator.oid = manifest_oid;
-  locator.is_manifest = true;
+  locator.oid = next_oid;
   internal_lob_writer_clear (writer);
   return NO_ERROR;
 }
@@ -486,25 +529,21 @@ internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, IN
 int
 internal_lob_read (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, oos_buffer dest)
 {
-  if (locator.length != (DB_BIGINT) dest.size ())
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
-      return ER_GENERIC_ERROR;
-    }
-
-  if (dest.size () == 0)
-    {
-      return NO_ERROR;
-    }
-
   INTERNAL_LOB_READER reader;
-  int err = internal_lob_read_open (thread_p, locator, reader);
+  std::size_t total_read = 0;
+  int err;
+
+  err = internal_lob_read_open (thread_p, locator, reader);
   if (err != NO_ERROR)
     {
       return err;
     }
 
-  std::size_t total_read = 0;
+  if (reader.total_bytes != (DB_BIGINT) dest.size ())
+    {
+      return internal_lob_set_generic_error ();
+    }
+
   while (total_read < dest.size ())
     {
       int nread = 0;
@@ -525,36 +564,18 @@ internal_lob_read (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, 
 
 int
 internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT offset, oos_buffer dest,
-			 int &nread)
+                         int &nread)
 {
   char skip_buffer[64 * 1024];
   INTERNAL_LOB_READER reader;
-  DB_BIGINT segment_start = 0;
   DB_BIGINT to_skip;
   DB_BIGINT max_to_read;
   int err;
-  int segment_index = 0;
 
   nread = 0;
-
-  if (offset < 0 || locator.length < 0 || (dest.data () == NULL && dest.size () > 0))
+  if (offset < 0 || (dest.data () == NULL && dest.size () > 0))
     {
       return internal_lob_set_generic_error ();
-    }
-
-  if (dest.size () == 0 || offset >= locator.length)
-    {
-      return NO_ERROR;
-    }
-
-  max_to_read = locator.length - offset;
-  if (max_to_read > (DB_BIGINT) dest.size ())
-    {
-      max_to_read = (DB_BIGINT) dest.size ();
-    }
-  if (max_to_read > (DB_BIGINT) INT_MAX)
-    {
-      max_to_read = (DB_BIGINT) INT_MAX;
     }
 
   err = internal_lob_read_open (thread_p, locator, reader);
@@ -563,43 +584,16 @@ internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &loc
       return err;
     }
 
-  while (segment_index < (int) reader.segments.size ())
-    {
-      const INTERNAL_LOB_SEGMENT &segment = reader.segments[static_cast<std::size_t> (segment_index)];
-
-      if (segment.length < 0 || segment_start > DB_BIGINT_MAX - (DB_BIGINT) segment.length)
-	{
-	  return internal_lob_set_generic_error ();
-	}
-      if (offset < segment_start + (DB_BIGINT) segment.length)
-	{
-	  break;
-	}
-
-      segment_start += (DB_BIGINT) segment.length;
-      segment_index++;
-    }
-  if (segment_index >= (int) reader.segments.size ())
+  if (dest.size () == 0 || offset >= reader.total_bytes)
     {
       return NO_ERROR;
     }
 
-  if (segment_index != reader.current_segment)
-    {
-      reader.current_segment = segment_index;
-      reader.total_read = segment_start;
-      err = internal_lob_reader_open_current_segment (thread_p, reader);
-      if (err != NO_ERROR)
-	{
-	  return err;
-	}
-    }
-
-  to_skip = offset - segment_start;
+  to_skip = offset;
   while (to_skip > 0)
     {
-      int skip_size = (to_skip > (DB_BIGINT) sizeof (skip_buffer)) ? (int) sizeof (skip_buffer) : (int) to_skip;
       int skipped = 0;
+      int skip_size = (to_skip > (DB_BIGINT) sizeof (skip_buffer)) ? (int) sizeof (skip_buffer) : (int) to_skip;
 
       err = internal_lob_read_pull (thread_p, reader, oos_buffer (skip_buffer, (std::size_t) skip_size), skipped);
       if (err != NO_ERROR)
@@ -610,8 +604,17 @@ internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &loc
 	{
 	  return internal_lob_set_generic_error ();
 	}
-
       to_skip -= (DB_BIGINT) skipped;
+    }
+
+  max_to_read = reader.total_bytes - offset;
+  if (max_to_read > (DB_BIGINT) dest.size ())
+    {
+      max_to_read = (DB_BIGINT) dest.size ();
+    }
+  if (max_to_read > (DB_BIGINT) INT_MAX)
+    {
+      max_to_read = (DB_BIGINT) INT_MAX;
     }
 
   while (nread < (int) max_to_read)
@@ -620,7 +623,7 @@ internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &loc
       const int pull_size = (int) max_to_read - nread;
 
       err = internal_lob_read_pull (thread_p, reader, dest.subspan ((std::size_t) nread, (std::size_t) pull_size),
-				    pulled);
+                                    pulled);
       if (err != NO_ERROR)
 	{
 	  return err;
@@ -629,7 +632,6 @@ internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &loc
 	{
 	  return internal_lob_set_generic_error ();
 	}
-
       nread += pulled;
     }
 
@@ -642,15 +644,16 @@ internal_lob_read_open (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &loca
   int err;
 
   reader = INTERNAL_LOB_READER ();
-  reader.total_length = locator.length;
+  reader.logical_length = locator.length;
 
   if (locator.length < 0)
     {
       return internal_lob_set_generic_error ();
     }
 
-  if (locator.length == 0)
+  if (locator.length == 0 && OID_ISNULL (&locator.oid))
     {
+      reader.flags = INTERNAL_LOB_CHAIN_FLAG_CLOB;
       return NO_ERROR;
     }
 
@@ -659,32 +662,18 @@ internal_lob_read_open (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &loca
       return internal_lob_set_generic_error ();
     }
 
-  if (locator.is_manifest)
+  err = internal_lob_reader_open_lob_node (thread_p, reader, locator.oid, true);
+  if (err != NO_ERROR)
     {
-      DB_BIGINT total_length = 0;
-      err = internal_lob_read_manifest (thread_p, locator, reader.segments, total_length);
-      if (err != NO_ERROR)
-	{
-	  return err;
-	}
-      reader.total_length = total_length;
-    }
-  else
-    {
-      INTERNAL_LOB_SEGMENT segment;
-
-      if (locator.length > (DB_BIGINT) INT_MAX)
-	{
-	  return internal_lob_set_generic_error ();
-	}
-
-      segment.oid = locator.oid;
-      segment.length = (int) locator.length;
-      reader.segments.push_back (segment);
+      return err;
     }
 
-  reader.current_segment = 0;
-  return internal_lob_reader_open_current_segment (thread_p, reader);
+  if (reader.logical_length != locator.length)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  return NO_ERROR;
 }
 
 int
@@ -692,80 +681,64 @@ internal_lob_read_pull (THREAD_ENTRY *thread_p, INTERNAL_LOB_READER &reader, oos
 {
   nread = 0;
 
-  if (dest.size () == 0 || reader.total_read >= reader.total_length)
+  if (dest.size () == 0 || reader.total_read >= reader.total_bytes)
     {
       return NO_ERROR;
     }
 
-  while ((std::size_t) nread < dest.size () && nread < INT_MAX
-	 && reader.current_segment < (int) reader.segments.size ())
+  while ((std::size_t) nread < dest.size () && nread < INT_MAX && reader.total_read < reader.total_bytes)
     {
-      INTERNAL_LOB_SEGMENT &segment = reader.segments[static_cast<std::size_t> (reader.current_segment)];
-      const int segment_remaining = segment.length - reader.current_segment_read;
-      const std::size_t dest_remaining = dest.size () - (std::size_t) nread;
-      int pull_size;
+      DB_BIGINT remaining_total = reader.total_bytes - reader.total_read;
+      std::size_t dest_remaining = dest.size () - (std::size_t) nread;
+      int request_size;
       int pulled = 0;
       int err;
 
-      if (segment_remaining < 0)
+      if (!reader.current_open)
 	{
-	  return internal_lob_set_generic_error ();
-	}
-      if (segment_remaining == 0)
-	{
-	  if (!OID_ISNULL (&reader.oos_reader.current))
+	  if (OID_ISNULL (&reader.next_lob_oid))
 	    {
 	      return internal_lob_set_generic_error ();
 	    }
-	  reader.current_segment++;
-	  if (reader.current_segment < (int) reader.segments.size ())
+	  err = internal_lob_reader_open_lob_node (thread_p, reader, reader.next_lob_oid, false);
+	  if (err != NO_ERROR)
 	    {
-	      err = internal_lob_reader_open_current_segment (thread_p, reader);
-	      if (err != NO_ERROR)
-		{
-		  return err;
-		}
+	      return err;
 	    }
-	  continue;
 	}
 
-      pull_size = (dest_remaining > (std::size_t) INT_MAX) ? INT_MAX : (int) dest_remaining;
-      if (pull_size > segment_remaining)
+      if (dest_remaining > (std::size_t) INT_MAX)
 	{
-	  pull_size = segment_remaining;
+	  request_size = INT_MAX;
+	}
+      else
+	{
+	  request_size = (int) dest_remaining;
+	}
+      if ((DB_BIGINT) request_size > remaining_total)
+	{
+	  request_size = (int) remaining_total;
 	}
 
       err = oos_read_pull (thread_p, reader.oos_reader,
-			   dest.subspan ((std::size_t) nread, (std::size_t) pull_size), pulled);
+                           dest.subspan ((std::size_t) nread, (std::size_t) request_size), pulled);
       if (err != NO_ERROR)
 	{
 	  return err;
 	}
-      if (pulled <= 0)
+
+      if (pulled == 0)
+	{
+	  reader.current_open = false;
+	  continue;
+	}
+      if (pulled < 0 || pulled > request_size)
 	{
 	  return internal_lob_set_generic_error ();
 	}
 
-      reader.current_segment_read += pulled;
       reader.total_read += (DB_BIGINT) pulled;
       nread += pulled;
-
-      if (reader.current_segment_read == segment.length)
-	{
-	  if (!OID_ISNULL (&reader.oos_reader.current))
-	    {
-	      return internal_lob_set_generic_error ();
-	    }
-	  reader.current_segment++;
-	  if (reader.current_segment < (int) reader.segments.size ())
-	    {
-	      err = internal_lob_reader_open_current_segment (thread_p, reader);
-	      if (err != NO_ERROR)
-		{
-		  return err;
-		}
-	    }
-	}
     }
 
   return NO_ERROR;
@@ -774,32 +747,43 @@ internal_lob_read_pull (THREAD_ENTRY *thread_p, INTERNAL_LOB_READER &reader, oos
 int
 internal_lob_delete (THREAD_ENTRY *thread_p, const VFID &lob_vfid, const INTERNAL_LOB_LOCATOR &locator)
 {
+  OID current_oid;
+  bool is_head = true;
+  int err;
+
   if (locator.length == 0 && OID_ISNULL (&locator.oid))
     {
       return NO_ERROR;
     }
 
-  if (locator.is_manifest)
+  if (locator.length < 0 || OID_ISNULL (&locator.oid))
     {
-      std::vector<INTERNAL_LOB_SEGMENT> segments;
-      DB_BIGINT total_length;
-      int err = internal_lob_read_manifest (thread_p, locator, segments, total_length);
+      return internal_lob_set_generic_error ();
+    }
+
+  current_oid = locator.oid;
+  while (!OID_ISNULL (&current_oid))
+    {
+      OID next_oid;
+
+      OID_SET_NULL (&next_oid);
+      err = internal_lob_read_next_oid_for_delete (thread_p, current_oid, is_head, locator.length, next_oid);
       if (err != NO_ERROR)
 	{
 	  return err;
 	}
 
-      for (const INTERNAL_LOB_SEGMENT &segment : segments)
+      err = oos_delete (thread_p, lob_vfid, current_oid);
+      if (err != NO_ERROR)
 	{
-	  err = oos_delete (thread_p, lob_vfid, segment.oid);
-	  if (err != NO_ERROR)
-	    {
-	      return err;
-	    }
+	  return err;
 	}
+
+      current_oid = next_oid;
+      is_head = false;
     }
 
-  return oos_delete (thread_p, lob_vfid, locator.oid);
+  return NO_ERROR;
 }
 
 int
@@ -820,12 +804,9 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
   char locator_buf[128];
   int volid, pageid, slotid;
   long long length;
-  long long bit_length = -1;
   int consumed = 0;
-  int bit_length_consumed = 0;
   int prefix_len = (int) strlen (INTERNAL_LOB_LOCATOR_PREFIX);
   int marker_len = 0;
-  bool is_manifest = false;
   bool adopted = false;
   char *oid_part;
 
@@ -848,29 +829,14 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
       marker_len += 2;
       oid_part += 2;
     }
-  if (oid_part[0] == 'M' && oid_part[1] == ':')
-    {
-      is_manifest = true;
-      marker_len += 2;
-      oid_part += 2;
-    }
 
   if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &length, &consumed) != 4)
     {
       return false;
     }
-  if (length < 0)
+  if (length < 0 || prefix_len + marker_len + consumed != size)
     {
       return false;
-    }
-  if (prefix_len + marker_len + consumed != size)
-    {
-      if (oid_part[consumed] != ':'
-	  || sscanf (oid_part + consumed + 1, "%lld%n", &bit_length, &bit_length_consumed) != 1
-	  || bit_length < 0 || prefix_len + marker_len + consumed + 1 + bit_length_consumed != size)
-	{
-	  return false;
-	}
     }
 
   if (locator != NULL)
@@ -879,8 +845,6 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
       locator->oid.pageid = (PAGEID) pageid;
       locator->oid.slotid = (PGSLOTID) slotid;
       locator->length = (DB_BIGINT) length;
-      locator->bit_length = (DB_BIGINT) bit_length;
-      locator->is_manifest = is_manifest;
       locator->adopted = adopted;
     }
   return true;
@@ -999,74 +963,25 @@ internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *p
 int
 internal_lob_encode_disk_length (const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT &disk_length)
 {
-  int bit_remainder;
-  DB_BIGINT encoded;
-
   if (locator.length < 0)
     {
       return internal_lob_set_generic_error ();
     }
 
-  if (internal_lob_get_bit_remainder (locator, bit_remainder) != NO_ERROR)
-    {
-      return ER_GENERIC_ERROR;
-    }
-
-  if (!locator.is_manifest && bit_remainder == 0)
-    {
-      disk_length = locator.length;
-      return NO_ERROR;
-    }
-
-  /* Keep the heap inline locator at OR_OOS_INLINE_SIZE.  Non-negative values are the legacy raw-byte length.
-   * Negative values pack raw-byte length, manifest flag and BLOB tail bit count:
-   *   -((length * 18) + (manifest ? 9 : 0) + bit_remainder + 1)
-   */
-  if (locator.length > (DB_BIGINT_MAX - 17) / 18)
-    {
-      return internal_lob_set_generic_error ();
-    }
-
-  encoded = locator.length * 18 + (locator.is_manifest ? 9 : 0) + bit_remainder;
-  disk_length = -encoded - 1;
+  disk_length = locator.length;
   return NO_ERROR;
 }
 
 int
 internal_lob_decode_disk_length (INTERNAL_LOB_LOCATOR &locator, DB_BIGINT disk_length)
 {
-  DB_BIGINT encoded;
-  int bit_remainder;
-
-  locator.is_manifest = false;
-  locator.bit_length = -1;
-
-  if (disk_length >= 0)
-    {
-      locator.length = disk_length;
-      return NO_ERROR;
-    }
-
-  if (disk_length == DB_BIGINT_MIN)
+  if (disk_length < 0)
     {
       return internal_lob_set_generic_error ();
     }
 
-  encoded = -disk_length - 1;
-  bit_remainder = (int) (encoded % 9);
-  encoded /= 9;
-  locator.is_manifest = (encoded % 2) != 0;
-  locator.length = encoded / 2;
-
-  if (bit_remainder != 0)
-    {
-      if (locator.length <= 0 || locator.length > DB_BIGINT_MAX / 8)
-	{
-	  return internal_lob_set_generic_error ();
-	}
-      locator.bit_length = (locator.length - 1) * 8 + bit_remainder;
-    }
-
+  locator.length = disk_length;
+  locator.adopted = false;
   return NO_ERROR;
 }
 
@@ -1132,20 +1047,44 @@ internal_lob_make_locator_db_value_internal (DB_VALUE *value, DB_TYPE lob_type, 
 
 int
 internal_lob_read_db_value (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_TYPE lob_type,
-			    DB_VALUE *value, TP_DOMAIN *domain)
+                            DB_VALUE *value, TP_DOMAIN *domain)
 {
   char *raw_value = NULL;
+  DB_BIGINT raw_length_bigint = 0;
   int raw_length;
   int precision;
   int err;
 
-  if (locator.length < 0 || locator.length > (DB_BIGINT) INT_MAX)
+  if (locator.length < 0)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
       return ER_GENERIC_ERROR;
     }
 
-  raw_length = (int) locator.length;
+  if (lob_type == DB_TYPE_BLOB)
+    {
+      err = internal_lob_blob_physical_bytes (locator.length, raw_length_bigint);
+      if (err != NO_ERROR)
+	{
+	  return err;
+	}
+    }
+  else if (lob_type == DB_TYPE_CLOB)
+    {
+      raw_length_bigint = locator.length;
+    }
+  else
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  if (raw_length_bigint > (DB_BIGINT) INT_MAX || locator.length > (DB_BIGINT) INT_MAX)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+
+  raw_length = (int) raw_length_bigint;
   raw_value = (char *) db_private_alloc (NULL, (size_t) (raw_length > 0 ? raw_length : 1));
   if (raw_value == NULL)
     {
@@ -1168,20 +1107,9 @@ internal_lob_read_db_value (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &
     {
       err = db_make_clob (value, precision, raw_value, raw_length);
     }
-  else if (lob_type == DB_TYPE_BLOB)
-    {
-      DB_BIGINT bit_length = (locator.bit_length >= 0) ? locator.bit_length : (DB_BIGINT) raw_length * 8;
-
-      if (bit_length < 0 || bit_length > (DB_BIGINT) INT_MAX)
-	{
-	  db_private_free_and_init (NULL, raw_value);
-	  return internal_lob_set_generic_error ();
-	}
-      err = db_make_blob (value, precision, (DB_CONST_C_BIT) raw_value, (int) bit_length);
-    }
   else
     {
-      err = internal_lob_set_generic_error ();
+      err = db_make_blob (value, precision, (DB_CONST_C_BIT) raw_value, (int) locator.length);
     }
 
   if (err != NO_ERROR)
