@@ -1168,11 +1168,8 @@ csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT 
   int pageid = 0;
   int slotid = 0;
   long long parsed_length = 0;
-  long long parsed_bit_length = -1;
   int consumed = 0;
-  int bit_length_consumed = 0;
   int prefix_len = (int) strlen (CSQL_INTERNAL_LOB_LOCATOR_PREFIX);
-  int marker_len = 0;
   char *oid_part = NULL;
 
   if (length != NULL)
@@ -1197,11 +1194,6 @@ csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT 
   locator_buf[size] = '\0';
 
   oid_part = locator_buf + prefix_len;
-  if (oid_part[0] == 'M' && oid_part[1] == ':')
-    {
-      marker_len = 2;
-      oid_part += marker_len;
-    }
 
   if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &parsed_length, &consumed) != 4
       || parsed_length < 0)
@@ -1212,14 +1204,9 @@ csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT 
   (void) pageid;
   (void) slotid;
 
-  if (prefix_len + marker_len + consumed != size)
+  if (prefix_len + consumed != size)
     {
-      if (oid_part[consumed] != ':'
-	  || sscanf (oid_part + consumed + 1, "%lld%n", &parsed_bit_length, &bit_length_consumed) != 1
-	  || parsed_bit_length < 0 || prefix_len + marker_len + consumed + 1 + bit_length_consumed != size)
-	{
-	  return false;
-	}
+      return false;
     }
 
   if (length != NULL)
@@ -1228,7 +1215,7 @@ csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT 
     }
   if (bit_length != NULL)
     {
-      *bit_length = (DB_BIGINT) parsed_bit_length;
+      *bit_length = -1;
     }
   return true;
 }
@@ -1305,7 +1292,18 @@ csql_db_value_is_internal_lob_locator (DB_VALUE * value, char *lob_type, const c
     }
   if (data_len != NULL)
     {
-      *data_len = parsed_length;
+      if (type == DB_TYPE_BLOB)
+	{
+	  if (parsed_length > DB_BIGINT_MAX - 7)
+	    {
+	      return false;
+	    }
+	  *data_len = (parsed_length + 7) / 8;
+	}
+      else
+	{
+	  *data_len = parsed_length;
+	}
     }
   if (bit_length != NULL)
     {
@@ -1313,17 +1311,9 @@ csql_db_value_is_internal_lob_locator (DB_VALUE * value, char *lob_type, const c
 	{
 	  *bit_length = 0;
 	}
-      else if (parsed_bit_length >= 0)
-	{
-	  *bit_length = parsed_bit_length;
-	}
       else
 	{
-	  if (parsed_length > DB_BIGINT_MAX / 8)
-	    {
-	      return false;
-	    }
-	  *bit_length = parsed_length * 8;
+	  *bit_length = parsed_length;
 	}
     }
   return true;
@@ -1423,7 +1413,18 @@ csql_db_value_is_internal_lob_stream_marker (DB_VALUE * value, char *lob_type, c
     }
   if (data_len != NULL)
     {
-      *data_len = parsed_length;
+      if (marker_type == 'B')
+	{
+	  if (parsed_length > DB_BIGINT_MAX - 7)
+	    {
+	      return false;
+	    }
+	  *data_len = (parsed_length + 7) / 8;
+	}
+      else
+	{
+	  *data_len = parsed_length;
+	}
     }
   if (bit_length != NULL)
     {
@@ -1431,17 +1432,9 @@ csql_db_value_is_internal_lob_stream_marker (DB_VALUE * value, char *lob_type, c
 	{
 	  *bit_length = 0;
 	}
-      else if (parsed_bit_length >= 0)
-	{
-	  *bit_length = parsed_bit_length;
-	}
       else
 	{
-	  if (parsed_length > DB_BIGINT_MAX / 8)
-	    {
-	      return false;
-	    }
-	  *bit_length = parsed_length * 8;
+	  *bit_length = parsed_length;
 	}
     }
   return true;
