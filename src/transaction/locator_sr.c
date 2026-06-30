@@ -30,6 +30,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <limits.h>
 #include <cstring>		// for std::memcpy
 
 #include "locator_sr.h"
@@ -61,6 +62,7 @@
 #endif /* ENABLE_SYSTEMTAP */
 #include "record_descriptor.hpp"
 #include "slotted_page.h"
+#include "system_parameter.h"
 #include "xasl_cache.h"
 #include "xasl_predicate.hpp"
 #include "thread_manager.hpp"	// for thread_get_thread_entry_info
@@ -5280,8 +5282,6 @@ locator_oos_insert_force (THREAD_ENTRY * thread_p, OID * class_oid, RECDES * rec
   HFID oos_hfid = HFID_INITIALIZER;
   VFID oos_vfid = VFID_INITIALIZER;
   OID oos_oid = OID_INITIALIZER;
-  LOG_TDES *tdes = NULL;
-  int tran_index = 0;
 
   error_code = heap_get_class_info (thread_p, class_oid, &oos_hfid, NULL, NULL);
   if (error_code != NO_ERROR)
@@ -5305,19 +5305,6 @@ locator_oos_insert_force (THREAD_ENTRY * thread_p, OID * class_oid, RECDES * rec
       error_code = er_errid ();
       return error_code;
     }
-
-  /* Find transaction descriptor for current logging transaction */
-  tran_index = LOG_FIND_THREAD_TRAN_INDEX (thread_p);
-  tdes = LOG_FIND_TDES (tran_index);
-  if (tdes == NULL)
-    {
-      er_set (ER_FATAL_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_UNKNOWN_TRANINDEX, 1, tran_index);
-      return S_ERROR;
-    }
-
-  /* init oos tracking info */
-  tdes->oos_insert_lsa_queue.clear ();
-  thread_p->oos_oids.clear ();
 
   /* Skip the on-log OOS header (oos_insert prepends its own). Reject corrupt
    * records that would underflow the subtraction below. */
@@ -14114,6 +14101,60 @@ xsynonym_remove_xasl_by_oid (THREAD_ENTRY * thread_p, OID * oidp)
 }
 
 static int
+locator_internal_lob_repl_node_count (DB_TYPE type, DB_BIGINT logical_length, int *node_count)
+{
+  DB_BIGINT payload_bytes;
+  UINT64 prm_segment_size;
+
+  if (node_count == NULL || logical_length < 0 || (type != DB_TYPE_BLOB && type != DB_TYPE_CLOB))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "invalid internal LOB replication length");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  if (type == DB_TYPE_BLOB)
+    {
+      if (logical_length > DB_BIGINT_MAX - 7)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+		  "invalid internal BLOB bit length");
+	  return ER_HA_GENERIC_ERROR;
+	}
+      payload_bytes = (logical_length + 7) / 8;
+    }
+  else
+    {
+      payload_bytes = logical_length;
+    }
+
+  if (payload_bytes <= 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "empty internal LOB unexpectedly stored as OOS");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  prm_segment_size = prm_get_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE);
+  if (prm_segment_size == 0 || prm_segment_size > (UINT64) INT_MAX)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "invalid internal_lob_segment_size during replication apply");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  if ((UINT64) payload_bytes > ((UINT64) INT_MAX) * prm_segment_size)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "too many internal LOB nodes during replication apply");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  *node_count = (int) (((UINT64) payload_bytes + prm_segment_size - 1) / prm_segment_size);
+  return NO_ERROR;
+}
+
+static int
 locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid, RECDES * recdes)
 {
   HEAP_CACHE_ATTRINFO attr_info;
@@ -14182,7 +14223,29 @@ locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid
 	  continue;
 	}
 
-      if (oos_oid_count >= (int) thread_p->oos_oids.size ())
+      int oos_oid_consume_count = 1;
+      if (attrepr->type == DB_TYPE_BLOB || attrepr->type == DB_TYPE_CLOB)
+	{
+	  DB_BIGINT logical_length = 0;
+	  const char *inline_ptr = (char *) recdes->data + OR_VAR_OFFSET (recdes->data, attrepr->location);
+
+	  if (inline_ptr + OR_OOS_INLINE_SIZE > (char *) recdes->data + recdes->length)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+		      "internal LOB locator inline area exceeds record bounds");
+	      error = ER_HA_GENERIC_ERROR;
+	      goto end;
+	    }
+
+	  OR_GET_BIGINT (inline_ptr + OR_OID_SIZE, &logical_length);
+	  error = locator_internal_lob_repl_node_count (attrepr->type, logical_length, &oos_oid_consume_count);
+	  if (error != NO_ERROR)
+	    {
+	      goto end;
+	    }
+	}
+
+      if (oos_oid_count + oos_oid_consume_count > (int) thread_p->oos_oids.size ())
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
 		  "not enough OOS OIDs while applying replicated heap record");
@@ -14190,7 +14253,7 @@ locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid
 	  goto end;
 	}
 
-      oos_oid = thread_p->oos_oids[oos_oid_count];
+      oos_oid = thread_p->oos_oids[oos_oid_count + oos_oid_consume_count - 1];
       oid_ptr = (char *) recdes->data + OR_VAR_OFFSET (recdes->data, attrepr->location);
 
       buf.ptr = oid_ptr;
@@ -14198,12 +14261,19 @@ locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid
 
       or_put_oid (&buf, &oos_oid);
 
-      oos_oid_count++;
+      oos_oid_count += oos_oid_consume_count;
 
       if (oos_oid_count >= (int) thread_p->oos_oids.size ())
 	{
 	  goto end;
 	}
+    }
+
+  if (oos_oid_count != (int) thread_p->oos_oids.size ())
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "too many OOS OIDs while applying replicated heap record");
+      error = ER_HA_GENERIC_ERROR;
     }
 
 end:
