@@ -314,7 +314,7 @@ internal_lob_reader_open_lob_node (THREAD_ENTRY *thread_p, INTERNAL_LOB_READER &
 
 static int
 internal_lob_read_next_oid_for_delete (THREAD_ENTRY *thread_p, const OID &oid, bool is_head, DB_BIGINT expected_length,
-                                       OID &next_oid)
+				       OID &next_oid)
 {
   INTERNAL_LOB_READER reader;
   int err;
@@ -467,7 +467,7 @@ internal_lob_insert_append (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer,
 
 int
 internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, INTERNAL_LOB_LOCATOR &locator,
-                         DB_TYPE lob_type, DB_BIGINT logical_length)
+			 DB_TYPE lob_type, DB_BIGINT logical_length)
 {
   OID next_oid;
   int flags;
@@ -520,6 +520,21 @@ internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, IN
   locator.length = logical_length;
   if (writer.total_bytes == 0)
     {
+      /* Empty LOB: still store one header-only head chunk so the locator carries a real OID.
+       * The heap OOS-column invariant requires a non-null OID for every internal LOB column
+       * value (see the assertion in heap_attrinfo_transform_columns_to_disk). next_oid is NULL
+       * here, so this single head chunk is a self-terminating chain that reads back as 0 bytes. */
+      OID head_oid;
+
+      internal_lob_pack_head_header (writer.segment_buffer, logical_length, flags, next_oid);
+      err = oos_insert (thread_p, writer.lob_vfid,
+			oos_buffer (writer.segment_buffer, (std::size_t) INTERNAL_LOB_HEAD_HEADER_SIZE), head_oid);
+      if (err != NO_ERROR)
+	{
+	  internal_lob_writer_clear (writer);
+	  return err;
+	}
+      locator.oid = head_oid;
       internal_lob_writer_clear (writer);
       return NO_ERROR;
     }
@@ -563,7 +578,7 @@ internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, IN
 	}
 
       err = oos_insert (thread_p, writer.lob_vfid, oos_buffer (record, (std::size_t) header_size + chunk_len),
-                        current_oid);
+			current_oid);
       if (err != NO_ERROR)
 	{
 	  internal_lob_writer_clear (writer);
@@ -616,7 +631,7 @@ internal_lob_read (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, 
 
 int
 internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT offset, oos_buffer dest,
-                         int &nread)
+			 int &nread)
 {
   char skip_buffer[64 * 1024];
   INTERNAL_LOB_READER reader;
@@ -675,7 +690,7 @@ internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &loc
       const int pull_size = (int) max_to_read - nread;
 
       err = internal_lob_read_pull (thread_p, reader, dest.subspan ((std::size_t) nread, (std::size_t) pull_size),
-                                    pulled);
+				    pulled);
       if (err != NO_ERROR)
 	{
 	  return err;
@@ -773,7 +788,7 @@ internal_lob_read_pull (THREAD_ENTRY *thread_p, INTERNAL_LOB_READER &reader, oos
 	}
 
       err = oos_read_pull (thread_p, reader.oos_reader,
-                           dest.subspan ((std::size_t) nread, (std::size_t) request_size), pulled);
+			   dest.subspan ((std::size_t) nread, (std::size_t) request_size), pulled);
       if (err != NO_ERROR)
 	{
 	  return err;
@@ -1120,7 +1135,7 @@ internal_lob_make_locator_db_value_internal (DB_VALUE *value, DB_TYPE lob_type, 
 
 int
 internal_lob_read_db_value (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_TYPE lob_type,
-                            DB_VALUE *value, TP_DOMAIN *domain)
+			    DB_VALUE *value, TP_DOMAIN *domain)
 {
   char *raw_value = NULL;
   DB_BIGINT raw_length_bigint = 0;
