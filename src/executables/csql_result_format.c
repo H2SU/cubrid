@@ -39,6 +39,7 @@
 #include "db_value_printer.hpp"
 
 #include "dbtype.h"
+#include "internal_lob_marker.h"
 
 #if defined (SUPPRESS_STRLEN_WARNING)
 #define strlen(s1)  ((int) strlen(s1))
@@ -967,7 +968,10 @@ bit_to_string (DB_VALUE * value, char string_delimiter, bool plain_string)
 {
   char *temp_string;
   char *return_string;
+  const char *bit_format;
+  char introducer;
   int max_length;
+  int bit_length;
 
   /*
    * Allocate string length based on precision plus the the leading
@@ -975,21 +979,35 @@ bit_to_string (DB_VALUE * value, char string_delimiter, bool plain_string)
    * represents the number of bytes needed to represent the bit string in
    * hexadecimal.
    */
-  max_length = ((db_get_string_length (value) + 3) / 4) + 4;
+  bit_length = db_get_string_length (value);
+  if (bit_length % 4 == 0)
+    {
+      bit_format = "%X";
+      introducer = 'X';
+      max_length = ((bit_length + 3) / 4) + 4;
+    }
+  else
+    {
+      /* Hex literals round to a nibble and lose the exact bit length.  Use a binary literal for non-nibble strings. */
+      bit_format = "%B";
+      introducer = 'B';
+      max_length = bit_length + 4;
+    }
+
   temp_string = (char *) malloc (max_length);
   if (temp_string == NULL)
     {
       return (NULL);
     }
 
-  if (db_bit_string (value, "%X", temp_string, max_length) != CSQL_SUCCESS)
+  if (db_bit_string (value, bit_format, temp_string, max_length) != CSQL_SUCCESS)
     {
       free_and_init (temp_string);
       return (NULL);		/* Should never get here */
     }
 
   return_string =
-    string_to_string (temp_string, string_delimiter, 'X', strlen (temp_string), NULL, plain_string, false);
+    string_to_string (temp_string, string_delimiter, introducer, strlen (temp_string), NULL, plain_string, false);
   free_and_init (temp_string);
 
   return (return_string);
@@ -1153,14 +1171,6 @@ duplicate_string (const char *string)
 }
 
 static bool
-csql_is_internal_lob_locator (const char *data, int size)
-{
-  int prefix_len = (int) strlen (CSQL_INTERNAL_LOB_LOCATOR_PREFIX);
-
-  return data != NULL && size > prefix_len && memcmp (data, CSQL_INTERNAL_LOB_LOCATOR_PREFIX, prefix_len) == 0;
-}
-
-static bool
 csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT * length, DB_BIGINT * bit_length)
 {
   char locator_buf[128];
@@ -1168,7 +1178,9 @@ csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT 
   int pageid = 0;
   int slotid = 0;
   long long parsed_length = 0;
+  unsigned long long parsed_token = 0;
   int consumed = 0;
+  int token_consumed = 0;
   int prefix_len = (int) strlen (CSQL_INTERNAL_LOB_LOCATOR_PREFIX);
   char *oid_part = NULL;
 
@@ -1194,6 +1206,10 @@ csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT 
   locator_buf[size] = '\0';
 
   oid_part = locator_buf + prefix_len;
+  if (oid_part[0] == 'A' && oid_part[1] == ':')
+    {
+      oid_part += 2;
+    }
 
   if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &parsed_length, &consumed) != 4
       || parsed_length < 0)
@@ -1204,7 +1220,10 @@ csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT 
   (void) pageid;
   (void) slotid;
 
-  if (prefix_len + consumed != size)
+  if (oid_part[consumed] != ':'
+      || sscanf (oid_part + consumed + 1, "%llx%n", &parsed_token, &token_consumed) != 1
+      || parsed_token == 0 || token_consumed <= 0
+      || oid_part[consumed + 1 + token_consumed] != '\0')
     {
       return false;
     }
@@ -1248,7 +1267,8 @@ csql_db_value_is_internal_lob_locator (DB_VALUE * value, char *lob_type, const c
       *bit_length = -1;
     }
 
-  if (value == NULL || DB_IS_NULL (value))
+  if (value == NULL || DB_IS_NULL (value)
+      || !db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR))
     {
       return false;
     }
@@ -1351,7 +1371,8 @@ csql_db_value_is_internal_lob_stream_marker (DB_VALUE * value, char *lob_type, c
       *bit_length = -1;
     }
 
-  if (value == NULL || DB_IS_NULL (value))
+  if (value == NULL || DB_IS_NULL (value)
+      || !db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_STREAM))
     {
       return false;
     }
@@ -1438,27 +1459,6 @@ csql_db_value_is_internal_lob_stream_marker (DB_VALUE * value, char *lob_type, c
 	}
     }
   return true;
-}
-
-static char *
-csql_duplicate_internal_lob_locator (const char *data, int size)
-{
-  char *locator;
-
-  if (!csql_is_internal_lob_locator (data, size))
-    {
-      return NULL;
-    }
-
-  locator = (char *) malloc (size + 1);
-  if (locator == NULL)
-    {
-      return NULL;
-    }
-  memcpy (locator, data, size);
-  locator[size] = '\0';
-
-  return locator;
 }
 
 /*
@@ -2192,11 +2192,10 @@ csql_db_value_as_string (DB_VALUE * value, int *length, const CSQL_ARGUMENT * cs
 
     case DB_TYPE_BLOB:
       // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
-      {
-	int bit_length = 0;
-	const char *bit_data = (const char *) db_get_bit (value, &bit_length);
-	result = csql_duplicate_internal_lob_locator (bit_data, (bit_length + 7) / 8);
-      }
+      if (db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR))
+	{
+	  result = duplicate_string ("<INTERNAL BLOB>");
+	}
       if (result == NULL)
 	{
 	  result = bit_to_string (value, string_delimiter, plain_string);
@@ -2217,7 +2216,10 @@ csql_db_value_as_string (DB_VALUE * value, int *length, const CSQL_ARGUMENT * cs
 
 	str = db_get_char (value);
 	bytes_size = db_get_string_size (value);
-	result = csql_duplicate_internal_lob_locator (str, bytes_size);
+	if (db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR))
+	  {
+	    result = duplicate_string ("<INTERNAL CLOB>");
+	  }
 	if (result != NULL)
 	  {
 	    len = strlen (result);

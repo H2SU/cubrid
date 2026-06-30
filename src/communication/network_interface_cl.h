@@ -347,6 +347,9 @@ extern int internal_lob_read_db_value_from_server (const char *locator_data, int
 						   DB_VALUE * value);
 extern int internal_lob_read_from_server (const char *locator_data, int locator_len, DB_BIGINT offset, char *buf,
 					  int count, int *nread);
+extern int internal_lob_stream_open_from_server (const char *locator_data, int locator_len, INT64 * token);
+extern int internal_lob_stream_read_from_server (INT64 token, char *buf, int count, int *nread);
+extern int internal_lob_stream_close_from_server (INT64 token);
 extern int loaddb_internal_lob_upload_begin (cubload::class_id clsid, char type, DB_BIGINT data_length,
 					     DB_BIGINT bit_length, INT64 * token);
 extern int loaddb_internal_lob_upload_append (INT64 token, const char *data, int data_size);

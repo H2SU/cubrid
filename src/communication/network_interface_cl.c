@@ -278,7 +278,9 @@ internal_lob_parse_locator_metadata (const char *data, int size, DB_BIGINT * len
   int pageid = 0;
   int slotid = 0;
   long long parsed_length = 0;
+  unsigned long long parsed_token = 0;
   int consumed = 0;
+  int token_consumed = 0;
   char *oid_part = NULL;
 
   if (length != NULL)
@@ -303,6 +305,10 @@ internal_lob_parse_locator_metadata (const char *data, int size, DB_BIGINT * len
   locator_buf[size] = '\0';
 
   oid_part = locator_buf + prefix_len;
+  if (oid_part[0] == 'A' && oid_part[1] == ':')
+    {
+      oid_part += 2;
+    }
 
   if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &parsed_length, &consumed) != 4
       || parsed_length < 0)
@@ -313,7 +319,10 @@ internal_lob_parse_locator_metadata (const char *data, int size, DB_BIGINT * len
   (void) pageid;
   (void) slotid;
 
-  if (prefix_len + consumed != size)
+  if (oid_part[consumed] != ':'
+      || sscanf (oid_part + consumed + 1, "%llx%n", &parsed_token, &token_consumed) != 1
+      || parsed_token == 0 || token_consumed <= 0
+      || oid_part[consumed + 1 + token_consumed] != '\0')
     {
       return false;
     }
@@ -5212,6 +5221,191 @@ cleanup:
     {
       *nread = 0;
     }
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
+int
+internal_lob_stream_open_from_server (const char *locator_data, int locator_len, INT64 * token)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT64_SIZE + OR_INT_SIZE) a_reply;
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *request = NULL;
+  char *locator_buf = NULL;
+  char *ptr = NULL;
+  int locator_strlen = 0;
+  int request_size = 0;
+  int err = NO_ERROR;
+
+  if (token == NULL)
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+  *token = 0;
+
+  if (locator_data == NULL || locator_len <= 0)
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+
+  locator_buf = (char *) malloc ((size_t) locator_len + 1);
+  if (locator_buf == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) locator_len + 1);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+  memcpy (locator_buf, locator_data, (size_t) locator_len);
+  locator_buf[locator_len] = '\0';
+
+  request_size = length_const_string (locator_buf, &locator_strlen);
+  request = (char *) malloc (request_size);
+  if (request == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) request_size);
+      err = ER_OUT_OF_VIRTUAL_MEMORY;
+      goto cleanup;
+    }
+  (void) pack_const_string_with_length (request, locator_buf, locator_strlen);
+
+  err = net_client_request (NET_SERVER_INTERNAL_LOB_STREAM_OPEN, request, request_size, reply,
+			    OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, NULL, 0);
+  if (err != NO_ERROR)
+    {
+      goto cleanup;
+    }
+
+  ptr = or_unpack_int64 (reply, token);
+  (void) or_unpack_int (ptr, &err);
+
+cleanup:
+  if (request != NULL)
+    {
+      free_and_init (request);
+    }
+  if (locator_buf != NULL)
+    {
+      free_and_init (locator_buf);
+    }
+
+  return err;
+#else
+  (void) locator_data;
+  (void) locator_len;
+  if (token != NULL)
+    {
+      *token = 0;
+    }
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
+int
+internal_lob_stream_read_from_server (INT64 token, char *buf, int count, int *nread)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT64_SIZE + OR_INT_SIZE) a_request;
+  OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
+  char *request = OR_ALIGNED_BUF_START (a_request);
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *data_reply = NULL;
+  char *ptr = NULL;
+  int data_size = 0;
+  int received = 0;
+  int err = NO_ERROR;
+
+  if (nread == NULL)
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+  *nread = 0;
+
+  if (token <= 0 || count < 0 || (buf == NULL && count > 0))
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+
+  ptr = or_pack_int64 (request, token);
+  (void) or_pack_int (ptr, count);
+
+  err =
+    net_client_request2 (NET_SERVER_INTERNAL_LOB_STREAM_READ, request, OR_ALIGNED_BUF_SIZE (a_request), reply,
+			 OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, &data_reply, &data_size);
+  if (err != NO_ERROR)
+    {
+      err = ER_FAILED;
+      goto cleanup;
+    }
+
+  ptr = or_unpack_int (reply, &received);
+  (void) or_unpack_int (ptr, &err);
+  if (err != NO_ERROR)
+    {
+      goto cleanup;
+    }
+  if (received < 0 || received > count || data_size != received || (received > 0 && data_reply == NULL))
+    {
+      err = ER_FAILED;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+      goto cleanup;
+    }
+
+  if (received > 0)
+    {
+      memcpy (buf, data_reply, (size_t) received);
+    }
+  *nread = received;
+
+cleanup:
+  if (data_reply != NULL)
+    {
+      free_and_init (data_reply);
+    }
+
+  return err;
+#else
+  (void) token;
+  (void) buf;
+  (void) count;
+  if (nread != NULL)
+    {
+      *nread = 0;
+    }
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
+  return ER_FAILED;
+#endif
+}
+
+int
+internal_lob_stream_close_from_server (INT64 token)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT64_SIZE) a_request;
+  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
+  char *request = OR_ALIGNED_BUF_START (a_request);
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  int err = NO_ERROR;
+
+  if (token <= 0)
+    {
+      return ER_OBJ_INVALID_ARGUMENTS;
+    }
+
+  (void) or_pack_int64 (request, token);
+
+  err = net_client_request (NET_SERVER_INTERNAL_LOB_STREAM_CLOSE, request, OR_ALIGNED_BUF_SIZE (a_request), reply,
+			    OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, NULL, 0);
+  if (err != NO_ERROR)
+    {
+      return err;
+    }
+
+  (void) or_unpack_int (reply, &err);
+  return err;
+#else
+  (void) token;
   er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_FAILED, 0);
   return ER_FAILED;
 #endif

@@ -28,6 +28,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <map>
+#include <mutex>
 
 #include "filesys.hpp"
 #include "filesys_temp.hpp"
@@ -116,6 +118,16 @@
 #define QEWC_SAFE_GUARD_SIZE 1024
 // To have the safe area is just a safe guard to avoid potential issues of bad size calculation.
 #define QEWC_MAX_DATA_SIZE  (DB_PAGESIZE - QEWC_SAFE_GUARD_SIZE)
+
+struct internal_lob_stream_cursor
+{
+  int tran_index = NULL_TRAN_INDEX;
+  INTERNAL_LOB_READER reader;
+};
+
+static std::mutex internal_lob_stream_mutex;
+static std::map<INT64, internal_lob_stream_cursor> internal_lob_stream_cursor_table;
+static INT64 internal_lob_stream_next_token = 1;
 
 /* This file is only included in the server.  So set the on_server flag on */
 unsigned int db_on_server = 1;
@@ -10028,6 +10040,218 @@ reply:
   };
   css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), buffer, nread,
 				     std::move (deleter));
+}
+
+static INT64
+sinternal_lob_stream_allocate_token (void)
+{
+  INT64 token = internal_lob_stream_next_token++;
+
+  if (internal_lob_stream_next_token <= 0)
+    {
+      internal_lob_stream_next_token = 1;
+    }
+
+  while (token <= 0 || internal_lob_stream_cursor_table.find (token) != internal_lob_stream_cursor_table.end ())
+    {
+      token = internal_lob_stream_next_token++;
+      if (internal_lob_stream_next_token <= 0)
+	{
+	  internal_lob_stream_next_token = 1;
+	}
+    }
+
+  return token;
+}
+
+/*
+ * sinternal_lob_stream_open - Open a forward-only server-side reader cursor.
+ *   Request : locator string
+ *   Reply   : token (int64) + err (int)
+ */
+void
+sinternal_lob_stream_open (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
+{
+  OR_ALIGNED_BUF (OR_INT64_SIZE + OR_INT_SIZE) a_reply;
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *locator_string = NULL;
+  char *ptr = NULL;
+  INT64 token = 0;
+  int err = NO_ERROR;
+  INTERNAL_LOB_LOCATOR locator;
+  internal_lob_stream_cursor cursor;
+
+  (void) reqlen;
+
+  (void) or_unpack_string_nocopy (request, &locator_string);
+  if (locator_string == NULL
+      || !internal_lob_parse_locator_string (locator_string, (int) strlen (locator_string), &locator))
+    {
+      err = ER_OBJ_INVALID_ARGUMENTS;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+      goto reply;
+    }
+
+  err = internal_lob_read_open (thread_p, locator, cursor.reader);
+  if (err != NO_ERROR)
+    {
+      goto reply;
+    }
+
+  cursor.tran_index = LOG_FIND_THREAD_TRAN_INDEX (thread_p);
+  {
+    std::lock_guard<std::mutex> lock (internal_lob_stream_mutex);
+    token = sinternal_lob_stream_allocate_token ();
+    internal_lob_stream_cursor_table[token] = cursor;
+  }
+
+reply:
+  ptr = or_pack_int64 (reply, token);
+  (void) or_pack_int (ptr, err);
+
+  if (err != NO_ERROR)
+    {
+      (void) return_error_to_client (thread_p, rid);
+    }
+  css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
+}
+
+/*
+ * sinternal_lob_stream_read - Read the next bytes from a server-side reader cursor.
+ *   Request : token (int64) + count (int)
+ *   Reply   : data_size (int) + err (int)
+ *   Data    : raw bytes when err is NO_ERROR and data_size > 0
+ */
+void
+sinternal_lob_stream_read (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
+{
+  OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT_SIZE) a_reply;
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *ptr = request;
+  char *buffer = NULL;
+  INT64 token = 0;
+  int count = 0;
+  int nread = 0;
+  int err = NO_ERROR;
+
+  if (reqlen != OR_INT64_SIZE + OR_INT_SIZE)
+    {
+      err = ER_OBJ_INVALID_ARGUMENTS;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+      goto reply;
+    }
+
+  ptr = or_unpack_int64 (ptr, &token);
+  (void) or_unpack_int (ptr, &count);
+
+  if (token <= 0 || count < 0)
+    {
+      err = ER_OBJ_INVALID_ARGUMENTS;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+      goto reply;
+    }
+
+  if (count > 0)
+    {
+      buffer = (char *) malloc ((size_t) count);
+      if (buffer == NULL)
+	{
+	  err = ER_OUT_OF_VIRTUAL_MEMORY;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 1, (size_t) count);
+	  goto reply;
+	}
+    }
+
+  {
+    std::lock_guard<std::mutex> lock (internal_lob_stream_mutex);
+    auto iter = internal_lob_stream_cursor_table.find (token);
+
+    if (iter == internal_lob_stream_cursor_table.end ()
+	|| iter->second.tran_index != LOG_FIND_THREAD_TRAN_INDEX (thread_p))
+      {
+	err = ER_OBJ_INVALID_ARGUMENTS;
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+	goto reply;
+      }
+
+    err = internal_lob_read_pull (thread_p, iter->second.reader, oos_buffer (buffer, (std::size_t) count), nread);
+    if (err != NO_ERROR)
+      {
+	nread = 0;
+	internal_lob_stream_cursor_table.erase (iter);
+      }
+  }
+
+reply:
+  ptr = or_pack_int (reply, nread);
+  (void) or_pack_int (ptr, err);
+
+  if (err != NO_ERROR)
+    {
+      (void) return_error_to_client (thread_p, rid);
+    }
+
+  auto deleter = [buffer]() noexcept
+  {
+    if (buffer != NULL)
+      {
+	free (buffer);
+      }
+  };
+  css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), buffer, nread,
+				     std::move (deleter));
+}
+
+/*
+ * sinternal_lob_stream_close - Close a server-side reader cursor.
+ *   Request : token (int64)
+ *   Reply   : err (int)
+ */
+void
+sinternal_lob_stream_close (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
+{
+  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  INT64 token = 0;
+  int err = NO_ERROR;
+
+  if (reqlen != OR_INT64_SIZE)
+    {
+      err = ER_OBJ_INVALID_ARGUMENTS;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+      goto reply;
+    }
+
+  (void) or_unpack_int64 (request, &token);
+  if (token <= 0)
+    {
+      err = ER_OBJ_INVALID_ARGUMENTS;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+      goto reply;
+    }
+
+  {
+    std::lock_guard<std::mutex> lock (internal_lob_stream_mutex);
+    auto iter = internal_lob_stream_cursor_table.find (token);
+
+    if (iter == internal_lob_stream_cursor_table.end ()
+	|| iter->second.tran_index != LOG_FIND_THREAD_TRAN_INDEX (thread_p))
+      {
+	err = ER_OBJ_INVALID_ARGUMENTS;
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+	goto reply;
+      }
+
+    internal_lob_stream_cursor_table.erase (iter);
+  }
+
+reply:
+  (void) or_pack_int (reply, err);
+  if (err != NO_ERROR)
+    {
+      (void) return_error_to_client (thread_p, rid);
+    }
+  css_send_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply));
 }
 
 /*
