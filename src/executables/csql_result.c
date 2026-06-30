@@ -552,6 +552,30 @@ fprint_internal_lob_stream_blob_hex (FILE * pf, const char *data, int data_len, 
 }
 
 static int
+fprint_internal_lob_stream_blob_bits (FILE * pf, const char *data, int data_len, DB_BIGINT * emitted_bits,
+				      DB_BIGINT total_bits)
+{
+  int i;
+
+  for (i = 0; i < data_len && *emitted_bits < total_bits; i++)
+    {
+      unsigned char ch = (unsigned char) data[i];
+      int bit;
+
+      for (bit = 7; bit >= 0 && *emitted_bits < total_bits; bit--)
+	{
+	  if (fputc (((ch >> bit) & 0x01) ? '1' : '0', pf) == EOF)
+	    {
+	      return CSQL_FAILURE;
+	    }
+	  (*emitted_bits)++;
+	}
+    }
+
+  return CSQL_SUCCESS;
+}
+
+static int
 fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * csql_arg)
 {
   char lob_type = '\0';
@@ -561,7 +585,9 @@ fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * c
   DB_BIGINT bit_length = 0;
   DB_BIGINT offset = 0;
   DB_BIGINT emitted_nibbles = 0;
+  DB_BIGINT emitted_bits = 0;
   DB_BIGINT total_nibbles = 0;
+  bool blob_as_binary_literal = false;
   char *buffer = NULL;
   int buffer_size = CSQL_INTERNAL_LOB_STREAM_CHUNK_SIZE;
   bool plain_output = csql_arg->plain_output;
@@ -573,6 +599,10 @@ fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * c
   INTERNAL_LOB_READER reader;
   THREAD_ENTRY *thread_p = thread_get_thread_entry_info ();
 #endif /* SA_MODE */
+#if defined (CS_MODE)
+  INT64 stream_token = 0;
+  bool stream_opened = false;
+#endif /* CS_MODE */
 
   if (!csql_db_value_is_internal_lob_locator (value, &lob_type, &locator, &locator_len, &data_len, &bit_length)
       && !csql_db_value_is_internal_lob_stream_marker (value, &lob_type, &locator, &locator_len, &data_len,
@@ -584,10 +614,15 @@ fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * c
     {
       return CSQL_FAILURE;
     }
+  if (lob_type == 'B')
+    {
+      total_nibbles = (bit_length + 3) / 4;
+      blob_as_binary_literal = (bit_length % 4 != 0);
+    }
 
   if (!plain_output)
     {
-      if (lob_type == 'B' && fputc ('X', pf) == EOF)
+      if (lob_type == 'B' && fputc (blob_as_binary_literal ? 'B' : 'X', pf) == EOF)
 	{
 	  return CSQL_FAILURE;
 	}
@@ -618,15 +653,17 @@ fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * c
 	  error = CSQL_FAILURE;
 	  goto exit;
 	}
-#elif !defined (CS_MODE)
+#elif defined (CS_MODE)
+      if (internal_lob_stream_open_from_server (locator, locator_len, &stream_token) != NO_ERROR)
+	{
+	  error = CSQL_FAILURE;
+	  goto exit;
+	}
+      stream_opened = true;
+#else
       error = CSQL_FAILURE;
       goto exit;
-#endif /* !CS_MODE */
-    }
-
-  if (lob_type == 'B')
-    {
-      total_nibbles = (bit_length + 3) / 4;
+#endif /* SA_MODE */
     }
 
   while (offset < data_len)
@@ -643,7 +680,7 @@ fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * c
 	  goto exit;
 	}
 #elif defined (CS_MODE)
-      if (internal_lob_read_from_server (locator, locator_len, offset, buffer, request_size, &nread) != NO_ERROR)
+      if (internal_lob_stream_read_from_server (stream_token, buffer, request_size, &nread) != NO_ERROR)
 	{
 	  error = CSQL_FAILURE;
 	  goto exit;
@@ -672,7 +709,15 @@ fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * c
 	}
       else
 	{
-	  if (fprint_internal_lob_stream_blob_hex (pf, buffer, nread, &emitted_nibbles, total_nibbles) != CSQL_SUCCESS)
+	  if (blob_as_binary_literal)
+	    {
+	      if (fprint_internal_lob_stream_blob_bits (pf, buffer, nread, &emitted_bits, bit_length) != CSQL_SUCCESS)
+		{
+		  error = CSQL_FAILURE;
+		  goto exit;
+		}
+	    }
+	  else if (fprint_internal_lob_stream_blob_hex (pf, buffer, nread, &emitted_nibbles, total_nibbles) != CSQL_SUCCESS)
 	    {
 	      error = CSQL_FAILURE;
 	      goto exit;
@@ -688,6 +733,15 @@ fprint_internal_lob_stream (FILE * pf, DB_VALUE * value, const CSQL_ARGUMENT * c
     }
 
 exit:
+#if defined (CS_MODE)
+  if (stream_opened)
+    {
+      if (internal_lob_stream_close_from_server (stream_token) != NO_ERROR && error == CSQL_SUCCESS)
+	{
+	  error = CSQL_FAILURE;
+	}
+    }
+#endif /* CS_MODE */
   if (buffer != NULL)
     {
       free_and_init (buffer);

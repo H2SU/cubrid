@@ -676,6 +676,18 @@ net_server_init (void)
   req_p->action_attribute = IN_TRANSACTION;
   req_p->processing_function = sinternal_lob_read;
 
+  req_p = &net_Requests[NET_SERVER_INTERNAL_LOB_STREAM_OPEN];
+  req_p->action_attribute = IN_TRANSACTION;
+  req_p->processing_function = sinternal_lob_stream_open;
+
+  req_p = &net_Requests[NET_SERVER_INTERNAL_LOB_STREAM_READ];
+  req_p->action_attribute = IN_TRANSACTION;
+  req_p->processing_function = sinternal_lob_stream_read;
+
+  req_p = &net_Requests[NET_SERVER_INTERNAL_LOB_STREAM_CLOSE];
+  req_p->action_attribute = IN_TRANSACTION;
+  req_p->processing_function = sinternal_lob_stream_close;
+
   req_p = &net_Requests[NET_SERVER_INTERNAL_LOB_UPLOAD_BEGIN];
   req_p->processing_function = sloaddb_internal_lob_upload_begin;
 
