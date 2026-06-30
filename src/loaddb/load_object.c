@@ -49,7 +49,9 @@
 #include "server_interface.h"
 #include "load_object.h"
 #include "db_value_printer.hpp"
+#include "internal_lob_marker.h"
 #include "network_interface_cl.h"
+#include "oid.h"
 #include "printer.hpp"
 
 #include "message_catalog.h"
@@ -59,6 +61,7 @@
 #endif
 
 #define MIGRATION_CHUNK 4096
+#define LOAD_INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
 static char migration_buffer[MIGRATION_CHUNK];
 
 static int object_disk_size (DESC_OBJ * obj, int *offset_size_ptr);
@@ -73,9 +76,8 @@ static void init_load_err_filter (void);
 static void default_clear_err_filter (void);
 
 static int desc_get_var_table_raw_offset (char *var_table, int index, int offset_size);
+static int desc_format_internal_lob_locator (const OID *oid, DB_BIGINT logical_length, char *buf, size_t buf_size);
 static int desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type);
-
-#define DESC_INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
 
 #if (MAJOR_VERSION >= 11) || (MAJOR_VERSION == 10 && MINOR_VERSION >= 1)
 extern int data_readval_string (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int size, bool copy, char *copy_buf,
@@ -102,12 +104,52 @@ desc_get_var_table_raw_offset (char *var_table, int index, int offset_size)
     }
 }
 
+static unsigned long long
+desc_internal_lob_mix_u64 (unsigned long long value)
+{
+  value ^= value >> 33;
+  value *= 0xff51afd7ed558ccdULL;
+  value ^= value >> 33;
+  value *= 0xc4ceb9fe1a85ec53ULL;
+  value ^= value >> 33;
+  return value;
+}
+
+static unsigned long long
+desc_internal_lob_locator_token (const OID *oid, DB_BIGINT logical_length)
+{
+  unsigned long long token = 0x26914cbfd15cafe1ULL;
+
+  token ^= (unsigned long long) (unsigned short) oid->volid;
+  token = desc_internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) (unsigned int) oid->pageid;
+  token = desc_internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) (unsigned short) oid->slotid;
+  token = desc_internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) logical_length;
+  token = desc_internal_lob_mix_u64 (token);
+  token ^= 0x10c07edULL;
+  token = desc_internal_lob_mix_u64 (token);
+
+  return token == 0 ? 1 : token;
+}
+
+static int
+desc_format_internal_lob_locator (const OID *oid, DB_BIGINT logical_length, char *buf, size_t buf_size)
+{
+  unsigned long long token = desc_internal_lob_locator_token (oid, logical_length);
+
+  return snprintf (buf, buf_size, LOAD_INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld:%016llx",
+		   (int) oid->volid, (int) oid->pageid, (int) oid->slotid, (long long) logical_length, token);
+}
+
 static int
 desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type)
 {
   OR_BUF locator_buf;
-  OID oid;
-  DB_BIGINT length;
+  OID locator_oid;
+  DB_BIGINT disk_length;
+  DB_BIGINT logical_length;
   char stack_buf[128];
   char *locator_buf_string = NULL;
   int locator_len;
@@ -121,8 +163,8 @@ desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type
     }
 
   or_init (&locator_buf, buf->ptr, OR_OOS_INLINE_SIZE);
-  or_get_oid (&locator_buf, &oid);
-  length = or_get_bigint (&locator_buf, &rc);
+  or_get_oid (&locator_buf, &locator_oid);
+  disk_length = or_get_bigint (&locator_buf, &rc);
   if (rc != NO_ERROR)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
@@ -131,14 +173,14 @@ desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type
 
   or_advance (buf, OR_OOS_INLINE_SIZE);
 
-  if (length < 0)
+  if (disk_length < 0)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
       return ER_GENERIC_ERROR;
     }
+  logical_length = disk_length;
 
-  locator_len = snprintf (stack_buf, sizeof (stack_buf), DESC_INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld",
-			  (int) oid.volid, (int) oid.pageid, (int) oid.slotid, (long long) length);
+  locator_len = desc_format_internal_lob_locator (&locator_oid, logical_length, stack_buf, sizeof (stack_buf));
   if (locator_len <= 0 || locator_len >= (int) sizeof (stack_buf))
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
@@ -174,6 +216,7 @@ desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type
     }
 
   value->need_clear = true;
+  db_value_mark_internal_lob (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR);
   return NO_ERROR;
 }
 

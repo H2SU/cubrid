@@ -12241,14 +12241,11 @@ file_tracker_item_spacedb (THREAD_ENTRY * thread_p, PAGE_PTR page_of_item, FILE_
       break;
     case FILE_OOS:
     case FILE_INTERNAL_LOB:
-      assert_release (false);
-      //TODO: spacedb_ftype = SPACEDB_OOS_FILE;
+      /*
+       * SPACEDB has no separate OOS bucket.  Count OOS-style files as heap-related user data instead of asserting;
+       * FILE_INTERNAL_LOB is a normal persistent data file and must be traversable by spacedb/checkdb.
+       */
       spacedb_ftype = SPACEDB_HEAP_FILE;
-      // TODO oos: why heap file, instead of OOS file?
-      // I did not add SPACEDB_OOS_FILE yet, and
-      // if spacedb_ftype is not initialized,
-      // the build fails in github cubridci.
-      // This is just a workaround.
       break;
     case FILE_HEAP:
     case FILE_HEAP_REUSE_SLOTS:

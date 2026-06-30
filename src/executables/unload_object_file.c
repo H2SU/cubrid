@@ -708,34 +708,7 @@ need_append_dot (const char *val)
 static bool
 internal_lob_unload_is_locator_key (const char *data, int size)
 {
-  char locator_buf[128];
-  int volid, pageid, slotid;
-  long long length;
-  int consumed = 0;
-  int prefix_len = (int) strlen (INTERNAL_LOB_UNLOAD_LOCATOR_PREFIX);
-
-  if (data == NULL || size <= prefix_len || size >= (int) sizeof (locator_buf))
-    {
-      return false;
-    }
-  if (memcmp (data, INTERNAL_LOB_UNLOAD_LOCATOR_PREFIX, (size_t) prefix_len) != 0)
-    {
-      return false;
-    }
-
-  memcpy (locator_buf, data, (size_t) size);
-  locator_buf[size] = '\0';
-
-  if (sscanf (locator_buf + prefix_len, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &length, &consumed) != 4)
-    {
-      return false;
-    }
-  if (prefix_len + consumed != size || length < 0)
-    {
-      return false;
-    }
-
-  return true;
+  return internal_lob_unload_parse_locator_metadata (data, size, NULL, NULL);
 }
 
 int
@@ -816,7 +789,9 @@ internal_lob_unload_parse_locator_metadata (const char *data, int size, DB_BIGIN
   int pageid = 0;
   int slotid = 0;
   long long parsed_length = 0;
+  unsigned long long parsed_token = 0;
   int consumed = 0;
+  int token_consumed = 0;
   int prefix_len = (int) strlen (INTERNAL_LOB_UNLOAD_LOCATOR_PREFIX);
   char *oid_part = NULL;
 
@@ -842,6 +817,10 @@ internal_lob_unload_parse_locator_metadata (const char *data, int size, DB_BIGIN
   locator_buf[size] = '\0';
 
   oid_part = locator_buf + prefix_len;
+  if (oid_part[0] == 'A' && oid_part[1] == ':')
+    {
+      oid_part += 2;
+    }
 
   if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &parsed_length, &consumed) != 4
       || parsed_length < 0)
@@ -852,7 +831,10 @@ internal_lob_unload_parse_locator_metadata (const char *data, int size, DB_BIGIN
   (void) pageid;
   (void) slotid;
 
-  if (prefix_len + consumed != size)
+  if (oid_part[consumed] != ':'
+      || sscanf (oid_part + consumed + 1, "%llx%n", &parsed_token, &token_consumed) != 1
+      || parsed_token == 0 || token_consumed <= 0
+      || oid_part[consumed + 1 + token_consumed] != '\0')
     {
       return false;
     }
