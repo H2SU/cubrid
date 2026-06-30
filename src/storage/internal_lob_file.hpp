@@ -79,6 +79,7 @@ extern int internal_lob_insert_append (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRIT
 extern int internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer,
                                     INTERNAL_LOB_LOCATOR &locator, DB_TYPE lob_type = DB_TYPE_CLOB,
                                     DB_BIGINT logical_length = -1);
+extern void internal_lob_insert_abort (INTERNAL_LOB_WRITER &writer);
 extern int internal_lob_read (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, oos_buffer dest);
 extern int internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT offset,
                                     oos_buffer dest, int &nread);
@@ -91,6 +92,8 @@ extern int internal_lob_get_length (THREAD_ENTRY *thread_p, const INTERNAL_LOB_L
 extern bool internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCATOR *locator);
 extern bool internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *locator);
 extern bool internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *pending);
+extern int internal_lob_format_locator_string (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size,
+                                               bool adopted = false);
 inline bool
 internal_lob_is_valid_blob_bit_length (DB_BIGINT data_length, DB_BIGINT bit_length)
 {

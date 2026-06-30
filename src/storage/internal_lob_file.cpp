@@ -28,6 +28,7 @@
 #include "error_manager.h"
 #include "file_manager.h"
 #include "filesys_temp.hpp"
+#include "internal_lob_marker.h"
 #include "memory_alloc.h"
 #include "object_primitive.h"
 #include "object_representation.h"
@@ -127,6 +128,12 @@ internal_lob_writer_clear (INTERNAL_LOB_WRITER &writer)
   VFID_SET_NULL (&writer.lob_vfid);
 }
 
+void
+internal_lob_insert_abort (INTERNAL_LOB_WRITER &writer)
+{
+  internal_lob_writer_clear (writer);
+}
+
 static int
 internal_lob_get_segment_size (int &segment_size)
 {
@@ -141,14 +148,58 @@ internal_lob_get_segment_size (int &segment_size)
   return NO_ERROR;
 }
 
-static int
-internal_lob_format_locator (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size, bool adopted = false)
+static unsigned long long
+internal_lob_mix_u64 (unsigned long long value)
+{
+  value ^= value >> 33;
+  value *= 0xff51afd7ed558ccdULL;
+  value ^= value >> 33;
+  value *= 0xc4ceb9fe1a85ec53ULL;
+  value ^= value >> 33;
+  return value;
+}
+
+static unsigned long long
+internal_lob_locator_secret (void)
+{
+  return 0x26914cbfd15cafe1ULL;
+}
+
+static unsigned long long
+internal_lob_locator_token (const INTERNAL_LOB_LOCATOR &locator, bool adopted)
+{
+  unsigned long long token = internal_lob_locator_secret ();
+
+  token ^= (unsigned long long) (unsigned short) locator.oid.volid;
+  token = internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) (unsigned int) locator.oid.pageid;
+  token = internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) (unsigned short) locator.oid.slotid;
+  token = internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) locator.length;
+  token = internal_lob_mix_u64 (token);
+  token ^= adopted ? 0xad0f7edULL : 0x10c07edULL;
+  token = internal_lob_mix_u64 (token);
+
+  if (token == 0)
+    {
+      token = 1;
+    }
+
+  return token;
+}
+
+int
+internal_lob_format_locator_string (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size, bool adopted)
 {
   const char *adopt_marker = adopted ? "A:" : "";
+  unsigned long long token;
 
-  return snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%s%d|%d|%d:%lld", adopt_marker,
-                   (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
-                   (long long) locator.length);
+  token = internal_lob_locator_token (locator, adopted);
+
+  return snprintf (buf, buf_size, INTERNAL_LOB_LOCATOR_PREFIX "%s%d|%d|%d:%lld:%016llx", adopt_marker,
+		   (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
+		   (long long) locator.length, token);
 }
 
 static void
@@ -518,6 +569,7 @@ internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, IN
 	  internal_lob_writer_clear (writer);
 	  return err;
 	}
+      oos_push_oos_oid (thread_p, &current_oid);
       next_oid = current_oid;
     }
 
@@ -804,11 +856,14 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
   char locator_buf[128];
   int volid, pageid, slotid;
   long long length;
+  unsigned long long parsed_token = 0;
   int consumed = 0;
+  int token_consumed = 0;
   int prefix_len = (int) strlen (INTERNAL_LOB_LOCATOR_PREFIX);
   int marker_len = 0;
   bool adopted = false;
   char *oid_part;
+  INTERNAL_LOB_LOCATOR parsed_locator;
 
   if (data == NULL || size <= prefix_len || size >= (int) sizeof (locator_buf))
     {
@@ -834,18 +889,30 @@ internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCA
     {
       return false;
     }
-  if (length < 0 || prefix_len + marker_len + consumed != size)
+  if (length < 0 || oid_part[consumed] != ':')
+    {
+      return false;
+    }
+  if (sscanf (oid_part + consumed + 1, "%llx%n", &parsed_token, &token_consumed) != 1 || parsed_token == 0
+      || oid_part[consumed + 1 + token_consumed] != '\0'
+      || prefix_len + marker_len + consumed + 1 + token_consumed != size)
+    {
+      return false;
+    }
+
+  parsed_locator.oid.volid = (VOLID) volid;
+  parsed_locator.oid.pageid = (PAGEID) pageid;
+  parsed_locator.oid.slotid = (PGSLOTID) slotid;
+  parsed_locator.length = (DB_BIGINT) length;
+  parsed_locator.adopted = adopted;
+  if (parsed_token != internal_lob_locator_token (parsed_locator, adopted))
     {
       return false;
     }
 
   if (locator != NULL)
     {
-      locator->oid.volid = (VOLID) volid;
-      locator->oid.pageid = (PAGEID) pageid;
-      locator->oid.slotid = (PGSLOTID) slotid;
-      locator->length = (DB_BIGINT) length;
-      locator->adopted = adopted;
+      *locator = parsed_locator;
     }
   return true;
 }
@@ -857,7 +924,8 @@ internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *l
   const char *data = NULL;
   int size = 0;
 
-  if (value == NULL || DB_IS_NULL (value))
+  if (value == NULL || DB_IS_NULL (value)
+      || !db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR))
     {
       return false;
     }
@@ -897,6 +965,10 @@ internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *p
   size_t locator_len;
 
   if (value == NULL || DB_IS_NULL (value))
+    {
+      return false;
+    }
+  if (!db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_PENDING))
     {
       return false;
     }
@@ -1006,7 +1078,7 @@ internal_lob_make_locator_db_value_internal (DB_VALUE *value, DB_TYPE lob_type, 
   int locator_len;
   int err;
 
-  locator_len = internal_lob_format_locator (locator, stack_buf, sizeof (stack_buf), adopted);
+  locator_len = internal_lob_format_locator_string (locator, stack_buf, sizeof (stack_buf), adopted);
   if (locator_len <= 0 || locator_len >= (int) sizeof (stack_buf))
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
@@ -1042,6 +1114,7 @@ internal_lob_make_locator_db_value_internal (DB_VALUE *value, DB_TYPE lob_type, 
     }
 
   value->need_clear = true;
+  db_value_mark_internal_lob (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR);
   return NO_ERROR;
 }
 
