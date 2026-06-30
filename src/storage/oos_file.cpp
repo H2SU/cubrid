@@ -1458,17 +1458,33 @@ oos_read_pull (THREAD_ENTRY *thread_p, OOS_READER &reader, oos_buffer dest, int 
       const auto [pageid, slotid, volid] = reader.current;
       auto vpid = VPID{pageid, volid};
 
-      PAGE_PTR page_ptr = pgbuf_fix (thread_p, &vpid, OLD_PAGE, PGBUF_LATCH_READ, PGBUF_UNCONDITIONAL_LATCH);
+      /* OLD_PAGE_MAYBE_DEALLOCATED: the OID may be forged from a CLOB/BLOB value
+       * (e.g. char_to_clob('@internal_lob:...'), CBRD-26914) and point at a
+       * deallocated or unrelated page. Fetch without asserting so that a bogus OID is
+       * rejected cleanly below instead of crashing the server inside pgbuf_fix. */
+      PAGE_PTR page_ptr = pgbuf_fix (thread_p, &vpid, OLD_PAGE_MAYBE_DEALLOCATED, PGBUF_LATCH_READ,
+				     PGBUF_UNCONDITIONAL_LATCH);
       if (page_ptr == nullptr)
 	{
 	  oos_error ("oos_read_pull: pgbuf_fix failed at oid={vol=%d,page=%d,slot=%d}", OID_AS_ARGS (&reader.current));
-	  assert_release_error (er_errid () != NO_ERROR);
+	  if (er_errid () == NO_ERROR)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	    }
 	  return er_errid ();
 	}
       scope_exit page_unfixer ([&]()
       {
 	pgbuf_unfix_and_init_after_check (thread_p, page_ptr);
       });
+
+      if (pgbuf_get_page_ptype (thread_p, page_ptr) != PAGE_OOS)
+	{
+	  /* Not a live OOS page: a forged or stale locator OID. Reject cleanly. */
+	  oos_error ("oos_read_pull: non-OOS page at oid={vol=%d,page=%d,slot=%d}", OID_AS_ARGS (&reader.current));
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	  return ER_GENERIC_ERROR;
+	}
 
       OOS_RECDES oos_recdes;
       SCAN_CODE code = spage_get_record (thread_p, page_ptr, slotid, &oos_recdes, PEEK);
