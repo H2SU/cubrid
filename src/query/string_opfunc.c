@@ -50,6 +50,7 @@
 #include "object_primitive.h"
 #include "object_representation.h"
 #include "dbtype.h"
+#include "internal_lob_marker.h"
 #include "elo.h"
 #include "es_common.h"
 #include "db_elo.h"
@@ -17892,6 +17893,7 @@ lobfile_make_file_source_value (const char *path, INT64 file_size, DB_TYPE lob_t
     }
 
   result_value->need_clear = true;
+  db_value_mark_internal_lob (result_value, DB_VALUE_INTERNAL_LOB_MARKER_FILE_SOURCE);
   return NO_ERROR;
 }
 
@@ -17970,6 +17972,7 @@ lobfile_to_pending_lob (const DB_VALUE * lobfile_value, DB_TYPE lob_type, DB_VAL
     }
 
   result_value->need_clear = true;
+  db_value_mark_internal_lob (result_value, DB_VALUE_INTERNAL_LOB_MARKER_PENDING);
   return NO_ERROR;
 }
 
@@ -25070,9 +25073,7 @@ internal_lob_make_scalar_stream_marker (const INTERNAL_LOB_LOCATOR & locator, ch
   assert (result_value != NULL);
   assert (lob_type == 'B' || lob_type == 'C');
 
-  locator_len = snprintf (locator_buf, sizeof (locator_buf), INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld",
-			  (int) locator.oid.volid, (int) locator.oid.pageid, (int) locator.oid.slotid,
-			  (long long) locator.length);
+  locator_len = internal_lob_format_locator_string (locator, locator_buf, sizeof (locator_buf), false);
   if (locator_len <= 0 || locator_len >= (int) sizeof (locator_buf))
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
@@ -25113,6 +25114,7 @@ internal_lob_make_scalar_stream_marker (const INTERNAL_LOB_LOCATOR & locator, ch
     }
 
   result_value->need_clear = true;
+  db_value_mark_internal_lob (result_value, DB_VALUE_INTERNAL_LOB_MARKER_STREAM);
   return NO_ERROR;
 }
 

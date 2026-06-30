@@ -11612,6 +11612,8 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
       pt_init_assignments_helper (parser, &ea, node->info.merge.update.assignment);
       while ((t_node = pt_get_next_assignment (&ea)) != NULL)
 	{
+	  PT_NODE *rhs = ea.rhs;
+
 	  entity = pt_find_spec_in_statement (parser, node, t_node);
 
 	  if (entity == NULL)
@@ -11625,6 +11627,14 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	    {
 	      PT_ERRORm (parser, t_node, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_MERGE_CANT_AFFECT_SOURCE_TABLE);
 	      break;
+	    }
+	  if (rhs != NULL && rhs->node_type == PT_EXPR && PT_IS_LOB_TYPE (t_node->type_enum))
+	    {
+	      if ((t_node->type_enum == PT_TYPE_CLOB && rhs->info.expr.op == PT_CLOB_FROM_FILE)
+		  || (t_node->type_enum == PT_TYPE_BLOB && rhs->info.expr.op == PT_BLOB_FROM_FILE))
+		{
+		  PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
+		}
 	    }
 	}
       if (pt_has_error (parser))
@@ -17445,7 +17455,7 @@ pt_get_assignments (PT_NODE * node, bool * dblinked)
 PT_NODE *
 pt_check_odku_assignments (PARSER_CONTEXT * parser, PT_NODE * insert)
 {
-  PT_NODE *assignment, *spec, *lhs;
+  PT_NODE *assignment, *spec, *lhs, *rhs;
   if (insert == NULL || insert->node_type != PT_INSERT)
     {
       return insert;
@@ -17482,6 +17492,15 @@ pt_check_odku_assignments (PARSER_CONTEXT * parser, PT_NODE * insert)
 	  assert (false);
 	  PT_INTERNAL_ERROR (parser, "semantic");
 	  return NULL;
+	}
+      rhs = assignment->info.expr.arg2;
+      if (rhs != NULL && rhs->node_type == PT_EXPR && PT_IS_LOB_TYPE (lhs->type_enum))
+	{
+	  if ((lhs->type_enum == PT_TYPE_CLOB && rhs->info.expr.op == PT_CLOB_FROM_FILE)
+	      || (lhs->type_enum == PT_TYPE_BLOB && rhs->info.expr.op == PT_BLOB_FROM_FILE))
+	    {
+	      PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
+	    }
 	}
       if (lhs->info.name.spec_id != spec->info.spec.id)
 	{

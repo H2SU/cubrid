@@ -77,6 +77,7 @@
 #include "probes.h"
 #endif /* ENABLE_SYSTEMTAP */
 #include "dbtype.h"
+#include "internal_lob_marker.h"
 #include "thread_manager.hpp"	// for thread_get_thread_entry_info
 #include "db_value_printer.hpp"
 #include "internal_lob_file.hpp"
@@ -12609,7 +12610,8 @@ heap_internal_lob_parse_file_source (const DB_VALUE * value, HEAP_INTERNAL_LOB_F
   long long bit_length;
   size_t path_len;
 
-  if (value == NULL || source == NULL || DB_IS_NULL (value))
+  if (value == NULL || source == NULL || DB_IS_NULL (value)
+      || !db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_FILE_SOURCE))
     {
       return false;
     }
@@ -12941,20 +12943,105 @@ heap_internal_lob_insert_stream (THREAD_ENTRY * thread_p, const OID * class_oid,
   return error;
 
 error_exit:
-  if (writer.spill_file != NULL)
+  internal_lob_insert_abort (writer);
+  return error;
+}
+
+/*
+ * heap_internal_lob_clone_locator () - Copy an existing internal LOB locator to the target class LOB file by
+ *				      streaming, without materializing the payload into a DB_VALUE.
+ *   return: NO_ERROR, or error code
+ *   thread_p(in): thread entry
+ *   class_oid(in): class OID owning the target heap
+ *   lob_type(in): DB_TYPE_BLOB or DB_TYPE_CLOB
+ *   source_locator(in): source internal LOB locator
+ *   locator(out): newly inserted locator for the target class
+ *
+ * Note:
+ *   This is the copy path for INSERT ... SELECT and UPDATE c2 = c1.  A 2GiB+ locator cannot be copied through
+ *   internal_lob_read_db_value(), because DB_VALUE string/bit containers still use int-sized lengths.
+ */
+static int
+heap_internal_lob_clone_locator (THREAD_ENTRY * thread_p, const OID * class_oid, DB_TYPE lob_type,
+				 const INTERNAL_LOB_LOCATOR * source_locator, INTERNAL_LOB_LOCATOR * locator)
+{
+  HFID hfid;
+  VFID lob_vfid;
+  INTERNAL_LOB_READER reader;
+  INTERNAL_LOB_WRITER writer;
+  char buffer[64 * 1024];
+  int error = NO_ERROR;
+
+  if (class_oid == NULL || source_locator == NULL || locator == NULL
+      || (lob_type != DB_TYPE_BLOB && lob_type != DB_TYPE_CLOB) || source_locator->length < 0)
     {
-      fclose (writer.spill_file);
-      writer.spill_file = NULL;
+      error = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+      return error;
     }
-  if (!writer.spill_path.empty ())
+
+  if (source_locator->length == 0 && OID_ISNULL (&source_locator->oid))
     {
-      (void) remove (writer.spill_path.c_str ());
-      writer.spill_path.clear ();
+      *locator = *source_locator;
+      locator->adopted = false;
+      return NO_ERROR;
     }
-  if (writer.segment_buffer != NULL)
+
+  if (heap_get_class_info (thread_p, class_oid, &hfid, NULL, NULL) != NO_ERROR)
     {
-      db_private_free_and_init (NULL, writer.segment_buffer);
+      ASSERT_ERROR_AND_SET (error);
+      return error;
     }
+
+  VFID_SET_NULL (&lob_vfid);
+  if (!heap_internal_lob_find_vfid (thread_p, &hfid, &lob_vfid, true))
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+
+  error = internal_lob_read_open (thread_p, *source_locator, reader);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  error = internal_lob_insert_begin (thread_p, lob_vfid, writer);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  while (reader.total_read < reader.total_bytes)
+    {
+      int nread = 0;
+      DB_BIGINT remaining = reader.total_bytes - reader.total_read;
+      int request_size = remaining > (DB_BIGINT) sizeof (buffer) ? (int) sizeof (buffer) : (int) remaining;
+
+      error = internal_lob_read_pull (thread_p, reader, oos_buffer (buffer, (std::size_t) request_size), nread);
+      if (error != NO_ERROR)
+	{
+	  goto error_exit;
+	}
+      if (nread <= 0 || nread > request_size)
+	{
+	  error = ER_GENERIC_ERROR;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
+	  goto error_exit;
+	}
+
+      error = internal_lob_insert_append (thread_p, writer, oos_buffer (buffer, (std::size_t) nread));
+      if (error != NO_ERROR)
+	{
+	  goto error_exit;
+	}
+    }
+
+  error = internal_lob_insert_end (thread_p, writer, *locator, lob_type, source_locator->length);
+  return error;
+
+error_exit:
+  internal_lob_insert_abort (writer);
   return error;
 }
 
@@ -12978,7 +13065,6 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
   VFID lob_vfid;
   INTERNAL_LOB_WRITER writer;
   INTERNAL_LOB_LOCATOR source_locator;
-  DB_VALUE materialized_value;
   const DB_VALUE *source_value = value;
   const char *raw_data = NULL;
   INTERNAL_LOB_PENDING pending_source;
@@ -12987,7 +13073,7 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
   int raw_length = 0;
   int raw_bit_length = -1;
   int error = NO_ERROR;
-  bool need_clear_materialized = false;
+  bool writer_started = false;
 
   if (class_oid == NULL || value == NULL || locator == NULL || DB_IS_NULL (value))
     {
@@ -12998,7 +13084,6 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
 
   type = DB_VALUE_DOMAIN_TYPE (value);
 
-  db_make_null (&materialized_value);
   if (internal_lob_db_value_is_pending (value, &pending_source))
     {
       if (pending_source.lob_type != type)
@@ -13030,13 +13115,7 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
 	  return NO_ERROR;
 	}
 
-      error = internal_lob_read_db_value (thread_p, source_locator, type, &materialized_value, NULL);
-      if (error != NO_ERROR)
-	{
-	  return error;
-	}
-      source_value = &materialized_value;
-      need_clear_materialized = true;
+      return heap_internal_lob_clone_locator (thread_p, class_oid, type, &source_locator, locator);
     }
 
   if (type == DB_TYPE_CLOB)
@@ -13090,6 +13169,7 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
     {
       goto exit;
     }
+  writer_started = true;
 
   if (raw_length > 0)
     {
@@ -13104,9 +13184,9 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
 				   type == DB_TYPE_BLOB ? (DB_BIGINT) raw_bit_length : (DB_BIGINT) raw_length);
 
 exit:
-  if (need_clear_materialized)
+  if (error != NO_ERROR && writer_started)
     {
-      pr_clear_value (&materialized_value);
+      internal_lob_insert_abort (writer);
     }
 
   return error;
@@ -13242,6 +13322,7 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
       if ((*oos_columns)[i])
 	{
 	  bool is_internal_lob = TP_IS_LOB_TYPE (TP_DOMAIN_TYPE (attr_info->values[i].last_attrepr->domain));
+	  size_t oos_oid_count_before = thread_p->oos_oids.size ();
 
 	  assert (attr_info->values != NULL && !db_value_is_null (&attr_info->values[i].dbvalue));
 	  assert (!attr_info->values[i].last_attrepr->is_fixed);
@@ -13294,7 +13375,10 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
 		}
 	    }
 
-	  thread_p->oos_oids.push_back (oos_oid);	/* for replication log */
+	  if (!is_internal_lob || thread_p->oos_oids.size () == oos_oid_count_before)
+	    {
+	      thread_p->oos_oids.push_back (oos_oid);	/* for replication log */
+	    }
 	  (*oos_oids)[i] = oos_oid;
 	}
     }
