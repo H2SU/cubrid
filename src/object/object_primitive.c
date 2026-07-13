@@ -2115,8 +2115,8 @@ pr_clear_value (DB_VALUE * value)
 	  value->data.ch.medium.buf = NULL;
 	}
 
-      /* Clear the compressed string for variable-length string types (VARCHAR, CHAR). */
-      if (TP_IS_CHAR_TYPE (db_type))
+      /* Clear the compressed string for compressible string types (VARCHAR, CHAR, CLOB). */
+      if (TP_IS_CHAR_TYPE (db_type) || db_type == DB_TYPE_CLOB)
 	{
 	  char *compressed_str = DB_GET_COMPRESSED_STRING (value);
 	  if (compressed_str != NULL && value->data.ch.info.compressed_need_clear != 0)
@@ -10565,6 +10565,11 @@ mr_make_char_or_varchar (DB_VALUE * value, DB_TYPE type, int precision, const ch
     {
       return db_make_char (value, precision, str, size, codeset, collation);
     }
+  else if (type == DB_TYPE_CLOB)
+    {
+      /* internal CLOB has no per-value codeset/collation - server uses LANG_SYS_CODESET */
+      return db_make_clob (value, precision, str, size);
+    }
   else
     {
       return db_make_varchar (value, precision, str, size, codeset, collation);
@@ -11027,7 +11032,7 @@ data_readval_string (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int siz
   int compressed_size = 0, expected_decompressed_size = 0;
   char *decompressed_string = NULL, *compressed_string = NULL;
 
-  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR);
+  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR || type == DB_TYPE_CLOB);
 
   if (value == NULL)
     {
@@ -11047,7 +11052,8 @@ data_readval_string (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int siz
       return rc;
     }
 
-  precision = (domain != NULL) ? domain->precision : DB_MAX_VARCHAR_PRECISION;
+  precision = (domain != NULL) ? domain->precision
+    : ((type == DB_TYPE_CLOB) ? DB_MAX_LOB_PRECISION : DB_MAX_VARCHAR_PRECISION);
   if (size == 0)
     {
       /* its NULL */
@@ -11608,7 +11614,7 @@ mr_setmem_char_type_common (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, 
   int src_size, src_length, new_size, header_size;
   int rc = NO_ERROR;
 
-  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR);
+  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR || type == DB_TYPE_CLOB);
 
   /* CHAR-only invariant: precision must be fixed. */
   if (type == DB_TYPE_CHAR)
@@ -11709,7 +11715,7 @@ mr_getmem_char_type_common (void *memptr, TP_DOMAIN * domain, DB_VALUE * value, 
   int src_size, src_length;
   char **mem, *cur, *new_, *data;
 
-  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR);
+  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR || type == DB_TYPE_CLOB);
   if (type == DB_TYPE_CHAR)
     {
       assert (!IS_FLOATING_PRECISION (domain->precision));
@@ -12029,7 +12035,7 @@ mr_setval_char_type_common (DB_VALUE * dest, const DB_VALUE * src, bool copy, DB
   int marker = DB_VALUE_INTERNAL_LOB_MARKER_NONE;
 
   assert (!db_value_is_corrupted (src));
-  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR);
+  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR || type == DB_TYPE_CLOB);
 
   if (src == NULL || DB_IS_NULL (src))
     {
@@ -12359,7 +12365,7 @@ mr_readval_char_type_common (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain,
   int compressed_size = 0, expected_decompressed_size = 0;
   char *decompressed_string = NULL, *compressed_string = NULL;
 
-  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR);
+  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR || type == DB_TYPE_CLOB);
 
   if (value == NULL)
     {
@@ -12380,7 +12386,8 @@ mr_readval_char_type_common (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain,
       return rc;
     }
 
-  precision = (domain != NULL) ? domain->precision : DB_MAX_VARCHAR_PRECISION;
+  precision = (domain != NULL) ? domain->precision
+    : ((type == DB_TYPE_CLOB) ? DB_MAX_LOB_PRECISION : DB_MAX_VARCHAR_PRECISION);
   if (disk_size == 0)
     {
       /* its NULL */
@@ -12508,7 +12515,7 @@ mr_cmpdisk_char_type_common (void *mem1, void *mem2, TP_DOMAIN * domain, int do_
   static bool system_ignore_trailing_space = prm_get_bool_value (PRM_ID_IGNORE_TRAILING_SPACE);
   OR_BUF hdr_buf1, hdr_buf2;
 
-  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR);
+  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR || type == DB_TYPE_CLOB);
 
   or_init (&hdr_buf1, (char *) mem1, 0);
   or_init (&hdr_buf2, (char *) mem2, 0);
@@ -14610,8 +14617,8 @@ pr_clear_compressed_string (DB_VALUE * value)
 
   db_type = DB_VALUE_DOMAIN_TYPE (value);
 
-  /* Clear only for variable-length string types (VARCHAR, CHAR). */
-  if (!TP_IS_VAR_LEN_CHAR_TYPE (db_type))
+  /* Clear only for compressible string types (VARCHAR, CHAR, CLOB). */
+  if (!TP_IS_CHAR_TYPE (db_type) && db_type != DB_TYPE_CLOB)
     {
       return NO_ERROR;		/* do nothing */
     }
@@ -14661,8 +14668,8 @@ pr_do_db_value_string_compression (DB_VALUE * value)
 
   db_type = DB_VALUE_DOMAIN_TYPE (value);
 
-  /* Compress only for variable-length string types (VARCHAR, CHAR). */
-  if (!TP_IS_VAR_LEN_CHAR_TYPE (db_type))
+  /* Compress only for compressible string types (VARCHAR, CHAR, CLOB). */
+  if (!TP_IS_CHAR_TYPE (db_type) && db_type != DB_TYPE_CLOB)
     {
       return rc;		/* do nothing */
     }

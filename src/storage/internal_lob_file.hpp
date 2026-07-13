@@ -66,6 +66,7 @@ struct internal_lob_pending
 {
   DB_TYPE lob_type;
   DB_BIGINT size;
+  bool delete_after_read;
   char locator[PATH_MAX + 16];
 };
 using INTERNAL_LOB_PENDING = struct internal_lob_pending;

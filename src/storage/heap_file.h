@@ -738,6 +738,8 @@ extern int heap_rv_postpone_append_pages_to_heap (THREAD_ENTRY * thread_p, LOG_R
 extern void heap_rv_dump_append_pages_to_heap (FILE * fp, int length, void *data);
 
 extern bool heap_oos_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * oos_vfid, bool docreate);
+extern bool heap_internal_lob_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * lob_vfid,
+					 bool docreate);
 extern bool heap_recdes_contains_oos (const RECDES * record);
 
 // *INDENT-OFF*
@@ -750,10 +752,21 @@ extern void heap_log_postpone_heap_append_pages (THREAD_ENTRY * thread_p, const 
 // TODO: Rename heap_file.c to heap_file.cpp and enable C++ formatting in indent tool, then we can remove the following lines.
 
 // *INDENT-OFF*
+struct heap_oos_reference
+{
+  OID oid;
+  DB_BIGINT disk_length;
+  DB_TYPE type;
+  int variable_index;
+};
+using HEAP_OOS_REFERENCE = struct heap_oos_reference;
+using HEAP_OOS_REFERENCE_VECTOR = std::vector<HEAP_OOS_REFERENCE>;
 using OID_VECTOR = std::vector<OID>;
 // *INDENT-ON*
 
 extern int heap_recdes_get_oos_oids (const RECDES * record, OID_VECTOR & oos_oids);
+extern int heap_recdes_get_oos_references (THREAD_ENTRY * thread_p, const OID * class_oid, const RECDES * record,
+					   HEAP_OOS_REFERENCE_VECTOR & oos_references);
 
 /* lob */
 extern int heap_rv_lob_remove_dir (THREAD_ENTRY * thread_p, LOG_RCV * rcv);

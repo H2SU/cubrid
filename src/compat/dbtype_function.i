@@ -900,6 +900,8 @@ db_value_precision (const DB_VALUE * value)
     case DB_TYPE_VARBIT:
     case DB_TYPE_CHAR:
     case DB_TYPE_VARCHAR:
+    case DB_TYPE_BLOB:
+    case DB_TYPE_CLOB:
       return value->domain.char_info.length;
     case DB_TYPE_OBJECT:
     case DB_TYPE_SET:
@@ -2244,9 +2246,10 @@ db_make_clob (DB_VALUE * value, const int max_char_length, DB_CONST_C_CHAR str, 
   error = db_value_domain_init (value, DB_TYPE_CLOB, max_char_length, 0);
   if (error == NO_ERROR)
     {
-      /* CLOB has no per-value codeset/collation — server uses LANG_SYS_CODESET
-       * (createdb codeset). Mirrors BFILE/CFILE which carry no codeset slot. */
-      error = db_make_db_char (value, (INTL_CODESET) LANG_SYS_CODESET, 0, str, char_str_byte_size);
+      /* CLOB callers do not choose per-value codeset/collation. Build the
+       * value with the server codeset and its binary collation so CLOB values
+       * remain compatible with ordinary character values in the same database. */
+      error = db_make_db_char (value, (INTL_CODESET) LANG_SYS_CODESET, LANG_SYS_COLLATION, str, char_str_byte_size);
     }
 
   return error;
@@ -2293,7 +2296,7 @@ db_get_compressed_size (DB_VALUE * value)
   type = DB_VALUE_DOMAIN_TYPE (value);
 
   /* Preliminary check */
-  assert (TP_IS_CHAR_TYPE (type));
+  assert (TP_IS_CHAR_TYPE (type) || type == DB_TYPE_CLOB);
   return value->data.ch.medium.compressed_size;
 }
 
@@ -2317,7 +2320,7 @@ db_set_compressed_string (DB_VALUE * value, char *compressed_string, int compres
   type = DB_VALUE_DOMAIN_TYPE (value);
 
   /* Preliminary check */
-  assert (TP_IS_CHAR_TYPE (type));
+  assert (TP_IS_CHAR_TYPE (type) || type == DB_TYPE_CLOB);
 
   value->data.ch.medium.compressed_buf = compressed_string;
   value->data.ch.medium.compressed_size = compressed_size;

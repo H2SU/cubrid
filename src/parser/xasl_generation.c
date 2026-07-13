@@ -279,7 +279,7 @@ static XASL_NODE *pt_to_merge_insert_xasl (PARSER_CONTEXT * parser, PT_NODE * st
 					   PT_NODE * default_expr_attrs);
 static PT_NODE *pt_append_assignment_references (PARSER_CONTEXT * parser, PT_NODE * assignments, PT_NODE * from,
 						 PT_NODE * select_list);
-static bool pt_is_internal_lob_direct_from_file_expr (const PT_NODE * node);
+static bool pt_is_internal_lob_direct_source_expr (const PT_NODE * node);
 static int pt_fold_internal_lob_direct_from_file_assignments (PARSER_CONTEXT * parser, PT_NODE * assignments);
 static ODKU_INFO *pt_to_odku_info (PARSER_CONTEXT * parser, PT_NODE * insert, XASL_NODE * xasl);
 static REGU_VARIABLE *pt_to_cume_dist_percent_rank_regu_variable (PARSER_CONTEXT * parser, PT_NODE * tree, UNBOX unbox);
@@ -19785,18 +19785,19 @@ pt_append_assignment_references (PARSER_CONTEXT * parser, PT_NODE * assignments,
 }
 
 static bool
-pt_is_internal_lob_direct_from_file_expr (const PT_NODE * node)
+pt_is_internal_lob_direct_source_expr (const PT_NODE * node)
 {
   if (node == NULL || node->node_type != PT_EXPR || !(node->info.expr.flag & PT_EXPR_INFO_LOB_DIRECT_INSERT))
     {
       return false;
     }
 
-  return node->info.expr.op == PT_BLOB_FROM_FILE || node->info.expr.op == PT_CLOB_FROM_FILE;
+  return node->info.expr.op == PT_BLOB_FROM_FILE || node->info.expr.op == PT_CLOB_FROM_FILE
+    || node->info.expr.op == PT_BFILE_TO_BLOB || node->info.expr.op == PT_CFILE_TO_CLOB;
 }
 
 /*
- * pt_fold_internal_lob_direct_from_file_assignments () - Evaluate direct internal LOB FROM_FILE assignment RHS values
+ * pt_fold_internal_lob_direct_from_file_assignments () - Evaluate direct internal LOB streaming source assignment RHS
  *							  before UPDATE/MERGE assignment-list splitting.
  * return : NO_ERROR or error code
  * parser (in)      : parser context
@@ -19828,7 +19829,7 @@ pt_fold_internal_lob_direct_from_file_assignments (PARSER_CONTEXT * parser, PT_N
 	}
 
       rhs = assign->info.expr.arg2;
-      if (!pt_is_internal_lob_direct_from_file_expr (rhs))
+      if (!pt_is_internal_lob_direct_source_expr (rhs))
 	{
 	  continue;
 	}

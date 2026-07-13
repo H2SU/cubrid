@@ -11038,7 +11038,7 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	    }
 	}
 
-      /* Flag clob_from_file/blob_from_file nodes that are the direct value for an internal LOB column before
+      /* Flag streaming LOB source nodes that are the direct value for an internal LOB column before
        * pt_semantic_type () runs constant folding.  Only these direct INSERT values may produce streaming markers. */
       if (node != NULL && node->info.insert.value_clauses != NULL)
 	{
@@ -11061,8 +11061,10 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 		    {
 		      continue;
 		    }
-		  if ((ins_attr->type_enum == PT_TYPE_CLOB && ins_val->info.expr.op == PT_CLOB_FROM_FILE)
-		      || (ins_attr->type_enum == PT_TYPE_BLOB && ins_val->info.expr.op == PT_BLOB_FROM_FILE))
+          if ((ins_attr->type_enum == PT_TYPE_CLOB
+	       && (ins_val->info.expr.op == PT_CLOB_FROM_FILE || ins_val->info.expr.op == PT_CFILE_TO_CLOB))
+	      || (ins_attr->type_enum == PT_TYPE_BLOB
+		  && (ins_val->info.expr.op == PT_BLOB_FROM_FILE || ins_val->info.expr.op == PT_BFILE_TO_BLOB)))
 		    {
 		      PT_EXPR_INFO_SET_FLAG (ins_val, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		    }
@@ -11435,7 +11437,7 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
        * might have to perform some coercions on the replaced names. */
       node = pt_replace_names_in_update_values (parser, node);
 
-      /* Flag clob_from_file/blob_from_file nodes that are the direct RHS of an assignment to an internal LOB column
+      /* Flag streaming LOB source nodes that are the direct RHS of an assignment to an internal LOB column
        * before pt_semantic_type () runs constant folding. */
       if (node != NULL)
 	{
@@ -11457,8 +11459,10 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 		{
 		  continue;
 		}
-	      if ((lhs->type_enum == PT_TYPE_CLOB && rhs->info.expr.op == PT_CLOB_FROM_FILE)
-		  || (lhs->type_enum == PT_TYPE_BLOB && rhs->info.expr.op == PT_BLOB_FROM_FILE))
+      if ((lhs->type_enum == PT_TYPE_CLOB
+	   && (rhs->info.expr.op == PT_CLOB_FROM_FILE || rhs->info.expr.op == PT_CFILE_TO_CLOB))
+	  || (lhs->type_enum == PT_TYPE_BLOB
+	      && (rhs->info.expr.op == PT_BLOB_FROM_FILE || rhs->info.expr.op == PT_BFILE_TO_BLOB)))
 		{
 		  PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		}
@@ -11630,8 +11634,10 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	    }
 	  if (rhs != NULL && rhs->node_type == PT_EXPR && PT_IS_LOB_TYPE (t_node->type_enum))
 	    {
-	      if ((t_node->type_enum == PT_TYPE_CLOB && rhs->info.expr.op == PT_CLOB_FROM_FILE)
-		  || (t_node->type_enum == PT_TYPE_BLOB && rhs->info.expr.op == PT_BLOB_FROM_FILE))
+	      if ((t_node->type_enum == PT_TYPE_CLOB
+		   && (rhs->info.expr.op == PT_CLOB_FROM_FILE || rhs->info.expr.op == PT_CFILE_TO_CLOB))
+		  || (t_node->type_enum == PT_TYPE_BLOB
+		      && (rhs->info.expr.op == PT_BLOB_FROM_FILE || rhs->info.expr.op == PT_BFILE_TO_BLOB)))
 		{
 		  PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		}
@@ -17496,8 +17502,10 @@ pt_check_odku_assignments (PARSER_CONTEXT * parser, PT_NODE * insert)
       rhs = assignment->info.expr.arg2;
       if (rhs != NULL && rhs->node_type == PT_EXPR && PT_IS_LOB_TYPE (lhs->type_enum))
 	{
-	  if ((lhs->type_enum == PT_TYPE_CLOB && rhs->info.expr.op == PT_CLOB_FROM_FILE)
-	      || (lhs->type_enum == PT_TYPE_BLOB && rhs->info.expr.op == PT_BLOB_FROM_FILE))
+	  if ((lhs->type_enum == PT_TYPE_CLOB
+	       && (rhs->info.expr.op == PT_CLOB_FROM_FILE || rhs->info.expr.op == PT_CFILE_TO_CLOB))
+	      || (lhs->type_enum == PT_TYPE_BLOB
+		  && (rhs->info.expr.op == PT_BLOB_FROM_FILE || rhs->info.expr.op == PT_BFILE_TO_BLOB)))
 	    {
 	      PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 	    }

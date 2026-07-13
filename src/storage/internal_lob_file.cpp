@@ -975,6 +975,7 @@ internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *p
   char marker_buf[PATH_MAX + 64];
   char type_char;
   long long pending_size;
+  int delete_after_read;
   int locator_offset = 0;
   const char *locator;
   size_t locator_len;
@@ -1019,8 +1020,10 @@ internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *p
   memcpy (marker_buf, data, size);
   marker_buf[size] = '\0';
 
-  if (sscanf (marker_buf + prefix_len, "%c:%lld:%n", &type_char, &pending_size, &locator_offset) < 2
-      || locator_offset <= 0 || pending_size < 0 || (type_char != 'C' && type_char != 'B'))
+  if (sscanf (marker_buf + prefix_len, "%c:%lld:%d:%n", &type_char, &pending_size, &delete_after_read,
+	      &locator_offset) < 3
+      || locator_offset <= 0 || pending_size < 0 || pending_size > DB_MAX_INTERNAL_LOB_LENGTH
+      || (delete_after_read != 0 && delete_after_read != 1) || (type_char != 'C' && type_char != 'B'))
     {
       return false;
     }
@@ -1041,6 +1044,7 @@ internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *p
     {
       pending->lob_type = (type_char == 'C') ? DB_TYPE_CLOB : DB_TYPE_BLOB;
       pending->size = (DB_BIGINT) pending_size;
+      pending->delete_after_read = delete_after_read != 0;
       memcpy (pending->locator, locator, locator_len + 1);
     }
 

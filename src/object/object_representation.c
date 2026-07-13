@@ -2461,7 +2461,9 @@ or_packed_domain_size (TP_DOMAIN * domain, int include_classoids)
 	   * chunk of code can be removed.
 	   */
 	  if ((id == DB_TYPE_VARCHAR && d->precision == DB_MAX_VARCHAR_PRECISION)
-	      || (id == DB_TYPE_VARBIT && d->precision == DB_MAX_VARBIT_PRECISION))
+	      || (id == DB_TYPE_VARBIT && d->precision == DB_MAX_VARBIT_PRECISION)
+	      || (id == DB_TYPE_BLOB && d->precision == DB_MAX_LOB_PRECISION)
+	      || (id == DB_TYPE_CLOB && d->precision == DB_MAX_LOB_PRECISION))
 	    {
 	      precision = 0;
 	    }
@@ -2626,6 +2628,7 @@ or_put_domain (OR_BUF * buf, TP_DOMAIN * domain, int include_classoids, int is_n
 	    }
 	  break;
 
+	case DB_TYPE_CLOB:
 	case DB_TYPE_CHAR:
 	case DB_TYPE_VARCHAR:
 	  has_collation = true;
@@ -2650,7 +2653,9 @@ or_put_domain (OR_BUF * buf, TP_DOMAIN * domain, int include_classoids, int is_n
 	   * in or_packed_domain_size above.
 	   */
 	  if ((id == DB_TYPE_VARCHAR && d->precision == DB_MAX_VARCHAR_PRECISION)
-	      || (id == DB_TYPE_VARBIT && d->precision == DB_MAX_VARBIT_PRECISION))
+	      || (id == DB_TYPE_VARBIT && d->precision == DB_MAX_VARBIT_PRECISION)
+	      || (id == DB_TYPE_CLOB && d->precision == DB_MAX_LOB_PRECISION)
+	      || (id == DB_TYPE_BLOB && d->precision == DB_MAX_LOB_PRECISION))
 	    {
 	      precision = 0;
 	    }

@@ -1847,6 +1847,41 @@ tp_domain_match_internal (const TP_DOMAIN * dom1, const TP_DOMAIN * dom2, TP_MAT
 	}
       break;
 
+    case DB_TYPE_CLOB:
+      // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+      if (dom1->collation_id != dom2->collation_id)
+	{
+	  match = 0;
+	  break;
+	}
+      [[fallthrough]];
+    case DB_TYPE_BLOB:
+      if (exact == TP_EXACT_MATCH || exact == TP_SET_MATCH)
+	{
+	  match = dom1->precision == dom2->precision;
+	}
+      else if (exact == TP_STR_MATCH)
+	{
+	  /*
+	   * Allow the match if the precisions would allow us to reuse the
+	   * string without modification.
+	   */
+	  match = (dom1->precision >= dom2->precision);
+	}
+      else
+	{
+	  /*
+	   * Allow matches regardless of precision, let the actual length of the
+	   * value determine if it can be assigned.  This is important for
+	   * literal strings as their precision will be the maximum but they
+	   * can still be assigned to domains with a smaller precision
+	   * provided the actual value is within the destination domain
+	   * tolerance.
+	   */
+	  match = 1;
+	}
+      break;
+
     case DB_TYPE_NUMERIC:
       /*
        * note that we never allow inexact matches here because the
@@ -2432,6 +2467,105 @@ tp_is_domain_cached (TP_DOMAIN * dlist, TP_DOMAIN * transient, TP_MATCH exact, T
 
       break;
 
+    case DB_TYPE_BLOB:
+      // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+      while (domain)
+	{
+	  if (exact == TP_EXACT_MATCH || exact == TP_SET_MATCH)
+	    {
+	      /* check for descending order */
+	      if (domain->precision < transient->precision)
+		{
+		  break;
+		}
+
+	      match = ((domain->precision == transient->precision) && (domain->is_desc == transient->is_desc));
+	    }
+	  else if (exact == TP_STR_MATCH)
+	    {
+	      /*
+	       * Allow the match if the precisions would allow us to reuse the
+	       * string without modification.
+	       */
+	      match = ((domain->precision >= transient->precision) && (domain->is_desc == transient->is_desc));
+	    }
+	  else
+	    {
+	      /*
+	       * Allow matches regardless of precision, let the actual length
+	       * of the value determine if it can be assigned.  This is
+	       * important for literal strings as their precision will be the
+	       * maximum but they can still be assigned to domains with a
+	       * smaller precision provided the actual value is within the
+	       * destination domain tolerance.
+	       */
+	      match = (domain->is_desc == transient->is_desc);
+	    }
+
+	  if (match)
+	    {
+	      break;
+	    }
+
+	  *ins_pos = domain;
+	  domain = domain->next_list;
+	}
+      break;
+
+    case DB_TYPE_CLOB:
+      // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
+      while (domain)
+	{
+	  if (exact == TP_EXACT_MATCH || exact == TP_SET_MATCH)
+	    {
+	      /* check for descending order */
+	      if (domain->precision < transient->precision)
+		{
+		  break;
+		}
+
+	      match = ((domain->precision == transient->precision) && (domain->collation_id == transient->collation_id)
+		       && (domain->codeset == transient->codeset)
+		       && (domain->is_desc == transient->is_desc)
+		       && (domain->collation_flag == transient->collation_flag));
+	    }
+	  else if (exact == TP_STR_MATCH)
+	    {
+	      /*
+	       * Allow the match if the precisions would allow us to reuse the
+	       * string without modification.
+	       */
+	      match = ((domain->precision >= transient->precision) && (domain->collation_id == transient->collation_id)
+		       && (domain->codeset == transient->codeset)
+		       && (domain->is_desc == transient->is_desc)
+		       && (domain->collation_flag == transient->collation_flag));
+	    }
+	  else
+	    {
+	      /*
+	       * Allow matches regardless of precision, let the actual length
+	       * of the value determine if it can be assigned.  This is
+	       * important for literal strings as their precision will be the
+	       * maximum but they can still be assigned to domains with a
+	       * smaller precision provided the actual value is within the
+	       * destination domain tolerance.
+	       */
+	      match = ((domain->collation_id == transient->collation_id) && (domain->is_desc == transient->is_desc)
+		       && (domain->codeset == transient->codeset)
+		       && (domain->collation_flag == transient->collation_flag));
+	    }
+
+	  if (match)
+	    {
+	      assert (domain->codeset == transient->codeset);
+	      break;
+	    }
+
+	  *ins_pos = domain;
+	  domain = domain->next_list;
+	}
+      break;
+
     case DB_TYPE_NUMERIC:
       /*
        * The first domain is a default domain for numeric type,
@@ -2652,9 +2786,10 @@ tp_domain_find_charbit (DB_TYPE type, int codeset, int collation_id, unsigned ch
    * type : DB_TYPE_CHAR    DB_TYPE_VARCHAR
    * DB_TYPE_BIT     DB_TYPE_VARBIT
    */
-  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR || type == DB_TYPE_BIT || type == DB_TYPE_VARBIT);
+  assert (type == DB_TYPE_CHAR || type == DB_TYPE_VARCHAR || type == DB_TYPE_BIT || type == DB_TYPE_VARBIT
+	  || type == DB_TYPE_CLOB || type == DB_TYPE_BLOB);
 
-  if (type == DB_TYPE_VARCHAR || type == DB_TYPE_VARBIT)
+  if (type == DB_TYPE_VARCHAR || type == DB_TYPE_VARBIT || type == DB_TYPE_CLOB || type == DB_TYPE_BLOB)
     {
       /* search the list for a domain that matches */
       for (dom = tp_domain_get_list (type, NULL); dom != NULL; dom = dom->next_list)
