@@ -2916,8 +2916,7 @@ ldr_str_db_clob (LDR_CONTEXT *context, const char *str, size_t len, SM_ATTRIBUTE
       CHECK_PARSE_ERR (err, ER_IT_DATA_OVERFLOW, context, DB_TYPE_CLOB, str);
     }
 
-  CHECK_ERR (err, db_make_clob (&val, att->domain->precision, str, (int) len, att->domain->codeset,
-				att->domain->collation_id));
+  CHECK_ERR (err, db_make_clob (&val, att->domain->precision, str, (int) len));
   CHECK_ERR (err, ldr_generic (context, &val));
 
 error_exit:
@@ -3195,6 +3194,7 @@ error_exit:
   return err;
 }
 
+/*
  *  NUMERIC SETTERS
  *
  *  A "numeric" string is known to have a decimal point in it but *not* to

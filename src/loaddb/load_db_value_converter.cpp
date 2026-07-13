@@ -450,7 +450,7 @@ namespace cubload
 	return ER_IT_DATA_OVERFLOW;
       }
 
-    return db_make_clob (val, domain.precision, str, (int) str_size, codeset, domain.collation_id);
+    return db_make_clob (val, domain.precision, str, (int) str_size);
   }
 
   int

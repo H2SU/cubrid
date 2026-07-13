@@ -19263,7 +19263,7 @@ primitive_type
 			$$ = ctn;
 		}}
 	| BLOB_
-		{{ DBG_TRACE_GRAMMAR(primitive_type, | BLOB_);
+		{{
 
 			/* BLOB: inline storage capped at DB_MAX_LOB_PRECISION (1 GiB).
 			 * codeset / collation slots are not used — mirrors BFILE/CFILE.
@@ -19278,9 +19278,9 @@ primitive_type
 			SET_CONTAINER_2 (ctn, FROM_NUMBER (PT_TYPE_BLOB), dt);
 			$$ = ctn;
 
-		DBG_PRINT}}
+		}}
 	| CLOB_
-		{{ DBG_TRACE_GRAMMAR(primitive_type, | CLOB_);
+		{{
 
 			/* CLOB: inline storage capped at DB_MAX_LOB_PRECISION (1 GiB).
 			 * codeset / collation slots are not used — mirrors BFILE/CFILE.
@@ -19295,7 +19295,7 @@ primitive_type
 			SET_CONTAINER_2 (ctn, FROM_NUMBER (PT_TYPE_CLOB), dt);
 			$$ = ctn;
 
-		DBG_PRINT}}
+		}}
 	| class_name opt_identity
 		{{
 			container_2 ctn;
