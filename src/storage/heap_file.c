@@ -81,6 +81,7 @@
 #include "thread_manager.hpp"	// for thread_get_thread_entry_info
 #include "db_value_printer.hpp"
 #include "internal_lob_file.hpp"
+#include "session.h"
 #include "log_append.hpp"
 #include "string_buffer.hpp"
 #include "tde.h"
@@ -13075,6 +13076,7 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
   const DB_VALUE *source_value = value;
   const char *raw_data = NULL;
   INTERNAL_LOB_PENDING pending_source;
+  INTERNAL_LOB_UPLOAD_TOKEN upload_source;
   HEAP_INTERNAL_LOB_FILE_SOURCE file_source;
   DB_TYPE type;
   int raw_length = 0;
@@ -13090,6 +13092,11 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
     }
 
   type = DB_VALUE_DOMAIN_TYPE (value);
+
+  if (internal_lob_db_value_is_upload (value, &upload_source))
+    {
+      return session_internal_lob_upload_consume (thread_p, upload_source.token, class_oid, type, locator);
+    }
 
   if (internal_lob_db_value_is_pending (value, &pending_source))
     {

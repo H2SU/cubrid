@@ -10580,7 +10580,8 @@ static bool
 mr_internal_lob_marker_is_valid (int marker)
 {
   return marker == DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR || marker == DB_VALUE_INTERNAL_LOB_MARKER_FILE_SOURCE
-    || marker == DB_VALUE_INTERNAL_LOB_MARKER_PENDING || marker == DB_VALUE_INTERNAL_LOB_MARKER_STREAM;
+    || marker == DB_VALUE_INTERNAL_LOB_MARKER_PENDING || marker == DB_VALUE_INTERNAL_LOB_MARKER_STREAM
+    || marker == DB_VALUE_INTERNAL_LOB_MARKER_UPLOAD;
 }
 
 static int

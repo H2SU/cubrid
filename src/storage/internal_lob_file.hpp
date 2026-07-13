@@ -71,6 +71,15 @@ struct internal_lob_pending
 };
 using INTERNAL_LOB_PENDING = struct internal_lob_pending;
 
+struct internal_lob_upload_token
+{
+  DB_TYPE lob_type;
+  INT64 token;
+  DB_BIGINT data_length;
+  DB_BIGINT logical_length;
+};
+using INTERNAL_LOB_UPLOAD_TOKEN = struct internal_lob_upload_token;
+
 extern int internal_lob_create_file (THREAD_ENTRY *thread_p, VFID &lob_vfid);
 extern int internal_lob_remove_file (THREAD_ENTRY *thread_p, const VFID &lob_vfid);
 extern int internal_lob_insert (THREAD_ENTRY *thread_p, const VFID &lob_vfid, oos_buffer src,
@@ -93,6 +102,7 @@ extern int internal_lob_get_length (THREAD_ENTRY *thread_p, const INTERNAL_LOB_L
 extern bool internal_lob_parse_locator_string (const char *data, int size, INTERNAL_LOB_LOCATOR *locator);
 extern bool internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *locator);
 extern bool internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *pending);
+extern bool internal_lob_db_value_is_upload (const DB_VALUE *value, INTERNAL_LOB_UPLOAD_TOKEN *upload);
 extern int internal_lob_format_locator_string (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size,
                                                bool adopted = false);
 inline bool

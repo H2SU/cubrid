@@ -94,6 +94,11 @@ extern int ux_lobfile_new (int lobfile_type, T_NET_BUF * net_buf);
 extern int ux_lobfile_write (DB_VALUE * lobfile_dbval, int64_t offset, int size, char *data, T_NET_BUF * net_buf);
 extern int ux_lobfile_read (DB_VALUE * lobfile_dbval, int64_t offset, int size, T_NET_BUF * net_buf);
 
+extern int ux_stream_send_data (char *data, int data_len, T_NET_BUF * net_buf);
+extern int ux_stream_end (T_NET_BUF * net_buf);
+extern int ux_stream_init (int stream_kind, char *config, int config_len, T_NET_BUF * net_buf);
+extern int ux_stream_abort (T_NET_BUF * net_buf);
+
 extern int get_tuple_count (T_SRV_HANDLE * srv_handle);
 
 #endif /* _CAS_EXECUTE_H_ */

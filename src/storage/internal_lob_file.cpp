@@ -1051,6 +1051,74 @@ internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *p
   return true;
 }
 
+bool
+internal_lob_db_value_is_upload (const DB_VALUE *value, INTERNAL_LOB_UPLOAD_TOKEN *upload)
+{
+  DB_TYPE type;
+  const char *data = NULL;
+  int size = 0;
+  int prefix_len = (int) strlen (INTERNAL_LOB_UPLOAD_PREFIX);
+  char marker_buf[160];
+  char type_char;
+  long long token;
+  long long data_length;
+  long long logical_length;
+  int consumed = 0;
+
+  if (value == NULL || DB_IS_NULL (value)
+      || !db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_UPLOAD))
+    {
+      return false;
+    }
+
+  type = DB_VALUE_DOMAIN_TYPE (value);
+  if (type == DB_TYPE_CLOB)
+    {
+      data = db_get_string (value);
+      size = db_get_string_size (value);
+    }
+  else if (type == DB_TYPE_BLOB)
+    {
+      int bit_length = 0;
+      data = (const char *) db_get_bit (value, &bit_length);
+      if (bit_length < 0 || bit_length % 8 != 0)
+	{
+	  return false;
+	}
+      size = bit_length / 8;
+    }
+  else
+    {
+      return false;
+    }
+
+  if (data == NULL || size <= prefix_len || size >= (int) sizeof (marker_buf)
+      || memcmp (data, INTERNAL_LOB_UPLOAD_PREFIX, prefix_len) != 0)
+    {
+      return false;
+    }
+  memcpy (marker_buf, data, size);
+  marker_buf[size] = '\0';
+
+  if (sscanf (marker_buf + prefix_len, "%c:%lld:%lld:%lld%n", &type_char, &token, &data_length,
+	      &logical_length, &consumed) != 4
+      || marker_buf[prefix_len + consumed] != '\0' || token <= 0 || data_length < 0
+      || data_length > DB_MAX_INTERNAL_LOB_LENGTH || logical_length < 0 || (type_char != 'B' && type_char != 'C')
+      || (type_char == 'B' && type != DB_TYPE_BLOB) || (type_char == 'C' && type != DB_TYPE_CLOB))
+    {
+      return false;
+    }
+
+  if (upload != NULL)
+    {
+      upload->lob_type = type;
+      upload->token = (INT64) token;
+      upload->data_length = (DB_BIGINT) data_length;
+      upload->logical_length = (DB_BIGINT) logical_length;
+    }
+  return true;
+}
+
 int
 internal_lob_encode_disk_length (const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT &disk_length)
 {

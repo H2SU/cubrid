@@ -30,6 +30,8 @@
 #include "intl_support.h"
 #if defined (CS_MODE)
 #include "network_interface_cl.h"
+#include "object_representation.h"
+#include "stream_session.hpp"
 #endif
 
 #include <climits>
@@ -1005,10 +1007,17 @@ namespace cubload
     char buffer[64 * 1024];
     DB_BIGINT offset = 0;
     INT64 token = 0;
+    OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT64_SIZE * 2) a_config;
+    char *config = OR_ALIGNED_BUF_START (a_config);
+    DB_TYPE lob_type = entry.type == 'B' ? DB_TYPE_BLOB : DB_TYPE_CLOB;
+    DB_BIGINT logical_length = entry.type == 'B' ? entry.bit_length : entry.data_length;
     int error;
     bool abort_token = false;
 
-    error = loaddb_internal_lob_upload_begin (clsid, entry.type, entry.data_length, entry.bit_length, &token);
+    (void) or_pack_int (config, entry.type == 'B' ? INTERNAL_LOB_STREAM_TYPE_BLOB : INTERNAL_LOB_STREAM_TYPE_CLOB);
+    OR_PUT_INT64 (config + OR_INT_SIZE, &entry.data_length);
+    OR_PUT_INT64 (config + OR_INT_SIZE + OR_INT64_SIZE, &logical_length);
+    error = stream_from_init (STREAM_KIND_INTERNAL_LOB, config, OR_ALIGNED_BUF_SIZE (a_config));
     if (error != NO_ERROR)
       {
 	return error;
@@ -1030,7 +1039,7 @@ namespace cubload
 	    goto cleanup;
 	  }
 
-	error = loaddb_internal_lob_upload_append (token, buffer, nread);
+	error = stream_from_send_data (buffer, nread);
 	if (error != NO_ERROR)
 	  {
 	    goto cleanup;
@@ -1039,7 +1048,7 @@ namespace cubload
 	offset += nread;
       }
 
-    error = loaddb_internal_lob_upload_end (token);
+    error = stream_from_end (&token);
     if (error != NO_ERROR)
       {
 	goto cleanup;
@@ -1056,7 +1065,7 @@ namespace cubload
 cleanup:
     if (abort_token)
       {
-	(void) loaddb_internal_lob_upload_abort (token);
+	(void) stream_from_abort ();
       }
     return error;
 #else
