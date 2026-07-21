@@ -13329,6 +13329,8 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
   /* init oos tracking info */
   tdes->oos_insert_lsa_queue.clear ();
   thread_p->oos_oids.clear ();
+  thread_p->oos_attrids.clear ();
+  thread_p->oos_is_internal_lob.clear ();
 
   for (i = 0; i < attr_info->num_values; i++)
     {
@@ -13337,6 +13339,10 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
 	{
 	  bool is_internal_lob = TP_IS_LOB_TYPE (TP_DOMAIN_TYPE (attr_info->values[i].last_attrepr->domain));
 	  size_t oos_oid_count_before = thread_p->oos_oids.size ();
+	  int attrid = attr_info->values[i].attrid;
+
+	  assert (thread_p->oos_attrids.size () == oos_oid_count_before);
+	  assert (thread_p->oos_is_internal_lob.size () == oos_oid_count_before);
 
 	  assert (attr_info->values != NULL && !db_value_is_null (&attr_info->values[i].dbvalue));
 	  assert (!attr_info->values[i].last_attrepr->is_fixed);
@@ -13393,6 +13399,9 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
 	    {
 	      thread_p->oos_oids.push_back (oos_oid);	/* for replication log */
 	    }
+
+	  thread_p->oos_attrids.resize (thread_p->oos_oids.size (), attrid);
+	  thread_p->oos_is_internal_lob.resize (thread_p->oos_oids.size (), is_internal_lob);
 	  (*oos_oids)[i] = oos_oid;
 	}
     }
