@@ -528,6 +528,7 @@ set(STORAGE_SOURCES
   ${STORAGE_DIR}/internal_lob_file.cpp
   ${STORAGE_DIR}/internal_lob_upload.cpp
   ${STORAGE_DIR}/internal_lob_stream_session.cpp
+  ${STORAGE_DIR}/internal_lob_dml_session.cpp
   ${STORAGE_DIR}/oid.c
   ${STORAGE_DIR}/oos_file.cpp
   ${STORAGE_DIR}/overflow_file.c

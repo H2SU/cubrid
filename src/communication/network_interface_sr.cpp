@@ -86,6 +86,7 @@
 #include "compile_context.h"
 #include "load_session.hpp"
 #include "copy_session.hpp"
+#include "internal_lob_dml_executor.hpp"
 #include "internal_lob_stream_session.hpp"
 #include "session.h"
 #include "xasl.h"
@@ -12955,6 +12956,9 @@ create_stream_session (THREAD_ENTRY *thread_p, int stream_kind, char *config_ptr
 	  }
 	return session;
       }
+
+    case STREAM_KIND_INTERNAL_LOB_DML:
+      return internal_lob_dml_create_session (thread_p, config_ptr, config_len, error_code);
 
     default:
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1, "unknown stream kind");

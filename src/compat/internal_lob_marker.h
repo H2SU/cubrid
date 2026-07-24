@@ -33,8 +33,12 @@
 #define DB_VALUE_INTERNAL_LOB_MARKER_PENDING    (-2691403)
 #define DB_VALUE_INTERNAL_LOB_MARKER_STREAM     (-2691404)
 #define DB_VALUE_INTERNAL_LOB_MARKER_UPLOAD     (-2691405)
+#define DB_VALUE_INTERNAL_LOB_MARKER_DML_SLOT   (-2691406)
 
+#define INTERNAL_LOB_FILE_SOURCE_PREFIX "@internal_lob_file:"
+#define INTERNAL_LOB_PENDING_PREFIX "@internal_lob_pending:"
 #define INTERNAL_LOB_UPLOAD_PREFIX "@internal_lob_upload:"
+#define INTERNAL_LOB_DML_SLOT_PREFIX "@internal_lob_dml_slot:"
 
 static inline void
 db_value_mark_internal_lob (DB_VALUE *value, int marker)

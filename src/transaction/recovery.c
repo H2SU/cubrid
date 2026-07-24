@@ -876,6 +876,21 @@ struct rvfun RV_fun[] = {
    NULL,
    NULL,
    NULL,
+   repl_data_insert_log_dump},
+  /* Crash recovery replays the forward REC_NEWHOME delete identically to RVHF_DELETE; the OOS
+   * reclaim is an additional vacuum-time action driven off the undo image, not part of redo/undo.
+   * Handlers MUST mirror RVHF_DELETE's (heap_rv_undo_delete / heap_rv_redo_delete). */
+  {RVHF_DELETE_NEWHOME_NOTIFY_VACUUM,
+   "RVHF_DELETE_NEWHOME_NOTIFY_VACUUM",
+   heap_rv_undo_delete,
+   heap_rv_redo_delete,
+   log_rv_dump_hexa,
+   log_rv_dump_hexa},
+  {RVREPL_INTERNAL_LOB_INSERT,
+   "RVREPL_INTERNAL_LOB_INSERT",
+   NULL,
+   NULL,
+   NULL,
    repl_data_insert_log_dump}
 };
 

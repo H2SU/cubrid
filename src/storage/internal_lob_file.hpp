@@ -24,6 +24,7 @@
 #include <string>
 
 #include "dbtype_def.h"
+#include "internal_lob_marker.h"
 #include "oos_file.hpp"
 #include "object_domain.h"
 
@@ -46,6 +47,33 @@ struct internal_lob_writer
 };
 using INTERNAL_LOB_WRITER = struct internal_lob_writer;
 
+/*
+ * Bounded reverse-order writer used by direct DML streaming.
+ *
+ * Network ranges arrive from the end of the LOB toward offset zero. Only one
+ * internal_lob_segment_size payload is retained at a time; a completed logical
+ * segment is immediately passed to oos_insert(). This preserves the existing
+ * logical-node and OOS physical-page formats without a complete spill file.
+ */
+struct internal_lob_reverse_writer
+{
+  VFID lob_vfid;
+  char *segment_buffer = NULL;
+  int segment_size = 0;
+  DB_BIGINT total_bytes = 0;
+  DB_BIGINT logical_length = 0;
+  DB_BIGINT expected_offset = 0;
+  DB_BIGINT segment_start = 0;
+  DB_BIGINT segment_end = 0;
+  DB_BIGINT segment_received = 0;
+  DB_TYPE lob_type = DB_TYPE_NULL;
+  OID next_oid;
+  INTERNAL_LOB_LOCATOR locator;
+  bool initialized = false;
+  bool finished = false;
+};
+using INTERNAL_LOB_REVERSE_WRITER = struct internal_lob_reverse_writer;
+
 struct internal_lob_reader
 {
   OID next_lob_oid;            /* next LOB chain node after current OOS payload */
@@ -59,8 +87,6 @@ struct internal_lob_reader
 using INTERNAL_LOB_READER = struct internal_lob_reader;
 
 #define INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
-#define INTERNAL_LOB_FILE_SOURCE_PREFIX "@internal_lob_file:"
-#define INTERNAL_LOB_PENDING_PREFIX "@internal_lob_pending:"
 
 struct internal_lob_pending
 {
@@ -80,6 +106,12 @@ struct internal_lob_upload_token
 };
 using INTERNAL_LOB_UPLOAD_TOKEN = struct internal_lob_upload_token;
 
+struct internal_lob_dml_slot
+{
+  int slot;
+};
+using INTERNAL_LOB_DML_SLOT = struct internal_lob_dml_slot;
+
 extern int internal_lob_create_file (THREAD_ENTRY *thread_p, VFID &lob_vfid);
 extern int internal_lob_remove_file (THREAD_ENTRY *thread_p, const VFID &lob_vfid);
 extern int internal_lob_insert (THREAD_ENTRY *thread_p, const VFID &lob_vfid, oos_buffer src,
@@ -90,6 +122,16 @@ extern int internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER 
                                     INTERNAL_LOB_LOCATOR &locator, DB_TYPE lob_type = DB_TYPE_CLOB,
                                     DB_BIGINT logical_length = -1);
 extern void internal_lob_insert_abort (INTERNAL_LOB_WRITER &writer);
+extern int internal_lob_reverse_insert_begin (THREAD_ENTRY *thread_p, const VFID &lob_vfid, DB_TYPE lob_type,
+                                              DB_BIGINT total_bytes, DB_BIGINT logical_length,
+                                              INTERNAL_LOB_REVERSE_WRITER &writer);
+extern int internal_lob_reverse_insert_append (THREAD_ENTRY *thread_p, INTERNAL_LOB_REVERSE_WRITER &writer,
+                                               DB_BIGINT offset, oos_buffer chunk);
+extern int internal_lob_reverse_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_REVERSE_WRITER &writer,
+                                            INTERNAL_LOB_LOCATOR &locator);
+extern void internal_lob_reverse_insert_abort (INTERNAL_LOB_REVERSE_WRITER &writer);
+extern int internal_lob_clone (THREAD_ENTRY *thread_p, const VFID &target_lob_vfid, DB_TYPE lob_type,
+                               const INTERNAL_LOB_LOCATOR &source_locator, INTERNAL_LOB_LOCATOR &target_locator);
 extern int internal_lob_read (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, oos_buffer dest);
 extern int internal_lob_read_range (THREAD_ENTRY *thread_p, const INTERNAL_LOB_LOCATOR &locator, DB_BIGINT offset,
                                     oos_buffer dest, int &nread);
@@ -103,6 +145,7 @@ extern bool internal_lob_parse_locator_string (const char *data, int size, INTER
 extern bool internal_lob_db_value_is_locator (const DB_VALUE *value, INTERNAL_LOB_LOCATOR *locator);
 extern bool internal_lob_db_value_is_pending (const DB_VALUE *value, INTERNAL_LOB_PENDING *pending);
 extern bool internal_lob_db_value_is_upload (const DB_VALUE *value, INTERNAL_LOB_UPLOAD_TOKEN *upload);
+extern bool internal_lob_db_value_is_dml_slot (const DB_VALUE *value, INTERNAL_LOB_DML_SLOT *dml_slot);
 extern int internal_lob_format_locator_string (const INTERNAL_LOB_LOCATOR &locator, char *buf, size_t buf_size,
                                                bool adopted = false);
 inline bool

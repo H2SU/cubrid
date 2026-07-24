@@ -12839,15 +12839,12 @@ error_exit:
  *   This is the copy path for INSERT ... SELECT and UPDATE c2 = c1.  A 2GiB+ locator cannot be copied through
  *   internal_lob_read_db_value(), because DB_VALUE string/bit containers still use int-sized lengths.
  */
-static int
+int
 heap_internal_lob_clone_locator (THREAD_ENTRY * thread_p, const OID * class_oid, DB_TYPE lob_type,
 				 const INTERNAL_LOB_LOCATOR * source_locator, INTERNAL_LOB_LOCATOR * locator)
 {
   HFID hfid;
   VFID lob_vfid;
-  INTERNAL_LOB_READER reader;
-  INTERNAL_LOB_WRITER writer;
-  char buffer[64 * 1024];
   int error = NO_ERROR;
 
   if (class_oid == NULL || source_locator == NULL || locator == NULL
@@ -12878,49 +12875,7 @@ heap_internal_lob_clone_locator (THREAD_ENTRY * thread_p, const OID * class_oid,
       return error;
     }
 
-  error = internal_lob_read_open (thread_p, *source_locator, reader);
-  if (error != NO_ERROR)
-    {
-      return error;
-    }
-
-  error = internal_lob_insert_begin (thread_p, lob_vfid, writer);
-  if (error != NO_ERROR)
-    {
-      return error;
-    }
-
-  while (reader.total_read < reader.total_bytes)
-    {
-      int nread = 0;
-      DB_BIGINT remaining = reader.total_bytes - reader.total_read;
-      int request_size = remaining > (DB_BIGINT) sizeof (buffer) ? (int) sizeof (buffer) : (int) remaining;
-
-      error = internal_lob_read_pull (thread_p, reader, oos_buffer (buffer, (std::size_t) request_size), nread);
-      if (error != NO_ERROR)
-	{
-	  goto error_exit;
-	}
-      if (nread <= 0 || nread > request_size)
-	{
-	  error = ER_GENERIC_ERROR;
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
-	  goto error_exit;
-	}
-
-      error = internal_lob_insert_append (thread_p, writer, oos_buffer (buffer, (std::size_t) nread));
-      if (error != NO_ERROR)
-	{
-	  goto error_exit;
-	}
-    }
-
-  error = internal_lob_insert_end (thread_p, writer, *locator, lob_type, source_locator->length);
-  return error;
-
-error_exit:
-  internal_lob_insert_abort (writer);
-  return error;
+  return internal_lob_clone (thread_p, lob_vfid, lob_type, *source_locator, *locator);
 }
 
 /*
@@ -12947,6 +12902,7 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
   const char *raw_data = NULL;
   INTERNAL_LOB_PENDING pending_source;
   INTERNAL_LOB_UPLOAD_TOKEN upload_source;
+  INTERNAL_LOB_DML_SLOT dml_slot;
   HEAP_INTERNAL_LOB_FILE_SOURCE file_source;
   DB_TYPE type;
   int raw_length = 0;
@@ -12962,6 +12918,11 @@ heap_internal_lob_insert_value (THREAD_ENTRY * thread_p, const OID * class_oid, 
     }
 
   type = DB_VALUE_DOMAIN_TYPE (value);
+
+  if (internal_lob_db_value_is_dml_slot (value, &dml_slot))
+    {
+      return session_internal_lob_dml_consume (thread_p, dml_slot.slot, class_oid, type, locator);
+    }
 
   if (internal_lob_db_value_is_upload (value, &upload_source))
     {
@@ -13192,6 +13153,8 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
   /* init oos tracking info */
   tdes->oos_insert_lsa_queue.clear ();
   thread_p->oos_oids.clear ();
+  thread_p->oos_attrids.clear ();
+  thread_p->oos_is_internal_lob.clear ();
 
   for (i = 0; i < attr_info->num_values; i++)
     {
@@ -13200,6 +13163,10 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
 	{
 	  bool is_internal_lob = TP_IS_LOB_TYPE (TP_DOMAIN_TYPE (attr_info->values[i].last_attrepr->domain));
 	  size_t oos_oid_count_before = thread_p->oos_oids.size ();
+	  int attrid = attr_info->values[i].attrid;
+
+	  assert (thread_p->oos_attrids.size () == oos_oid_count_before);
+	  assert (thread_p->oos_is_internal_lob.size () == oos_oid_count_before);
 
 	  assert (attr_info->values != NULL && !db_value_is_null (&attr_info->values[i].dbvalue));
 	  assert (!attr_info->values[i].last_attrepr->is_fixed);
@@ -13256,6 +13223,9 @@ heap_attrinfo_insert_to_oos (THREAD_ENTRY * thread_p, HEAP_CACHE_ATTRINFO * attr
 	    {
 	      thread_p->oos_oids.push_back (oos_oid);	/* for replication log */
 	    }
+
+	  thread_p->oos_attrids.resize (thread_p->oos_oids.size (), attrid);
+	  thread_p->oos_is_internal_lob.resize (thread_p->oos_oids.size (), is_internal_lob);
 	  (*oos_oids)[i] = oos_oid;
 	}
     }
