@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <tuple>
+#include <vector>
 
 #include "dbtype.h"
 #include "error_manager.h"
@@ -146,6 +147,31 @@ internal_lob_get_segment_size (int &segment_size)
 
   segment_size = (int) prm_segment_size;
   return NO_ERROR;
+}
+
+static void
+internal_lob_reverse_writer_clear (INTERNAL_LOB_REVERSE_WRITER &writer)
+{
+  if (writer.segment_buffer != NULL)
+    {
+      free_and_init (writer.segment_buffer);
+    }
+
+  VFID_SET_NULL (&writer.lob_vfid);
+  writer.segment_size = 0;
+  writer.total_bytes = 0;
+  writer.logical_length = 0;
+  writer.expected_offset = 0;
+  writer.segment_start = 0;
+  writer.segment_end = 0;
+  writer.segment_received = 0;
+  writer.lob_type = DB_TYPE_NULL;
+  OID_SET_NULL (&writer.next_oid);
+  OID_SET_NULL (&writer.locator.oid);
+  writer.locator.length = 0;
+  writer.locator.adopted = false;
+  writer.initialized = false;
+  writer.finished = false;
 }
 
 static unsigned long long
@@ -590,6 +616,476 @@ internal_lob_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_WRITER &writer, IN
 
   locator.oid = next_oid;
   internal_lob_writer_clear (writer);
+  return NO_ERROR;
+}
+
+static int
+internal_lob_reverse_allocate_segment (INTERNAL_LOB_REVERSE_WRITER &writer)
+{
+  int header_size;
+  DB_BIGINT payload_size;
+  std::size_t allocation_size;
+
+  if (writer.segment_buffer != NULL)
+    {
+      return NO_ERROR;
+    }
+
+  payload_size = writer.segment_end - writer.segment_start;
+  header_size = writer.segment_start == 0 ? INTERNAL_LOB_HEAD_HEADER_SIZE : INTERNAL_LOB_CHUNK_HEADER_SIZE;
+  if (payload_size <= 0 || payload_size > writer.segment_size)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  allocation_size = (std::size_t) payload_size + (std::size_t) header_size;
+  /*
+   * The reverse writer survives across STREAM_SEND_DATA requests.  Do not use
+   * db_private_alloc here because its resource tracking is request-thread
+   * scoped and a later request may flush/free this buffer on another thread.
+   */
+  writer.segment_buffer = (char *) malloc (allocation_size);
+  if (writer.segment_buffer == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, allocation_size);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+  return NO_ERROR;
+}
+
+static int
+internal_lob_reverse_flush_segment (THREAD_ENTRY *thread_p, INTERNAL_LOB_REVERSE_WRITER &writer)
+{
+  DB_BIGINT payload_size;
+  OID current_oid;
+  int header_size;
+  int error;
+
+  payload_size = writer.segment_end - writer.segment_start;
+  if (writer.segment_buffer == NULL || payload_size <= 0 || writer.segment_received != payload_size)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  header_size = writer.segment_start == 0 ? INTERNAL_LOB_HEAD_HEADER_SIZE : INTERNAL_LOB_CHUNK_HEADER_SIZE;
+  if (writer.segment_start == 0)
+    {
+      int flags;
+
+      error = internal_lob_lob_type_to_flags (writer.lob_type, flags);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+      internal_lob_pack_head_header (writer.segment_buffer, writer.logical_length, flags, writer.next_oid);
+    }
+  else
+    {
+      internal_lob_pack_chunk_header (writer.segment_buffer, writer.next_oid);
+    }
+
+  error = oos_insert (thread_p, writer.lob_vfid,
+		      oos_buffer (writer.segment_buffer, (std::size_t) header_size + (std::size_t) payload_size),
+		      current_oid);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  oos_push_oos_oid (thread_p, &current_oid);
+  writer.next_oid = current_oid;
+  free_and_init (writer.segment_buffer);
+  writer.segment_received = 0;
+
+  if (writer.segment_start == 0)
+    {
+      writer.locator.oid = current_oid;
+      writer.locator.length = writer.logical_length;
+      writer.locator.adopted = false;
+      writer.finished = true;
+      return NO_ERROR;
+    }
+
+  writer.segment_end = writer.segment_start;
+  writer.segment_start = writer.segment_end > writer.segment_size ? writer.segment_end - writer.segment_size : 0;
+  return NO_ERROR;
+}
+
+int
+internal_lob_reverse_insert_begin (THREAD_ENTRY *thread_p, const VFID &lob_vfid, DB_TYPE lob_type,
+				   DB_BIGINT total_bytes, DB_BIGINT logical_length,
+				   INTERNAL_LOB_REVERSE_WRITER &writer)
+{
+  int segment_size;
+  int flags;
+  DB_BIGINT expected_bytes;
+  int error;
+
+  (void) thread_p;
+  internal_lob_reverse_writer_clear (writer);
+
+  if (VFID_ISNULL (&lob_vfid) || total_bytes < 0 || total_bytes > DB_MAX_INTERNAL_LOB_LENGTH
+      || logical_length < 0)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  error = internal_lob_lob_type_to_flags (lob_type, flags);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+  error = internal_lob_payload_bytes_from_flags (logical_length, flags, expected_bytes);
+  if (error != NO_ERROR || expected_bytes != total_bytes)
+    {
+      return error != NO_ERROR ? error : internal_lob_set_generic_error ();
+    }
+  error = internal_lob_get_segment_size (segment_size);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  writer.lob_vfid = lob_vfid;
+  writer.segment_size = segment_size;
+  writer.total_bytes = total_bytes;
+  writer.logical_length = logical_length;
+  writer.expected_offset = total_bytes;
+  writer.segment_end = total_bytes;
+  writer.segment_start = total_bytes > segment_size ? total_bytes - segment_size : 0;
+  writer.lob_type = lob_type;
+  OID_SET_NULL (&writer.next_oid);
+  OID_SET_NULL (&writer.locator.oid);
+  writer.locator.length = logical_length;
+  writer.locator.adopted = false;
+  writer.initialized = true;
+  return NO_ERROR;
+}
+
+int
+internal_lob_reverse_insert_append (THREAD_ENTRY *thread_p, INTERNAL_LOB_REVERSE_WRITER &writer,
+				    DB_BIGINT offset, oos_buffer chunk)
+{
+  DB_BIGINT range_end;
+  int error;
+
+  if (!writer.initialized || writer.finished || writer.total_bytes == 0 || chunk.data () == NULL
+      || chunk.size () == 0 || chunk.size () > (std::size_t) DB_BIGINT_MAX
+      || offset < 0 || offset > DB_BIGINT_MAX - (DB_BIGINT) chunk.size ())
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  range_end = offset + (DB_BIGINT) chunk.size ();
+  if (range_end != writer.expected_offset)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  while (range_end > offset)
+    {
+      DB_BIGINT piece_start;
+      DB_BIGINT piece_size;
+      DB_BIGINT payload_offset;
+      DB_BIGINT source_offset;
+      int header_size;
+
+      if (writer.segment_end <= writer.segment_start || range_end > writer.segment_end
+	  || range_end <= writer.segment_start)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+
+      error = internal_lob_reverse_allocate_segment (writer);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+
+      piece_start = offset > writer.segment_start ? offset : writer.segment_start;
+      piece_size = range_end - piece_start;
+      payload_offset = piece_start - writer.segment_start;
+      source_offset = piece_start - offset;
+      header_size = writer.segment_start == 0 ? INTERNAL_LOB_HEAD_HEADER_SIZE : INTERNAL_LOB_CHUNK_HEADER_SIZE;
+
+      memcpy (writer.segment_buffer + header_size + (std::size_t) payload_offset,
+	      chunk.data () + (std::size_t) source_offset, (std::size_t) piece_size);
+      writer.segment_received += piece_size;
+      range_end = piece_start;
+
+      if (range_end == writer.segment_start)
+	{
+	  error = internal_lob_reverse_flush_segment (thread_p, writer);
+	  if (error != NO_ERROR)
+	    {
+	      return error;
+	    }
+	}
+    }
+
+  writer.expected_offset = offset;
+  return NO_ERROR;
+}
+
+int
+internal_lob_reverse_insert_end (THREAD_ENTRY *thread_p, INTERNAL_LOB_REVERSE_WRITER &writer,
+				 INTERNAL_LOB_LOCATOR &locator)
+{
+  if (!writer.initialized || writer.expected_offset != 0)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  if (writer.total_bytes == 0 && !writer.finished)
+    {
+      char header[INTERNAL_LOB_HEAD_HEADER_SIZE];
+      OID head_oid;
+      OID next_oid;
+      int flags;
+      int error;
+
+      OID_SET_NULL (&next_oid);
+      error = internal_lob_lob_type_to_flags (writer.lob_type, flags);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+      internal_lob_pack_head_header (header, writer.logical_length, flags, next_oid);
+      error = oos_insert (thread_p, writer.lob_vfid, oos_buffer (header, sizeof (header)), head_oid);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+      oos_push_oos_oid (thread_p, &head_oid);
+      writer.locator.oid = head_oid;
+      writer.locator.length = writer.logical_length;
+      writer.locator.adopted = false;
+      writer.finished = true;
+    }
+
+  if (!writer.finished || OID_ISNULL (&writer.locator.oid) || writer.segment_buffer != NULL)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  locator = writer.locator;
+  return NO_ERROR;
+}
+
+void
+internal_lob_reverse_insert_abort (INTERNAL_LOB_REVERSE_WRITER &writer)
+{
+  internal_lob_reverse_writer_clear (writer);
+}
+
+struct internal_lob_clone_node
+{
+  OID oid;
+  int record_length;
+};
+
+static bool
+internal_lob_clone_contains_oid (const std::vector<internal_lob_clone_node> &nodes, const OID &oid)
+{
+  for (const internal_lob_clone_node &node : nodes)
+    {
+      if (OID_EQ (&node.oid, &oid))
+	{
+	  return true;
+	}
+    }
+  return false;
+}
+
+int
+internal_lob_clone (THREAD_ENTRY *thread_p, const VFID &target_lob_vfid, DB_TYPE lob_type,
+		    const INTERNAL_LOB_LOCATOR &source_locator, INTERNAL_LOB_LOCATOR &target_locator)
+{
+  std::vector<internal_lob_clone_node> nodes;
+  INTERNAL_LOB_REVERSE_WRITER empty_writer;
+  DB_BIGINT expected_payload_bytes;
+  DB_BIGINT expected_head_payload;
+  DB_BIGINT copied_payload_bytes = 0;
+  OID source_oid;
+  OID target_next_oid;
+  char *record = NULL;
+  std::size_t expected_node_count;
+  std::size_t max_record_length = 0;
+  int expected_flags;
+  int segment_size;
+  int error;
+
+  OID_SET_NULL (&target_locator.oid);
+  target_locator.length = 0;
+  target_locator.adopted = false;
+
+  if (thread_p == NULL || VFID_ISNULL (&target_lob_vfid) || source_locator.length < 0
+      || (lob_type != DB_TYPE_BLOB && lob_type != DB_TYPE_CLOB))
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  error = internal_lob_lob_type_to_flags (lob_type, expected_flags);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+  error = internal_lob_payload_bytes_from_flags (source_locator.length, expected_flags, expected_payload_bytes);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+  error = internal_lob_get_segment_size (segment_size);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  if (OID_ISNULL (&source_locator.oid))
+    {
+      if (expected_payload_bytes != 0)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+      error = internal_lob_reverse_insert_begin (thread_p, target_lob_vfid, lob_type, 0, source_locator.length,
+						 empty_writer);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+      return internal_lob_reverse_insert_end (thread_p, empty_writer, target_locator);
+    }
+
+  expected_node_count = expected_payload_bytes == 0
+			? 1
+			: (std::size_t) ((expected_payload_bytes - 1) / segment_size + 1);
+  expected_head_payload = expected_payload_bytes - (DB_BIGINT) (expected_node_count - 1) * segment_size;
+  source_oid = source_locator.oid;
+
+  while (!OID_ISNULL (&source_oid))
+    {
+      INTERNAL_LOB_READER node_reader;
+      DB_BIGINT expected_node_payload;
+      int header_size;
+      int node_payload;
+      int record_length;
+      bool is_head = nodes.empty ();
+
+      if (nodes.size () >= expected_node_count || internal_lob_clone_contains_oid (nodes, source_oid))
+	{
+	  return internal_lob_set_generic_error ();
+	}
+
+      record_length = oos_get_length (thread_p, source_oid);
+      if (record_length < 0)
+	{
+	  error = er_errid ();
+	  return error != NO_ERROR ? error : internal_lob_set_generic_error ();
+	}
+
+      header_size = is_head ? INTERNAL_LOB_HEAD_HEADER_SIZE : INTERNAL_LOB_CHUNK_HEADER_SIZE;
+      expected_node_payload = is_head ? expected_head_payload : segment_size;
+      node_payload = record_length - header_size;
+      if (node_payload < 0 || (DB_BIGINT) node_payload != expected_node_payload)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+
+      node_reader = INTERNAL_LOB_READER ();
+      error = internal_lob_reader_open_lob_node (thread_p, node_reader, source_oid, is_head);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+      if (is_head
+	  && (node_reader.logical_length != source_locator.length || node_reader.flags != expected_flags))
+	{
+	  return internal_lob_set_generic_error ();
+	}
+
+      nodes.push_back ({source_oid, record_length});
+      copied_payload_bytes += node_payload;
+      if (copied_payload_bytes > expected_payload_bytes)
+	{
+	  return internal_lob_set_generic_error ();
+	}
+      if ((std::size_t) record_length > max_record_length)
+	{
+	  max_record_length = (std::size_t) record_length;
+	}
+      source_oid = node_reader.next_lob_oid;
+    }
+
+  if (nodes.size () != expected_node_count || copied_payload_bytes != expected_payload_bytes
+      || max_record_length == 0)
+    {
+      return internal_lob_set_generic_error ();
+    }
+
+  record = (char *) malloc (max_record_length);
+  if (record == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, max_record_length);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  OID_SET_NULL (&target_next_oid);
+  for (std::size_t reverse_index = nodes.size (); reverse_index > 0; reverse_index--)
+    {
+      const std::size_t index = reverse_index - 1;
+      const bool is_head = index == 0;
+      OID source_next_oid;
+      OID target_current_oid;
+
+      error = oos_read (thread_p, nodes[index].oid,
+			oos_buffer (record, (std::size_t) nodes[index].record_length));
+      if (error != NO_ERROR)
+	{
+	  free_and_init (record);
+	  return error;
+	}
+
+      if (is_head)
+	{
+	  DB_BIGINT logical_length;
+	  int flags;
+
+	  error = internal_lob_unpack_head_header (record, logical_length, flags, source_next_oid);
+	  if (error != NO_ERROR || logical_length != source_locator.length || flags != expected_flags)
+	    {
+	      free_and_init (record);
+	      return error != NO_ERROR ? error : internal_lob_set_generic_error ();
+	    }
+	  internal_lob_pack_head_header (record, logical_length, flags, target_next_oid);
+	}
+      else
+	{
+	  internal_lob_unpack_chunk_header (record, source_next_oid);
+	  internal_lob_pack_chunk_header (record, target_next_oid);
+	}
+
+      if ((index + 1 < nodes.size () && !OID_EQ (&source_next_oid, &nodes[index + 1].oid))
+	  || (index + 1 == nodes.size () && !OID_ISNULL (&source_next_oid)))
+	{
+	  free_and_init (record);
+	  return internal_lob_set_generic_error ();
+	}
+
+      error = oos_insert (thread_p, target_lob_vfid,
+			  oos_buffer (record, (std::size_t) nodes[index].record_length), target_current_oid);
+      if (error != NO_ERROR)
+	{
+	  free_and_init (record);
+	  return error;
+	}
+      oos_push_oos_oid (thread_p, &target_current_oid);
+      target_next_oid = target_current_oid;
+    }
+
+  free_and_init (record);
+  target_locator.oid = target_next_oid;
+  target_locator.length = source_locator.length;
+  target_locator.adopted = false;
   return NO_ERROR;
 }
 
@@ -1115,6 +1611,66 @@ internal_lob_db_value_is_upload (const DB_VALUE *value, INTERNAL_LOB_UPLOAD_TOKE
       upload->token = (INT64) token;
       upload->data_length = (DB_BIGINT) data_length;
       upload->logical_length = (DB_BIGINT) logical_length;
+    }
+  return true;
+}
+
+bool
+internal_lob_db_value_is_dml_slot (const DB_VALUE *value, INTERNAL_LOB_DML_SLOT *dml_slot)
+{
+  DB_TYPE type;
+  const char *data = NULL;
+  int size = 0;
+  int prefix_len = (int) strlen (INTERNAL_LOB_DML_SLOT_PREFIX);
+  char marker_buf[80];
+  int slot;
+  int consumed = 0;
+
+  if (value == NULL || DB_IS_NULL (value)
+      || !db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_DML_SLOT))
+    {
+      return false;
+    }
+
+  type = DB_VALUE_DOMAIN_TYPE (value);
+  if (type == DB_TYPE_CLOB)
+    {
+      data = db_get_string (value);
+      size = db_get_string_size (value);
+    }
+  else if (type == DB_TYPE_BLOB)
+    {
+      int bit_length = 0;
+
+      data = (const char *) db_get_bit (value, &bit_length);
+      if (bit_length < 0 || bit_length % 8 != 0)
+	{
+	  return false;
+	}
+      size = bit_length / 8;
+    }
+  else
+    {
+      return false;
+    }
+
+  if (data == NULL || size <= prefix_len || size >= (int) sizeof (marker_buf)
+      || memcmp (data, INTERNAL_LOB_DML_SLOT_PREFIX, prefix_len) != 0)
+    {
+      return false;
+    }
+
+  memcpy (marker_buf, data, size);
+  marker_buf[size] = '\0';
+  if (sscanf (marker_buf + prefix_len, "%d%n", &slot, &consumed) != 1
+      || marker_buf[prefix_len + consumed] != '\0' || slot < 0)
+    {
+      return false;
+    }
+
+  if (dml_slot != NULL)
+    {
+      dml_slot->slot = slot;
     }
   return true;
 }

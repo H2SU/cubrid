@@ -95,6 +95,9 @@ extern int session_get_load_session (THREAD_ENTRY * thread_p, REFPTR (load_sessi
 
 extern int session_set_stream_session (THREAD_ENTRY * thread_p, stream_session * stream_session_p);
 extern int session_get_stream_session (THREAD_ENTRY * thread_p, REFPTR (stream_session, stream_session_ref_ptr));
+extern bool session_has_internal_lob_dml_stream (THREAD_ENTRY * thread_p);
+extern int session_internal_lob_dml_consume (THREAD_ENTRY * thread_p, int slot, const OID * class_oid,
+				      DB_TYPE expected_type, INTERNAL_LOB_LOCATOR * locator);
 extern int session_internal_lob_upload_begin (THREAD_ENTRY * thread_p, DB_TYPE type, DB_BIGINT data_length,
 				       DB_BIGINT logical_length, INT64 * token);
 extern int session_internal_lob_upload_append (THREAD_ENTRY * thread_p, INT64 token, const char *data, int data_size);

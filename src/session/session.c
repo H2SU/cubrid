@@ -34,6 +34,7 @@
 #include "system.h"
 #include "session.h"
 #include "stream_session.hpp"
+#include "internal_lob_dml_session.hpp"
 #include "internal_lob_upload.hpp"
 
 #include "boot_sr.h"
@@ -3318,6 +3319,39 @@ session_get_stream_session (THREAD_ENTRY * thread_p, REFPTR (stream_session, str
   stream_session_ref_ptr = state_p->stream_session_p;
 
   return NO_ERROR;
+}
+
+bool
+session_has_internal_lob_dml_stream (THREAD_ENTRY *thread_p)
+{
+  SESSION_STATE *state_p = session_get_session_state (thread_p);
+
+  return state_p != NULL && dynamic_cast<internal_lob_dml_session *> (state_p->stream_session_p) != NULL;
+}
+
+int
+session_internal_lob_dml_consume (THREAD_ENTRY *thread_p, int slot, const OID *class_oid, DB_TYPE expected_type,
+				  INTERNAL_LOB_LOCATOR *locator)
+{
+  SESSION_STATE *state_p = session_get_session_state (thread_p);
+  internal_lob_dml_session *dml_session_p;
+
+  if (state_p == NULL || locator == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1,
+	      "internal LOB DML stream is unavailable");
+      return ER_STREAM_SESSION_ERROR;
+    }
+
+  dml_session_p = dynamic_cast<internal_lob_dml_session *> (state_p->stream_session_p);
+  if (dml_session_p == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1,
+	      "active stream does not own internal LOB DML");
+      return ER_STREAM_SESSION_ERROR;
+    }
+
+  return dml_session_p->consume_lob_slot (thread_p, slot, class_oid, expected_type, *locator);
 }
 
 int

@@ -213,6 +213,8 @@ static bool parser_si_tran_id = false;
 
 /* check the condition that the statment is not able to be prepared */
 static bool parser_cannot_prepare = false;
+static bool parser_has_internal_lob_file_prepare_blocker = false;
+static bool parser_has_other_prepare_blocker = false;
 
 /* check the condition that the result of a query is not able to be cached */
 static bool parser_cannot_cache = false;
@@ -1926,6 +1928,9 @@ stmt
 			    node->flag.si_datetime = (parser_si_datetime == true) ? 1 : 0;
 			    node->flag.si_tran_id = (parser_si_tran_id == true) ? 1 : 0;
 			    node->flag.cannot_prepare = (parser_cannot_prepare == true) ? 1 : 0;
+			    node->flag.cannot_prepare_only_internal_lob_file =
+			      (parser_cannot_prepare && parser_has_internal_lob_file_prepare_blocker
+			       && !parser_has_other_prepare_blocker) ? 1 : 0;
 			  }
 
 			parser_restore_si_datetime ();
@@ -8858,6 +8863,7 @@ call_stmt
 			  }
 
 			parser_cannot_prepare = true;
+			parser_has_other_prepare_blocker = true;
 			parser_cannot_cache = true;
 
 			$$ = node;
@@ -17571,6 +17577,7 @@ generic_function_id
 			      }
 
 			    parser_cannot_prepare = true;
+			    parser_has_other_prepare_blocker = true;
 			    parser_cannot_cache = true;
 			  }
 
@@ -22976,18 +22983,26 @@ parser_restore_si_tran_id ()
 }
 
 static int parser_cannot_prepare_saved;
+static int parser_has_internal_lob_file_prepare_blocker_saved;
+static int parser_has_other_prepare_blocker_saved;
 
 static void
 parser_save_and_set_cannot_prepare (bool value)
 {
   parser_cannot_prepare_saved = parser_cannot_prepare;
+  parser_has_internal_lob_file_prepare_blocker_saved = parser_has_internal_lob_file_prepare_blocker;
+  parser_has_other_prepare_blocker_saved = parser_has_other_prepare_blocker;
   parser_cannot_prepare = value;
+  parser_has_internal_lob_file_prepare_blocker = false;
+  parser_has_other_prepare_blocker = value;
 }
 
 static void
 parser_restore_cannot_prepare ()
 {
   parser_cannot_prepare = parser_cannot_prepare_saved;
+  parser_has_internal_lob_file_prepare_blocker = parser_has_internal_lob_file_prepare_blocker_saved;
+  parser_has_other_prepare_blocker = parser_has_other_prepare_blocker_saved;
 }
 
 static int parser_wjc_stack_default[STACK_SIZE];
@@ -24207,6 +24222,7 @@ parser_keyword_func (const char *name, PT_NODE * args)
 	}
       parser_cannot_cache = true;
       parser_cannot_prepare = true;
+      parser_has_other_prepare_blocker = true;
       return parser_make_expression (this_parser, key->op, NULL, NULL, NULL);
 
     case PT_SYS_GUID:
@@ -24869,9 +24885,11 @@ parser_keyword_func (const char *name, PT_NODE * args)
                 }
 	    }
 
-	  /* Those two functions should be evaluated at the compile time */
+	  /* File sources remain compile-time expressions unless semantic analysis proves that every source is the direct
+	   * value of an Internal LOB DML target. */
 	  parser_cannot_cache = true;
 	  parser_cannot_prepare = true;
+	  parser_has_internal_lob_file_prepare_blocker = true;
 	  node = parser_make_expression (this_parser, key->op, a1, a2, NULL);
 
 	  if (a1->node_type != PT_VALUE || a1->type_enum != PT_TYPE_CHAR)

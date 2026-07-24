@@ -980,7 +980,34 @@ oos_create_file_with_type (THREAD_ENTRY *thread_p, int file_type, VFID &oos_vfid
   log_addr.vfid = &oos_vfid;
   log_addr.pgptr = hdr_page;
   log_addr.offset = slotid;
+
+  /* The OOS file header uses RVOOS_INSERT for local crash recovery, but it is not a heap-column OOS value.
+   * Do not let log_manager enqueue this structural WAL record as row-replication payload. Otherwise, when an
+   * ordinary OOS file is created between Internal LOB values, the extra header LSA shifts every following
+   * attrid/destination pair and the slave rebuilds each value from the wrong WAL range. */
+  LOG_TDES *tdes = NULL;
+  bool saved_suppress_insert_lsa_queueing = false;
+  if (oos_needs_repl_tracking (thread_p))
+    {
+      tdes = LOG_FIND_TDES (LOG_FIND_THREAD_TRAN_INDEX (thread_p));
+      if (tdes == NULL)
+	{
+	  pgbuf_unfix_and_init (thread_p, hdr_page);
+	  log_sysop_abort (thread_p);
+	  er_set (ER_FATAL_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_UNKNOWN_TRANINDEX, 1,
+		  LOG_FIND_THREAD_TRAN_INDEX (thread_p));
+	  return ER_LOG_UNKNOWN_TRANINDEX;
+	}
+      saved_suppress_insert_lsa_queueing = tdes->oos_suppress_insert_lsa_queueing;
+      tdes->oos_suppress_insert_lsa_queueing = true;
+    }
+
   log_append_undoredo_recdes (thread_p, RVOOS_INSERT, &log_addr, NULL, &hdr_recdes);
+
+  if (tdes != NULL)
+    {
+      tdes->oos_suppress_insert_lsa_queueing = saved_suppress_insert_lsa_queueing;
+    }
 
   pgbuf_set_dirty (thread_p, hdr_page, FREE);
 

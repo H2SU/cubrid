@@ -279,8 +279,6 @@ static XASL_NODE *pt_to_merge_insert_xasl (PARSER_CONTEXT * parser, PT_NODE * st
 					   PT_NODE * default_expr_attrs);
 static PT_NODE *pt_append_assignment_references (PARSER_CONTEXT * parser, PT_NODE * assignments, PT_NODE * from,
 						 PT_NODE * select_list);
-static bool pt_is_internal_lob_direct_source_expr (const PT_NODE * node);
-static int pt_fold_internal_lob_direct_from_file_assignments (PARSER_CONTEXT * parser, PT_NODE * assignments);
 static ODKU_INFO *pt_to_odku_info (PARSER_CONTEXT * parser, PT_NODE * insert, XASL_NODE * xasl);
 static REGU_VARIABLE *pt_to_cume_dist_percent_rank_regu_variable (PARSER_CONTEXT * parser, PT_NODE * tree, UNBOX unbox);
 
@@ -7711,6 +7709,7 @@ pt_to_regu_variable (PARSER_CONTEXT * parser, PT_NODE * node, UNBOX unbox)
 		}
 
 	      if (node->info.expr.op == PT_BFILE_FROM_FILE || node->info.expr.op == PT_CFILE_FROM_FILE
+		  || node->info.expr.op == PT_BLOB_FROM_FILE || node->info.expr.op == PT_CLOB_FROM_FILE
 		  || pt_is_internal_lob_direct_source_expr (node))
 		{
 		  /*
@@ -19785,83 +19784,6 @@ pt_append_assignment_references (PARSER_CONTEXT * parser, PT_NODE * assignments,
   return select_list;
 }
 
-static bool
-pt_is_internal_lob_direct_source_expr (const PT_NODE * node)
-{
-  if (node == NULL || node->node_type != PT_EXPR || !(node->info.expr.flag & PT_EXPR_INFO_LOB_DIRECT_INSERT))
-    {
-      return false;
-    }
-
-  return node->info.expr.op == PT_BLOB_FROM_FILE || node->info.expr.op == PT_CLOB_FROM_FILE
-    || node->info.expr.op == PT_BFILE_TO_BLOB || node->info.expr.op == PT_CFILE_TO_CLOB;
-}
-
-/*
- * pt_fold_internal_lob_direct_from_file_assignments () - Evaluate direct internal LOB streaming source assignment RHS
- *							  before UPDATE/MERGE assignment-list splitting.
- * return : NO_ERROR or error code
- * parser (in)      : parser context
- * assignments (in) : assignment expression list
- *
- * Note:
- * UPDATE is compiled as a generated SELECT plus an UPDATE node.  If a direct clob_from_file()/blob_from_file()
- * assignment is left in the generated SELECT list, the transient pending-lob DB_VALUE travels through a list file
- * before heap update.  Keep direct file loads in the constant-assignment lane instead: evaluate the client-side file
- * expression once during XASL generation and replace the RHS with an initialized PT_VALUE that preserves the internal
- * LOB marker.
- */
-static int
-pt_fold_internal_lob_direct_from_file_assignments (PARSER_CONTEXT * parser, PT_NODE * assignments)
-{
-  PT_NODE *assign;
-
-  for (assign = assignments; assign != NULL; assign = assign->next)
-    {
-      PT_NODE *rhs;
-      PT_NODE *value_node;
-      PT_NODE *save_next;
-      DB_VALUE value;
-      int error = NO_ERROR;
-
-      if (!PT_IS_ASSIGN_NODE (assign))
-	{
-	  continue;
-	}
-
-      rhs = assign->info.expr.arg2;
-      if (!pt_is_internal_lob_direct_source_expr (rhs))
-	{
-	  continue;
-	}
-
-      db_make_null (&value);
-      pt_evaluate_tree (parser, rhs, &value, 1);
-      if (pt_has_error (parser))
-	{
-	  ASSERT_ERROR_AND_SET (error);
-	  pr_clear_value (&value);
-	  return error;
-	}
-
-      value_node = pt_dbval_to_value (parser, &value);
-      pr_clear_value (&value);
-      if (value_node == NULL)
-	{
-	  ASSERT_ERROR_AND_SET (error);
-	  return error;
-	}
-
-      save_next = rhs->next;
-      rhs->next = NULL;
-      parser_free_tree (parser, rhs);
-      value_node->next = save_next;
-      assign->info.expr.arg2 = value_node;
-    }
-
-  return NO_ERROR;
-}
-
 /*
  * pt_to_odku_info () - build a ODKU_INFO for an INSERT ... ON DUPLICATE KEY UPDATE statement
  * return : ODKU info or NULL
@@ -19927,7 +19849,7 @@ pt_to_odku_info (PARSER_CONTEXT * parser, PT_NODE * insert, XASL_NODE * xasl)
       PT_INTERNAL_ERROR (parser, "odku on update insert error");
       goto exit_on_error;
     }
-  error = pt_fold_internal_lob_direct_from_file_assignments (parser, assignments);
+  error = pt_fold_internal_lob_direct_source_assignments (parser, assignments);
   if (error != NO_ERROR)
     {
       goto exit_on_error;
@@ -21974,7 +21896,7 @@ pt_to_update_xasl (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE ** non_
       PT_INTERNAL_ERROR (parser, "update");
       goto cleanup;
     }
-  error = pt_fold_internal_lob_direct_from_file_assignments (parser, statement->info.update.assignment);
+  error = pt_fold_internal_lob_direct_source_assignments (parser, statement->info.update.assignment);
   if (error != NO_ERROR)
     {
       goto cleanup;
@@ -26914,7 +26836,7 @@ pt_to_merge_update_xasl (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE *
       PT_INTERNAL_ERROR (parser, "merge update");
       goto cleanup;
     }
-  error = pt_fold_internal_lob_direct_from_file_assignments (parser, info->update.assignment);
+  error = pt_fold_internal_lob_direct_source_assignments (parser, info->update.assignment);
   if (error != NO_ERROR)
     {
       goto cleanup;

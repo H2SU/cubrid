@@ -277,6 +277,101 @@ static int pt_check_range_partition_strict_increasing (PARSER_CONTEXT * parser, 
 						       PT_NODE * part_next, PT_NODE * column_dt);
 static int pt_coerce_partition_value_with_data_type (PARSER_CONTEXT * parser, PT_NODE * value, PT_NODE * data_type);
 static int pt_check_default_value_param_for_stored_procedure (PARSER_CONTEXT * parser, PT_NODE * param);
+static bool pt_is_direct_internal_lob_dml_source (PT_TYPE_ENUM target_type, const PT_NODE * source);
+
+static bool
+pt_is_direct_internal_lob_dml_source (PT_TYPE_ENUM target_type, const PT_NODE * source)
+{
+  if (source == NULL || source->node_type != PT_EXPR)
+    {
+      return false;
+    }
+
+  if (target_type == PT_TYPE_CLOB)
+    {
+      if (source->info.expr.op == PT_CLOB_FROM_FILE || source->info.expr.op == PT_CFILE_TO_CLOB)
+	{
+	  return true;
+	}
+      return source->info.expr.op == PT_CHAR_TO_CLOB
+	&& pt_is_const_expr_node ((PT_NODE *) source->info.expr.arg1);
+    }
+
+  if (target_type == PT_TYPE_BLOB)
+    {
+      if (source->info.expr.op == PT_BLOB_FROM_FILE || source->info.expr.op == PT_BFILE_TO_BLOB)
+	{
+	  return true;
+	}
+      return (source->info.expr.op == PT_BIT_TO_BLOB || source->info.expr.op == PT_CHAR_TO_BLOB)
+	&& pt_is_const_expr_node ((PT_NODE *) source->info.expr.arg1);
+    }
+
+  return false;
+}
+
+typedef struct internal_lob_prepare_check INTERNAL_LOB_PREPARE_CHECK;
+struct internal_lob_prepare_check
+{
+  int direct_source_depth;
+  bool saw_file_source;
+  bool saw_uncovered_file_source;
+};
+
+static PT_NODE *
+pt_check_internal_lob_prepare_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  INTERNAL_LOB_PREPARE_CHECK *check = (INTERNAL_LOB_PREPARE_CHECK *) arg;
+
+  *continue_walk = PT_CONTINUE_WALK;
+  if (pt_is_internal_lob_direct_source_expr (node))
+    {
+      check->direct_source_depth++;
+    }
+
+  if (node->node_type == PT_EXPR
+      && (node->info.expr.op == PT_BLOB_FROM_FILE || node->info.expr.op == PT_CLOB_FROM_FILE
+	  || node->info.expr.op == PT_BFILE_FROM_FILE || node->info.expr.op == PT_CFILE_FROM_FILE))
+    {
+      check->saw_file_source = true;
+      if (check->direct_source_depth == 0)
+	{
+	  check->saw_uncovered_file_source = true;
+	}
+    }
+  return node;
+}
+
+static PT_NODE *
+pt_check_internal_lob_prepare_post (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  INTERNAL_LOB_PREPARE_CHECK *check = (INTERNAL_LOB_PREPARE_CHECK *) arg;
+
+  if (pt_is_internal_lob_direct_source_expr (node))
+    {
+      check->direct_source_depth--;
+    }
+  return node;
+}
+
+static void
+pt_allow_direct_internal_lob_file_dml_prepare (PARSER_CONTEXT * parser, PT_NODE * statement)
+{
+  INTERNAL_LOB_PREPARE_CHECK check = { 0, false, false };
+
+  if (statement == NULL || !statement->flag.cannot_prepare_only_internal_lob_file)
+    {
+      return;
+    }
+
+  (void) parser_walk_tree (parser, statement, pt_check_internal_lob_prepare_pre, &check,
+			   pt_check_internal_lob_prepare_post, &check);
+  if (check.saw_file_source && !check.saw_uncovered_file_source)
+    {
+      statement->flag.cannot_prepare = 0;
+      statement->flag.cannot_prepare_only_internal_lob_file = 0;
+    }
+}
 
 /* pt_combine_compatible_info () - combine two cinfo into cinfo1
  *   return: true if compatible, else false
@@ -11061,16 +11156,14 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 		    {
 		      continue;
 		    }
-          if ((ins_attr->type_enum == PT_TYPE_CLOB
-	       && (ins_val->info.expr.op == PT_CLOB_FROM_FILE || ins_val->info.expr.op == PT_CFILE_TO_CLOB))
-	      || (ins_attr->type_enum == PT_TYPE_BLOB
-		  && (ins_val->info.expr.op == PT_BLOB_FROM_FILE || ins_val->info.expr.op == PT_BFILE_TO_BLOB)))
+		  if (pt_is_direct_internal_lob_dml_source (ins_attr->type_enum, ins_val))
 		    {
 		      PT_EXPR_INFO_SET_FLAG (ins_val, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		    }
 		}
 	    }
 	}
+      pt_allow_direct_internal_lob_file_dml_prepare (parser, node);
 
       /* semantic check value clause for SELECT and INSERT subclauses */
       if (node)
@@ -11459,15 +11552,13 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 		{
 		  continue;
 		}
-      if ((lhs->type_enum == PT_TYPE_CLOB
-	   && (rhs->info.expr.op == PT_CLOB_FROM_FILE || rhs->info.expr.op == PT_CFILE_TO_CLOB))
-	  || (lhs->type_enum == PT_TYPE_BLOB
-	      && (rhs->info.expr.op == PT_BLOB_FROM_FILE || rhs->info.expr.op == PT_BFILE_TO_BLOB)))
+	      if (pt_is_direct_internal_lob_dml_source (lhs->type_enum, rhs))
 		{
 		  PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		}
 	    }
 	}
+      pt_allow_direct_internal_lob_file_dml_prepare (parser, node);
 
       node = pt_semantic_type (parser, node, info);
 
@@ -11634,10 +11725,7 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	    }
 	  if (rhs != NULL && rhs->node_type == PT_EXPR && PT_IS_LOB_TYPE (t_node->type_enum))
 	    {
-	      if ((t_node->type_enum == PT_TYPE_CLOB
-		   && (rhs->info.expr.op == PT_CLOB_FROM_FILE || rhs->info.expr.op == PT_CFILE_TO_CLOB))
-		  || (t_node->type_enum == PT_TYPE_BLOB
-		      && (rhs->info.expr.op == PT_BLOB_FROM_FILE || rhs->info.expr.op == PT_BFILE_TO_BLOB)))
+	      if (pt_is_direct_internal_lob_dml_source (t_node->type_enum, rhs))
 		{
 		  PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		}
@@ -11673,7 +11761,25 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	    {
 	      break;
 	    }
+
+	  /* Flag direct Internal LOB sources in the MERGE INSERT clause before pt_semantic_type () can fold them. */
+	  if (node->info.merge.insert.value_clauses != NULL
+	      && node->info.merge.insert.value_clauses->info.node_list.list_type == PT_IS_VALUE)
+	    {
+	      PT_NODE *ins_attr = node->info.merge.insert.attr_list;
+	      PT_NODE *ins_val = node->info.merge.insert.value_clauses->info.node_list.list;
+
+	      for (; ins_attr != NULL && ins_val != NULL; ins_attr = ins_attr->next, ins_val = ins_val->next)
+		{
+		  if (PT_IS_LOB_TYPE (ins_attr->type_enum) && ins_val->node_type == PT_EXPR
+		      && pt_is_direct_internal_lob_dml_source (ins_attr->type_enum, ins_val))
+		    {
+		      PT_EXPR_INFO_SET_FLAG (ins_val, PT_EXPR_INFO_LOB_DIRECT_INSERT);
+		    }
+		}
+	    }
 	}
+      pt_allow_direct_internal_lob_file_dml_prepare (parser, node);
 
       node = pt_semantic_type (parser, node, info);
 
@@ -17502,10 +17608,7 @@ pt_check_odku_assignments (PARSER_CONTEXT * parser, PT_NODE * insert)
       rhs = assignment->info.expr.arg2;
       if (rhs != NULL && rhs->node_type == PT_EXPR && PT_IS_LOB_TYPE (lhs->type_enum))
 	{
-	  if ((lhs->type_enum == PT_TYPE_CLOB
-	       && (rhs->info.expr.op == PT_CLOB_FROM_FILE || rhs->info.expr.op == PT_CFILE_TO_CLOB))
-	      || (lhs->type_enum == PT_TYPE_BLOB
-		  && (rhs->info.expr.op == PT_BLOB_FROM_FILE || rhs->info.expr.op == PT_BFILE_TO_BLOB)))
+	  if (pt_is_direct_internal_lob_dml_source (lhs->type_enum, rhs))
 	    {
 	      PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 	    }
