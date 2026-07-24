@@ -33,7 +33,9 @@
 #include "es_common.h"
 #include "heap_file.h"
 #include "internal_lob_file.hpp"
+#include "internal_lob_marker.h"
 #include "object_primitive.h"
+#include "parser.h"
 #include "string_opfunc.h"
 #include "system_parameter.h"
 #include "work_space.h"
@@ -165,6 +167,21 @@ make_path_value (const std::string &path)
 
   db_make_varchar (&value, DB_MAX_VARCHAR_PRECISION, path.c_str (), (int) path.size (), LANG_SYS_CODESET,
 		   LANG_COLL_DEFAULT);
+  return value;
+}
+
+static DB_VALUE
+make_external_lob_value (DB_TYPE type, const std::string &locator, DB_BIGINT size)
+{
+  DB_ELO elo;
+  DB_VALUE value;
+
+  elo_init_structure (&elo);
+  elo.type = ELO_FBO;
+  elo.locator = const_cast<char *> (locator.c_str ());
+  elo.es_type = es_get_type (locator.c_str ());
+  elo.size = size;
+  db_make_elo (&value, type, &elo);
   return value;
 }
 
@@ -431,6 +448,104 @@ TEST_F (OosSqlInternalLobLocator, DirectFromFileUpdateUsesPendingMarkerAndStream
   pr_clear_value (&bit_value);
   std::remove (clob_path.c_str ());
   std::remove (blob_path.c_str ());
+}
+
+TEST_F (OosSqlInternalLobLocator, DirectLobfileConversionStreamsPayload)
+{
+  std::string clob_path = internal_lob_test_path ("bridge_clob.txt");
+  std::string blob_path = internal_lob_test_path ("bridge_blob.bin");
+  std::string clob_payload = "bridge clob payload";
+  std::string blob_payload ("\x01\x23\x45\x67", 4);
+  DB_VALUE char_value, bit_value;
+  const char *text;
+  const char *bits;
+  int bit_length = 0;
+  int rc;
+
+  write_test_file (clob_path, clob_payload);
+  write_test_file (blob_path, blob_payload);
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB, b BLOB)");
+  ASSERT_GE (rc, 0);
+
+  rc = exec_sql ("INSERT INTO t_internal_lob_locator VALUES (1, NULL, NULL)");
+  ASSERT_GE (rc, 0);
+
+  std::string update_sql = "UPDATE t_internal_lob_locator SET c = cfile_to_clob(cfile_from_file('" + clob_path
+			   + "')), b = bfile_to_blob(bfile_from_file('" + blob_path + "')) WHERE id = 1";
+  rc = exec_sql (update_sql.c_str ());
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = fetch_internal_lob_pair ("SELECT clob_to_char(c), blob_to_bit(b) "
+				"FROM t_internal_lob_locator WHERE id = 1", &char_value, &bit_value);
+  ASSERT_EQ (rc, NO_ERROR);
+  text = db_get_string (&char_value);
+  ASSERT_NE (text, nullptr);
+  EXPECT_EQ (std::string (text, (std::size_t) db_get_string_size (&char_value)), clob_payload);
+  bits = (const char *) db_get_bit (&bit_value, &bit_length);
+  ASSERT_NE (bits, nullptr);
+  EXPECT_EQ (bit_length, (int) blob_payload.size () * 8);
+  EXPECT_EQ (std::memcmp (bits, blob_payload.data (), blob_payload.size ()), 0);
+  pr_clear_value (&char_value);
+  pr_clear_value (&bit_value);
+
+  std::remove (clob_path.c_str ());
+  std::remove (blob_path.c_str ());
+}
+
+TEST_F (OosSqlInternalLobLocator, StreamingFunctionsEnforceFourGiBPhysicalLimit)
+{
+  const DB_BIGINT limit = DB_MAX_INTERNAL_LOB_LENGTH;
+  std::string locator = std::string (ES_LOCAL_PATH_PREFIX) + "/tmp/internal_lob_size_boundary";
+  DB_VALUE source_value, result_value;
+  INTERNAL_LOB_PENDING pending;
+  int rc;
+
+  source_value = make_external_lob_value (DB_TYPE_CFILE, locator, limit);
+  db_make_null (&result_value);
+  rc = db_cfile_to_clob_pending (&source_value, &result_value);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_TRUE (internal_lob_db_value_is_pending (&result_value, &pending));
+  EXPECT_EQ (pending.size, limit);
+  EXPECT_FALSE (pending.delete_after_read);
+  pr_clear_value (&result_value);
+
+  source_value = make_external_lob_value (DB_TYPE_BFILE, locator, limit);
+  db_make_null (&result_value);
+  rc = db_bfile_to_blob_pending (&source_value, &result_value);
+  ASSERT_EQ (rc, NO_ERROR);
+  ASSERT_TRUE (internal_lob_db_value_is_pending (&result_value, &pending));
+  EXPECT_EQ (pending.size, limit);
+  EXPECT_FALSE (pending.delete_after_read);
+  pr_clear_value (&result_value);
+
+  source_value = make_external_lob_value (DB_TYPE_CFILE, locator, limit + 1);
+  db_make_null (&result_value);
+  rc = db_cfile_to_clob_pending (&source_value, &result_value);
+  EXPECT_EQ (rc, ER_ES_GENERAL);
+  EXPECT_FALSE (internal_lob_db_value_is_pending (&result_value, &pending));
+  er_clear ();
+
+  source_value = make_external_lob_value (DB_TYPE_BFILE, locator, limit + 1);
+  db_make_null (&result_value);
+  rc = db_bfile_to_blob_pending (&source_value, &result_value);
+  EXPECT_EQ (rc, ER_ES_GENERAL);
+  EXPECT_FALSE (internal_lob_db_value_is_pending (&result_value, &pending));
+  er_clear ();
+}
+
+TEST_F (OosSqlInternalLobLocator, DirectSqlTextRejectsValuesBeyondStringLimit)
+{
+  PARSER_CONTEXT *parser = parser_create_parser ();
+  PARSER_VARCHAR existing = { DB_MAX_STRING_LENGTH, { 0 } };
+
+  ASSERT_NE (parser, nullptr);
+  er_clear ();
+  EXPECT_EQ (pt_append_bytes (parser, &existing, "x", 1), nullptr);
+  EXPECT_EQ (er_errid (), ER_QPROC_STRING_SIZE_TOO_BIG);
+  er_clear ();
+  parser_free_parser (parser);
 }
 
 TEST_F (OosSqlInternalLobLocator, DirectFromFileOdkuUsesPendingMarkerAndStreamsPayload)

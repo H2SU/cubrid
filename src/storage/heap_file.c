@@ -723,9 +723,9 @@ static int heap_attrinfo_start_refoids (THREAD_ENTRY * thread_p, OID * class_oid
 static int heap_attrinfo_get_record_payload_size (HEAP_CACHE_ATTRINFO * attr_info, std::vector<int> * column_size);
 static int heap_attrinfo_get_record_header_size (HEAP_CACHE_ATTRINFO * attr_info, int payload_size, bool is_mvcc_class,
 						 size_t * offset_size_ptr);
-static size_t heap_attrinfo_determine_disk_layout (HEAP_CACHE_ATTRINFO * attr_info, bool is_mvcc_class,
-						   size_t * offset_size_ptr, std::vector<bool> * oos_columns, bool * has_oos);
-static bool heap_internal_lob_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * lob_vfid, bool docreate);
+static int heap_attrinfo_determine_disk_layout (HEAP_CACHE_ATTRINFO * attr_info, bool is_mvcc_class,
+						size_t * offset_size_ptr, std::vector<bool> * oos_columns,
+						bool * has_oos, size_t * inline_size_after_oos_ptr);
 // *INDENT-ON*
 
 static void heap_attrvalue_point_fixed (RECDES * recdes, HEAP_CACHE_ATTRINFO * attr_info, OR_ATTRIBUTE * attrepr,
@@ -12370,7 +12370,7 @@ end:
   return success;
 }
 
-static bool
+bool
 heap_internal_lob_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * lob_vfid, bool docreate)
 {
   HEAP_HDR_STATS *heap_hdr;	/* Header of heap structure */
@@ -12381,6 +12381,7 @@ heap_internal_lob_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * 
   bool success;
 
   success = true;
+  VFID_SET_NULL (lob_vfid);
 
   addr_hdr.vfid = &hfid->vfid;
   addr_hdr.offset = HEAP_HEADER_AND_CHAIN_SLOTID;
@@ -12640,6 +12641,12 @@ heap_internal_lob_insert_file_source (THREAD_ENTRY * thread_p, const OID * class
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_GENERAL, 2, "LOB", "external file size changed");
       return ER_ES_GENERAL;
     }
+  if (source->data_length > DB_MAX_INTERNAL_LOB_LENGTH)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_GENERAL, 2, "LOB input",
+	      "source exceeds the 4 GiB internal LOB limit");
+      return ER_ES_GENERAL;
+    }
   if (source->lob_type == DB_TYPE_BLOB
       && (source->data_length > DB_BIGINT_MAX / 8 || source->bit_length != source->data_length * 8))
     {
@@ -12664,7 +12671,7 @@ heap_internal_lob_insert_pending_source (THREAD_ENTRY * thread_p, const OID * cl
   int error;
 
   if (pending == NULL || locator == NULL || (pending->lob_type != DB_TYPE_CLOB && pending->lob_type != DB_TYPE_BLOB)
-      || pending->size < 0)
+      || pending->size < 0 || pending->size > DB_MAX_INTERNAL_LOB_LENGTH)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
       return ER_GENERIC_ERROR;
@@ -12703,7 +12710,8 @@ heap_internal_lob_insert_pending_source (THREAD_ENTRY * thread_p, const OID * cl
 					   bit_length, locator);
   if (error != NO_ERROR)
     {
-      if (db_elo_delete (&reader_ctx.elo) != NO_ERROR)
+
+      if (pending->delete_after_read && db_elo_delete (&reader_ctx.elo) != NO_ERROR)
 	{
 	  er_log_debug (ARG_FILE_LINE,
 			"heap_internal_lob_insert_pending_source: temp ELO delete after insert failure failed "
@@ -12713,7 +12721,7 @@ heap_internal_lob_insert_pending_source (THREAD_ENTRY * thread_p, const OID * cl
       return error;
     }
 
-  if (db_elo_delete (&reader_ctx.elo) != NO_ERROR)
+  if (pending->delete_after_read && db_elo_delete (&reader_ctx.elo) != NO_ERROR)
     {
       er_log_debug (ARG_FILE_LINE,
 		    "heap_internal_lob_insert_pending_source: temp ELO delete failed (err=%d); ES file may be orphaned\n",
@@ -28382,12 +28390,14 @@ heap_recdes_contains_oos (const RECDES * record)
   return flag & OR_MVCC_FLAG_HAS_OOS;
 }
 
-int
-heap_recdes_get_oos_oids (const RECDES * recdes, OID_VECTOR & oos_oids)
+static int
+heap_recdes_get_oos_slots (const RECDES * recdes, HEAP_OOS_REFERENCE_VECTOR & oos_references)
 {
   using namespace oos_log;
 
-  oos_oids.clear ();
+  int error = NO_ERROR;
+
+  oos_references.clear ();
 
   if (!heap_recdes_contains_oos (recdes))
     {
@@ -28405,7 +28415,8 @@ heap_recdes_get_oos_oids (const RECDES * recdes, OID_VECTOR & oos_oids)
       if (index == max_var_count)
 	{
 	  assert_release (false && "LAST_ELEMENT flag not found within record bounds");
-	  return ER_FAILED;
+	  error = ER_FAILED;
+	  goto end;
 	}
 
       int offset;
@@ -28422,64 +28433,141 @@ heap_recdes_get_oos_oids (const RECDES * recdes, OID_VECTOR & oos_oids)
 	  break;
 	default:
 	  assert_release (false);
-	  return ER_FAILED;
+	  error = ER_FAILED;
+	  goto end;
 	}
 
       if (OR_IS_OOS (offset))
 	{
-	  OID oid = OID_INITIALIZER;
+	  HEAP_OOS_REFERENCE reference = { OID_INITIALIZER, 0, DB_TYPE_NULL, index };
 	  const char *oid_ptr = (char *) recdes->data + OR_VAR_OFFSET (recdes->data, index);
-	  if (oid_ptr + OR_OID_SIZE > (char *) recdes->data + recdes->length)
+	  if (oid_ptr + OR_OOS_INLINE_SIZE > (char *) recdes->data + recdes->length)
 	    {
-	      assert (false && "OID read would exceed record bounds");
-	      return ER_FAILED;
+	      assert (false && "OOS inline slot read would exceed record bounds");
+	      error = ER_FAILED;
+	      goto end;
 	    }
 	  OR_BUF buf;
-	  or_init (&buf, (char *) oid_ptr, OR_OID_SIZE);
-	  int err = or_get_oid (&buf, &oid);
+	  or_init (&buf, (char *) oid_ptr, OR_OOS_INLINE_SIZE);
+	  int err = or_get_oid (&buf, &reference.oid);
 	  if (err != NO_ERROR)
 	    {
 	      assert (false && "or_get_oid failed unexpectedly");
-	      return ER_FAILED;
+	      error = ER_FAILED;
+	      goto end;
 	    }
-	  if (OID_ISNULL (&oid))
+	  reference.disk_length = or_get_bigint (&buf, &err);
+	  if (err != NO_ERROR || reference.disk_length < 0)
+	    {
+	      assert (false && "invalid OOS disk length");
+	      error = ER_FAILED;
+	      goto end;
+	    }
+	  if (OID_ISNULL (&reference.oid))
 	    {
 	      assert (false && "OID read from OOS slot is null — corrupted record?");
-	      return ER_FAILED;
+	      error = ER_FAILED;
+	      goto end;
 	    }
-	  oos_debug ("there exists an OOS with OID %hd|%d|%hd at offset %d index %d", OID_AS_ARGS (&oid), offset,
-		     index);
-	  oos_oids.emplace_back (oid);
+	  oos_debug ("there exists an OOS with OID %hd|%d|%hd at offset %d index %d", OID_AS_ARGS (&reference.oid),
+		     offset, index);
+	  oos_references.emplace_back (reference);
 	}
 
       if (OR_IS_LAST_ELEMENT (offset))
 	{
-	  if (oos_oids.empty ())
+	  if (oos_references.empty ())
 	    {
 	      /* heap_recdes_contains_oos() already confirmed OOS flag is set, so finding no OOS OIDs is inconsistent */
 	      assert (false && "heap_recdes_contains_oos() passed but no OOS OIDs found");
-	      return ER_FAILED;
+	      error = ER_FAILED;
+	      goto end;
 	    }
 #if !defined (NDEBUG)
 	  {
 	    std::string line = "{";
-	    for (size_t i = 0; i < oos_oids.size (); ++i)
+	    for (size_t i = 0; i < oos_references.size (); ++i)
 	      {
 		char oid_buf[32];
 		if (i > 0)
 		  line.append (", ");
-		line.append (oid_to_string (oid_buf, sizeof oid_buf, &oos_oids[i]));
+		line.append (oid_to_string (oid_buf, sizeof oid_buf, &oos_references[i].oid));
 	      }
 	    line += '}';
-	    oos_debug ("Total %zu found. OOS OIDs: %s", oos_oids.size (), line.c_str ());
+	    oos_debug ("Total %zu found. OOS OIDs: %s", oos_references.size (), line.c_str ());
 	  }
 #endif
-	  return NO_ERROR;
+	  goto end;
 	}
     }
 
   assert (false && "unreachable: there must be last element");
-  return ER_FAILED;
+  error = ER_FAILED;
+
+end:
+  return error;
+}
+
+int
+heap_recdes_get_oos_oids (const RECDES * recdes, OID_VECTOR & oos_oids)
+{
+  HEAP_OOS_REFERENCE_VECTOR oos_references;
+  int error = heap_recdes_get_oos_slots (recdes, oos_references);
+
+  oos_oids.clear ();
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  for (const HEAP_OOS_REFERENCE &reference : oos_references)
+    {
+      oos_oids.emplace_back (reference.oid);
+    }
+  return NO_ERROR;
+}
+
+int
+heap_recdes_get_oos_references (THREAD_ENTRY * thread_p, const OID * class_oid, const RECDES * recdes,
+				HEAP_OOS_REFERENCE_VECTOR & oos_references)
+{
+  OR_CLASSREP *classrepr = NULL;
+  int classrepr_cache_index = -1;
+  int error = heap_recdes_get_oos_slots (recdes, oos_references);
+
+  if (error != NO_ERROR || oos_references.empty ())
+    {
+      return error;
+    }
+
+  classrepr = heap_classrepr_get (thread_p, class_oid, NULL, or_rep_id ((RECDES *) recdes), &classrepr_cache_index);
+  if (classrepr == NULL)
+    {
+      ASSERT_ERROR ();
+      return er_errid ();
+    }
+
+  for (HEAP_OOS_REFERENCE &reference : oos_references)
+    {
+      for (int attr_index = 0; attr_index < classrepr->n_attributes; attr_index++)
+	{
+	  OR_ATTRIBUTE *attribute = &classrepr->attributes[attr_index];
+	  if (!attribute->is_fixed && attribute->location == reference.variable_index)
+	    {
+	      reference.type = attribute->type;
+	      break;
+	    }
+	}
+      if (reference.type == DB_TYPE_NULL)
+	{
+	  assert (false && "OOS variable attribute not found in class representation");
+	  error = ER_FAILED;
+	  break;
+	}
+    }
+
+  heap_classrepr_free (classrepr, &classrepr_cache_index);
+  return error;
 }
 
 #if !defined (NDEBUG)

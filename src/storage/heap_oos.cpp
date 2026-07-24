@@ -28,6 +28,7 @@
 #include "error_code.h"
 #include "error_manager.h"
 #include "heap_file.h"
+#include "internal_lob_file.hpp"
 #include "object_representation.h"
 #include "oos_file.hpp"
 #include "oos_log.hpp"
@@ -392,4 +393,140 @@ heap_record_replace_oos_oids (THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *context)
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) rec->length);
       return S_ERROR;
     }
+}
+/*
+ * heap_oos_delete_unreferenced () - Eagerly delete the OOS records referenced by old_recdes and
+ *   not referenced by new_recdes. new_recdes == NULL means none are referenced anymore (DELETE):
+ *   every OOS OID of old_recdes is deleted unconditionally, which is safe because OOS OIDs are
+ *   freshly allocated per heap record and never shared across rows. With a non-NULL new_recdes
+ *   (UPDATE), OIDs present in both images (same physical OOS referenced before and after) are
+ *   preserved.
+ *
+ * Called from the non-MVCC (!is_mvcc_op) branches of heap delete/update. For REC_RELOCATION rows
+ * the caller passes the forward (REC_NEWHOME) record as old_recdes, because the actual data (and
+ * OOS attributes) live on the forward page; the home slot holds only an 8-byte forwarding OID.
+ *
+ * MVCC mode keeps the old OOS alive for concurrent readers and lets vacuum reclaim it later;
+ * SA_MODE has no readers and no vacuum, so deletion happens here or not at all. Despite the
+ * historical "SA_MODE" tag in the diagnostics, the !is_mvcc_op gate also fires for SERVER_MODE
+ * operations on MVCC-disabled classes (catalog tables), so this code can execute server-side too.
+ * Caller MUST abort the transaction on error so oos_delete's per-chunk undo records replay any
+ * partial deletes during rollback; otherwise the surviving recdes would reference already-deleted
+ * OOS chunks.
+ *
+ * Strict failure handling: the OOS header flag is set by the record transformer and read via
+ * heap_recdes_contains_oos, so a missing OOS file or a failed OID extraction at this point
+ * indicates real corruption — log and propagate.
+ *
+ * op_ctx (in): short operation tag for diagnostics, e.g. "update home", "delete relocation".
+ */
+int
+heap_oos_delete_unreferenced (THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context,
+			      const RECDES *old_recdes, const RECDES *new_recdes, const char *op_ctx)
+{
+  HEAP_OOS_REFERENCE_VECTOR old_oos_references;
+  HEAP_OOS_REFERENCE_VECTOR new_oos_references;
+  VFID oos_vfid;
+  VFID internal_lob_vfid;
+  int error_code;
+
+  VFID_SET_NULL (&oos_vfid);
+  VFID_SET_NULL (&internal_lob_vfid);
+
+  error_code = heap_recdes_get_oos_references (thread_p, &context->class_oid, old_recdes, old_oos_references);
+  if (error_code != NO_ERROR)
+    {
+      ASSERT_ERROR ();
+      er_log_debug (ARG_FILE_LINE,
+		    "SA_MODE eager OOS cleanup (%s): heap_recdes_get_oos_oids(old) failed"
+		    " (hfid=%d|%d, oid=%d|%d|%d, old_rec_len=%d).",
+		    op_ctx, VFID_AS_ARGS (&context->hfid.vfid),
+		    context->oid.volid, context->oid.pageid, context->oid.slotid, old_recdes->length);
+      return error_code;
+    }
+  if (old_oos_references.empty ())
+    {
+      return NO_ERROR;
+    }
+
+  if (new_recdes != NULL)
+    {
+      /* heap_recdes_get_oos_references returns NO_ERROR with an empty vector when the new record has no
+       * OOS — no heap_recdes_contains_oos guard needed. */
+      error_code = heap_recdes_get_oos_references (thread_p, &context->class_oid, new_recdes, new_oos_references);
+      if (error_code != NO_ERROR)
+	{
+	  ASSERT_ERROR ();
+	  er_log_debug (ARG_FILE_LINE,
+			"SA_MODE eager OOS cleanup (%s): heap_recdes_get_oos_oids(new) failed"
+			" (hfid=%d|%d, oid=%d|%d|%d, new_rec_len=%d).",
+			op_ctx, VFID_AS_ARGS (&context->hfid.vfid),
+			context->oid.volid, context->oid.pageid, context->oid.slotid, new_recdes->length);
+	  return error_code;
+	}
+    }
+
+  for (const HEAP_OOS_REFERENCE &old_reference : old_oos_references)
+    {
+      bool is_still_referenced = false;
+      for (const HEAP_OOS_REFERENCE &new_reference : new_oos_references)
+	{
+	  if (OID_EQ (&old_reference.oid, &new_reference.oid))
+	    {
+	      is_still_referenced = true;
+	      break;
+	    }
+	}
+      if (is_still_referenced)
+	{
+	  /* Same physical OOS referenced by both old and new recdes; keep it. */
+	  continue;
+	}
+
+      if (TP_IS_LOB_TYPE (old_reference.type))
+	{
+	  INTERNAL_LOB_LOCATOR locator = { old_reference.oid, 0 };
+	  if (VFID_ISNULL (&internal_lob_vfid)
+	      && !heap_internal_lob_find_vfid (thread_p, &context->hfid, &internal_lob_vfid, false))
+	    {
+	      error_code = er_errid ();
+	      if (error_code == NO_ERROR)
+		{
+		  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+		  error_code = ER_GENERIC_ERROR;
+		}
+	      return error_code;
+	    }
+	  if (internal_lob_decode_disk_length (locator, old_reference.disk_length) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  error_code = internal_lob_delete (thread_p, internal_lob_vfid, locator);
+	}
+      else
+	{
+	  if (VFID_ISNULL (&oos_vfid))
+	    {
+	      if (!heap_oos_find_vfid (thread_p, &context->hfid, &oos_vfid, false) || VFID_ISNULL (&oos_vfid))
+		{
+		  ASSERT_ERROR ();
+		  return er_errid () != NO_ERROR ? er_errid () : ER_FAILED;
+		}
+	    }
+	  error_code = oos_delete (thread_p, oos_vfid, old_reference.oid);
+	}
+      if (error_code != NO_ERROR)
+	{
+	  ASSERT_ERROR ();
+	  er_log_debug (ARG_FILE_LINE,
+			"SA_MODE eager OOS cleanup (%s): delete(type=%d, oid=%d|%d|%d) failed"
+			" (hfid=%d|%d, heap_oid=%d|%d|%d).",
+			op_ctx, old_reference.type, OID_AS_ARGS (&old_reference.oid),
+			VFID_AS_ARGS (&context->hfid.vfid),
+			context->oid.volid, context->oid.pageid, context->oid.slotid);
+	  return error_code;
+	}
+    }
+
+  return NO_ERROR;
 }

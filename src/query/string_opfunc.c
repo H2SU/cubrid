@@ -17653,6 +17653,25 @@ lobfile_fits_materialized_lob (DB_TYPE lob_type, INT64 file_size)
 }
 
 static int
+lobfile_validate_streaming_size (INT64 file_size)
+{
+  if (file_size < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QSTR_BAD_LENGTH, 1, (int) file_size);
+      return ER_QSTR_BAD_LENGTH;
+    }
+
+  if (file_size > DB_MAX_INTERNAL_LOB_LENGTH)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_GENERAL, 2, "LOB input",
+	      "source exceeds the 4 GiB internal LOB limit");
+      return ER_ES_GENERAL;
+    }
+
+  return NO_ERROR;
+}
+
+static int
 lobfile_make_file_source_value (const char *path, INT64 file_size, DB_TYPE lob_type, DB_VALUE * result_value)
 {
   char stack_buf[PATH_MAX + 128];
@@ -17669,6 +17688,12 @@ lobfile_make_file_source_value (const char *path, INT64 file_size, DB_TYPE lob_t
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QSTR_BAD_LENGTH, 1, file_size);
       return ER_QSTR_BAD_LENGTH;
+    }
+
+  error_status = lobfile_validate_streaming_size (file_size);
+  if (error_status != NO_ERROR)
+    {
+      return error_status;
     }
 
   if (lob_type == DB_TYPE_BLOB)
@@ -17731,7 +17756,8 @@ lobfile_set_too_large_error (INT64 data_length)
 }
 
 static int
-lobfile_to_pending_lob (const DB_VALUE * lobfile_value, DB_TYPE lob_type, DB_VALUE * result_value)
+lobfile_to_pending_lob (const DB_VALUE * lobfile_value, DB_TYPE lob_type, bool delete_after_read,
+			DB_VALUE * result_value)
 {
   DB_ELO *elo;
   INT64 size;
@@ -17764,9 +17790,15 @@ lobfile_to_pending_lob (const DB_VALUE * lobfile_value, DB_TYPE lob_type, DB_VAL
       return ER_QSTR_BAD_LENGTH;
     }
 
+  error_status = lobfile_validate_streaming_size (size);
+  if (error_status != NO_ERROR)
+    {
+      return error_status;
+    }
+
   type_char = (lob_type == DB_TYPE_CLOB) ? 'C' : 'B';
-  marker_len = snprintf (stack_buf, sizeof (stack_buf), INTERNAL_LOB_PENDING_PREFIX "%c:%lld:%s", type_char,
-			 (long long) size, elo->locator);
+  marker_len = snprintf (stack_buf, sizeof (stack_buf), INTERNAL_LOB_PENDING_PREFIX "%c:%lld:%d:%s", type_char,
+			 (long long) size, delete_after_read ? 1 : 0, elo->locator);
   if (marker_len <= 0 || marker_len >= (int) sizeof (stack_buf))
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
@@ -25214,7 +25246,7 @@ db_blob_from_file_pending (const DB_VALUE * src_value, DB_VALUE * result_value)
       return error_status;
     }
 
-  error_status = lobfile_to_pending_lob (&bfile_value, DB_TYPE_BLOB, result_value);
+  error_status = lobfile_to_pending_lob (&bfile_value, DB_TYPE_BLOB, true, result_value);
   pr_clear_value (&bfile_value);
   return error_status;
 }
@@ -25564,7 +25596,7 @@ db_clob_from_file_pending (const DB_VALUE * src_value, DB_VALUE * result_value)
       return error_status;
     }
 
-  error_status = lobfile_to_pending_lob (&cfile_value, DB_TYPE_CLOB, result_value);
+  error_status = lobfile_to_pending_lob (&cfile_value, DB_TYPE_CLOB, true, result_value);
   pr_clear_value (&cfile_value);
   return error_status;
 }
@@ -25775,6 +25807,20 @@ db_bfile_to_blob (const DB_VALUE * src_value, DB_VALUE * result_value)
   return lobfile_to_lob (src_value, result_value, DB_TYPE_BLOB);
 }
 
+int
+db_bfile_to_blob_pending (const DB_VALUE * src_value, DB_VALUE * result_value)
+{
+  assert (src_value != NULL && result_value != NULL);
+
+  if (DB_VALUE_DOMAIN_TYPE (src_value) == DB_TYPE_NULL)
+    {
+      db_make_null (result_value);
+      return NO_ERROR;
+    }
+
+  return lobfile_to_pending_lob (src_value, DB_TYPE_BLOB, false, result_value);
+}
+
 /*
  * db_blob_to_bfile - convert internal BLOB value to external BFILE value
  *   return: NO_ERROR or error code
@@ -25838,6 +25884,20 @@ db_cfile_to_clob (const DB_VALUE * src_value, DB_VALUE * result_value)
     }
 
   return lobfile_to_lob (src_value, result_value, DB_TYPE_CLOB);
+}
+
+int
+db_cfile_to_clob_pending (const DB_VALUE * src_value, DB_VALUE * result_value)
+{
+  assert (src_value != NULL && result_value != NULL);
+
+  if (DB_VALUE_DOMAIN_TYPE (src_value) == DB_TYPE_NULL)
+    {
+      db_make_null (result_value);
+      return NO_ERROR;
+    }
+
+  return lobfile_to_pending_lob (src_value, DB_TYPE_CLOB, false, result_value);
 }
 
 /*
