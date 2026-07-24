@@ -1019,9 +1019,6 @@ IDL       [a-zA-Z0-9_]
 										csql_yylval.cptr = pt_makename(yytext);
 										return STDDEV_SAMP; }
 [sS][tT][dD][iI][nN]							{ begin_token(yytext);   return STDIN_; }
-[sS][tT][oO][rR][aA][gG][eE]						{ begin_token(yytext);
-									csql_yylval.cptr = pt_makename(yytext);
-									return STORAGE; }
 [sS][tT][rR][_][tT][oO][_][dD][aA][tT][eE]				{ begin_token(yytext);
 										csql_yylval.cptr = pt_makename(yytext);
 										return STR_TO_DATE; }
