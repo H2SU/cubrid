@@ -63,11 +63,6 @@
 #include "internal_lob_file.hpp"
 #include "thread_manager.hpp"
 #endif /* defined (SERVER_MODE) || defined (SA_MODE) */
-#if defined (CS_MODE)
-#include "es.h"
-#include "network_interface_cl.h"
-#include "stream_session.hpp"
-#endif /* defined (CS_MODE) */
 #if defined (SERVER_MODE)
 #include "connection_defs.h"
 #endif /* defined (SERVER_MODE) */
@@ -114,12 +109,6 @@
 
 #define LOBFILE_CHUNK_SIZE	(128 * 1024)
 #define DB_GET_UCHAR(dbval) (REINTERPRET_CAST (const unsigned char *, db_get_string ((dbval))))
-#if !defined (INTERNAL_LOB_FILE_SOURCE_PREFIX)
-#define INTERNAL_LOB_FILE_SOURCE_PREFIX "@internal_lob_file:"
-#endif /* !defined (INTERNAL_LOB_FILE_SOURCE_PREFIX) */
-#if !defined (INTERNAL_LOB_PENDING_PREFIX)
-#define INTERNAL_LOB_PENDING_PREFIX "@internal_lob_pending:"
-#endif /* !defined (INTERNAL_LOB_PENDING_PREFIX) */
 #define INTERNAL_LOB_SCALAR_STREAM_PREFIX "@internal_lob_stream:"
 
 /*
@@ -280,8 +269,6 @@ static int lobfile_get_path_and_size (const DB_VALUE * src_value, char *path_buf
 static bool lobfile_fits_materialized_lob (DB_TYPE lob_type, INT64 file_size);
 static int lobfile_make_file_source_value (const char *path, INT64 file_size, DB_TYPE lob_type,
 					   DB_VALUE * result_value);
-static int lobfile_stream_file_source_value (const char *path, INT64 file_size, DB_TYPE lob_type,
-					     DB_VALUE * result_value);
 static int lobfile_length (const DB_VALUE * src_value, DB_VALUE * result_value);
 
 static int make_number_to_char (const INTL_LANG lang, char *num_string, char *format_str, int *length,
@@ -17754,130 +17741,6 @@ lobfile_make_file_source_value (const char *path, INT64 file_size, DB_TYPE lob_t
   return NO_ERROR;
 }
 
-static int
-lobfile_make_upload_value (INT64 token, INT64 file_size, DB_TYPE lob_type, DB_VALUE *result_value)
-{
-  char stack_buf[160];
-  char *marker_buf = NULL;
-  DB_BIGINT logical_length;
-  char type_char;
-  int marker_len;
-  int error;
-
-  if (token <= 0 || file_size < 0 || result_value == NULL)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OBJ_INVALID_ARGUMENTS, 0);
-      return ER_OBJ_INVALID_ARGUMENTS;
-    }
-  type_char = (lob_type == DB_TYPE_BLOB) ? 'B' : 'C';
-  logical_length = (lob_type == DB_TYPE_BLOB) ? (DB_BIGINT) file_size * 8 : (DB_BIGINT) file_size;
-  marker_len = snprintf (stack_buf, sizeof (stack_buf), INTERNAL_LOB_UPLOAD_PREFIX "%c:%lld:%lld:%lld", type_char,
-			 (long long) token, (long long) file_size, (long long) logical_length);
-  if (marker_len <= 0 || marker_len >= (int) sizeof (stack_buf))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
-      return ER_GENERIC_ERROR;
-    }
-
-  marker_buf = (char *) db_private_alloc (NULL, marker_len + 1);
-  if (marker_buf == NULL)
-    {
-      ASSERT_ERROR_AND_SET (error);
-      return error;
-    }
-  memcpy (marker_buf, stack_buf, marker_len + 1);
-
-  if (lob_type == DB_TYPE_BLOB)
-    {
-      error = db_make_blob (result_value, DB_MAX_LOB_PRECISION, (DB_CONST_C_BIT) marker_buf, marker_len * 8);
-    }
-  else
-    {
-      error = db_make_clob (result_value, DB_MAX_LOB_PRECISION, marker_buf, marker_len);
-    }
-  if (error != NO_ERROR)
-    {
-      db_private_free_and_init (NULL, marker_buf);
-      return error;
-    }
-
-  result_value->need_clear = true;
-  db_value_mark_internal_lob (result_value, DB_VALUE_INTERNAL_LOB_MARKER_UPLOAD);
-  return NO_ERROR;
-}
-
-static int
-lobfile_stream_file_source_value (const char *path, INT64 file_size, DB_TYPE lob_type, DB_VALUE *result_value)
-{
-#if defined (CS_MODE)
-  OR_ALIGNED_BUF (OR_INT_SIZE + OR_INT64_SIZE * 2) a_config;
-  char *config = OR_ALIGNED_BUF_START (a_config);
-  char buffer[1024 * 1024];
-  DB_BIGINT logical_length;
-  INT64 result_token = 0;
-  INT64 offset = 0;
-  int error;
-  bool active = false;
-
-  error = lobfile_validate_streaming_size (file_size);
-  if (error != NO_ERROR)
-    {
-      return error;
-    }
-  if (lob_type == DB_TYPE_BLOB && file_size > DB_BIGINT_MAX / 8)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QSTR_BAD_LENGTH, 1, file_size);
-      return ER_QSTR_BAD_LENGTH;
-    }
-  logical_length = (lob_type == DB_TYPE_BLOB) ? (DB_BIGINT) file_size * 8 : (DB_BIGINT) file_size;
-  (void) or_pack_int (config,
-		      lob_type == DB_TYPE_BLOB ? INTERNAL_LOB_STREAM_TYPE_BLOB : INTERNAL_LOB_STREAM_TYPE_CLOB);
-  OR_PUT_INT64 (config + OR_INT_SIZE, &file_size);
-  OR_PUT_INT64 (config + OR_INT_SIZE + OR_INT64_SIZE, &logical_length);
-
-  error = stream_from_init (STREAM_KIND_INTERNAL_LOB, config, OR_ALIGNED_BUF_SIZE (a_config));
-  if (error != NO_ERROR)
-    {
-      return error;
-    }
-  active = true;
-
-  while (offset < file_size)
-    {
-      int request_size = (int) MIN ((INT64) sizeof (buffer), file_size - offset);
-      ssize_t read_size = es_read_file (path, buffer, (size_t) request_size, (off_t) offset);
-      if (read_size != request_size)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_ES_GENERAL, 2, "LOB input", "failed to read source");
-	  error = ER_ES_GENERAL;
-	  goto cleanup;
-	}
-      error = stream_from_send_data (buffer, (int) read_size);
-      if (error != NO_ERROR)
-	{
-	  goto cleanup;
-	}
-      offset += read_size;
-    }
-
-  error = stream_from_end (&result_token);
-  active = false;
-  if (error != NO_ERROR)
-    {
-      return error;
-    }
-  return lobfile_make_upload_value (result_token, file_size, lob_type, result_value);
-
-cleanup:
-  if (active)
-    {
-      (void) stream_from_abort ();
-    }
-  return error;
-#else
-  return lobfile_make_file_source_value (path, file_size, lob_type, result_value);
-#endif
-}
 
 static int
 lobfile_set_too_large_error (INT64 data_length)
@@ -25356,7 +25219,7 @@ db_blob_from_file_pending (const DB_VALUE * src_value, DB_VALUE * result_value)
       return error_status;
     }
 #if defined (CS_MODE)
-  return lobfile_stream_file_source_value (path_buf, file_size, DB_TYPE_BLOB, result_value);
+  return lobfile_make_file_source_value (path_buf, file_size, DB_TYPE_BLOB, result_value);
 #endif /* defined (CS_MODE) */
   if (!lobfile_fits_materialized_lob (DB_TYPE_BLOB, file_size))
     {
@@ -25702,7 +25565,7 @@ db_clob_from_file_pending (const DB_VALUE * src_value, DB_VALUE * result_value)
       return error_status;
     }
 #if defined (CS_MODE)
-  return lobfile_stream_file_source_value (path_buf, file_size, DB_TYPE_CLOB, result_value);
+  return lobfile_make_file_source_value (path_buf, file_size, DB_TYPE_CLOB, result_value);
 #endif /* defined (CS_MODE) */
   if (!lobfile_fits_materialized_lob (DB_TYPE_CLOB, file_size))
     {

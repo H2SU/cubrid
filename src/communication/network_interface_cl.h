@@ -50,6 +50,7 @@
 #include "log_common_impl.h"
 #include "parse_tree.h"
 #include "load_common.hpp"
+#include "internal_lob_dml_protocol.hpp"
 #include "timezone_lib_common.h"
 
 #include "dynamic_array.h"
@@ -431,5 +432,10 @@ extern int copy_from_init (const char *table_name, const DB_TYPE * col_types, in
 extern int stream_from_send_data (const char *data, int data_len);
 extern int stream_from_end (INT64 * result_count);
 extern int stream_from_abort (void);
+extern int internal_lob_dml_make_slot_value (DB_VALUE *value, DB_TYPE type, int slot);
+extern int internal_lob_dml_from_init (const XASL_ID *xasl_id, int dbval_count, const DB_VALUE *dbvals,
+				       QUERY_FLAG query_flag, const CACHE_TIME *client_cache_time, int query_timeout,
+				       const internal_lob_dml_slot_config *slot_configs, int slot_count);
+extern int internal_lob_dml_from_send_data (int slot, DB_BIGINT offset, const char *data, int data_len);
 
 #endif /* _NETWORK_INTERFACE_CL_H_ */

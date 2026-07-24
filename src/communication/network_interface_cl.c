@@ -87,6 +87,7 @@
 #include "locator_cl.h"
 #include "execute_schema.h"
 #include "authenticate.h"
+#include "internal_lob_marker.h"
 #include "stream_session.hpp"	/* STREAM_KIND_* */
 
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
@@ -12379,6 +12380,201 @@ stream_from_init (int stream_kind, const char *config, int config_len)
 #else /* CS_MODE */
   return NO_ERROR;
 #endif /* !CS_MODE */
+}
+
+int
+internal_lob_dml_make_slot_value (DB_VALUE *value, DB_TYPE type, int slot)
+{
+  char marker_text[64];
+  char *marker = NULL;
+  int marker_len;
+  int error;
+
+  if (value == NULL || (type != DB_TYPE_BLOB && type != DB_TYPE_CLOB) || slot < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1,
+	      "invalid internal LOB DML slot value");
+      return ER_STREAM_SESSION_ERROR;
+    }
+
+  marker_len = snprintf (marker_text, sizeof (marker_text), INTERNAL_LOB_DML_SLOT_PREFIX "%d", slot);
+  if (marker_len <= 0 || marker_len >= (int) sizeof (marker_text))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1,
+	      "internal LOB DML slot value is too large");
+      return ER_STREAM_SESSION_ERROR;
+    }
+
+  marker = (char *) db_private_alloc (NULL, marker_len + 1);
+  if (marker == NULL)
+    {
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
+  memcpy (marker, marker_text, marker_len + 1);
+
+  error = type == DB_TYPE_BLOB
+	  ? db_make_blob (value, DB_MAX_LOB_PRECISION, (DB_CONST_C_BIT) marker, marker_len * 8)
+	  : db_make_clob (value, DB_MAX_LOB_PRECISION, marker, marker_len);
+  if (error != NO_ERROR)
+    {
+      db_private_free_and_init (NULL, marker);
+    }
+  else
+    {
+      value->need_clear = true;
+      db_value_mark_internal_lob (value, DB_VALUE_INTERNAL_LOB_MARKER_DML_SLOT);
+    }
+  return error;
+}
+
+int
+internal_lob_dml_from_init (const XASL_ID *xasl_id, int dbval_count, const DB_VALUE *dbvals,
+			    QUERY_FLAG query_flag, const CACHE_TIME *client_cache_time, int query_timeout,
+			    const internal_lob_dml_slot_config *slot_configs, int slot_count)
+{
+#if defined(CS_MODE)
+  size_t packed_dbvals_size = 0;
+  size_t config_size;
+  char *config = NULL;
+  char *packed_dbvals = NULL;
+  char *ptr;
+  char *packed_dbvals_size_ptr;
+  char *packed_dbvals_ptr;
+  int packed_dbvals_length;
+  int error;
+
+  bool client_owned_dml = xasl_id != NULL && XASL_ID_IS_NULL (xasl_id);
+  if (xasl_id == NULL || dbval_count < 0 || (dbval_count > 0 && dbvals == NULL)
+      || client_cache_time == NULL || query_timeout < 0 || slot_configs == NULL || slot_count <= 0
+      || slot_count > 1024 || IS_QUERY_EXECUTE_WITH_COMMIT (query_flag) || IS_TRAN_AUTO_COMMIT (query_flag)
+      || (client_owned_dml && (dbval_count != 0 || dbvals != NULL || query_flag != 0 || query_timeout != 0)))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1,
+	      "invalid internal LOB DML client configuration");
+      return ER_STREAM_SESSION_ERROR;
+    }
+
+  for (int i = 0; i < dbval_count; i++)
+    {
+      packed_dbvals_size += OR_VALUE_ALIGNED_SIZE ((DB_VALUE *) &dbvals[i]);
+      if (packed_dbvals_size > INT_MAX)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1,
+		  "internal LOB DML parameter data is too large");
+	  return ER_STREAM_SESSION_ERROR;
+	}
+    }
+
+  config_size = OR_INT_SIZE + OR_XASL_ID_SIZE + OR_INT_SIZE * 5 + OR_CACHE_TIME_SIZE
+		+ (size_t) slot_count * INTERNAL_LOB_DML_SLOT_CONFIG_SIZE + packed_dbvals_size;
+  if (config_size > INT_MAX)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1,
+	      "internal LOB DML configuration is too large");
+      return ER_STREAM_SESSION_ERROR;
+    }
+
+  config = (char *) malloc (config_size);
+  if (packed_dbvals_size > 0)
+    {
+      packed_dbvals = (char *) malloc (packed_dbvals_size);
+    }
+  if (config == NULL || (packed_dbvals_size > 0 && packed_dbvals == NULL))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, config_size);
+      error = ER_OUT_OF_VIRTUAL_MEMORY;
+      goto exit;
+    }
+
+  ptr = or_pack_int (config, INTERNAL_LOB_DML_CONFIG_VERSION);
+  OR_PACK_XASL_ID (ptr, xasl_id);
+  ptr = or_pack_int (ptr, dbval_count);
+  packed_dbvals_size_ptr = ptr;
+  ptr = or_pack_int (ptr, 0);
+  ptr = or_pack_int (ptr, query_flag);
+  OR_PACK_CACHE_TIME (ptr, client_cache_time);
+  ptr = or_pack_int (ptr, query_timeout);
+  ptr = or_pack_int (ptr, slot_count);
+
+  for (int i = 0; i < slot_count; i++)
+    {
+      INT64 data_length = (INT64) slot_configs[i].data_length;
+      INT64 logical_length = (INT64) slot_configs[i].logical_length;
+
+      ptr = or_pack_int (ptr, (int) slot_configs[i].type);
+      OR_PUT_INT64 (ptr, &data_length);
+      ptr += OR_INT64_SIZE;
+      OR_PUT_INT64 (ptr, &logical_length);
+      ptr += OR_INT64_SIZE;
+      ptr = or_pack_int (ptr, slot_configs[i].flags);
+      ptr = or_pack_oid (ptr, &slot_configs[i].class_oid);
+    }
+
+  packed_dbvals_ptr = packed_dbvals;
+  for (int i = 0; i < dbval_count; i++)
+    {
+      packed_dbvals_ptr = or_pack_db_value (packed_dbvals_ptr, (DB_VALUE *) &dbvals[i]);
+    }
+  packed_dbvals_length = packed_dbvals_size > 0 ? CAST_BUFLEN (packed_dbvals_ptr - packed_dbvals) : 0;
+  OR_PUT_INT (packed_dbvals_size_ptr, packed_dbvals_length);
+  if (packed_dbvals_length > 0)
+    {
+      memcpy (ptr, packed_dbvals, (size_t) packed_dbvals_length);
+      ptr += packed_dbvals_length;
+    }
+
+  error = stream_from_init (STREAM_KIND_INTERNAL_LOB_DML, config, CAST_BUFLEN (ptr - config));
+
+exit:
+  free_and_init (packed_dbvals);
+  free_and_init (config);
+  return error;
+#else /* SA_MODE */
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DB_UNIMPLEMENTED, 1,
+	  "internal LOB DML stream is only used in client/server mode");
+  return ER_DB_UNIMPLEMENTED;
+#endif /* CS_MODE */
+}
+
+int
+internal_lob_dml_from_send_data (int slot, DB_BIGINT offset, const char *data, int data_len)
+{
+#if defined(CS_MODE)
+  const int frame_header_size = OR_INT_SIZE + OR_INT64_SIZE;
+  char *frame;
+  int error;
+  INT64 packed_offset = (INT64) offset;
+
+  if (slot < 0 || offset < 0 || data_len < 0 || (data_len > 0 && data == NULL)
+      || data_len > INT_MAX - frame_header_size)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_STREAM_SESSION_ERROR, 1,
+	      "invalid internal LOB DML payload frame");
+      return ER_STREAM_SESSION_ERROR;
+    }
+
+  frame = (char *) malloc ((size_t) frame_header_size + data_len);
+  if (frame == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
+	      (size_t) frame_header_size + data_len);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+  OR_PUT_INT (frame, slot);
+  OR_PUT_INT64 (frame + OR_INT_SIZE, &packed_offset);
+  if (data_len > 0)
+    {
+      memcpy (frame + frame_header_size, data, (size_t) data_len);
+    }
+  error = stream_from_send_data (frame, frame_header_size + data_len);
+  free_and_init (frame);
+  return error;
+#else /* SA_MODE */
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DB_UNIMPLEMENTED, 1,
+	  "internal LOB DML stream is only used in client/server mode");
+  return ER_DB_UNIMPLEMENTED;
+#endif /* CS_MODE */
 }
 
 /*
