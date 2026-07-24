@@ -85,6 +85,8 @@ add_test(NAME test_oos_remove_file COMMAND test_oos_remove_file)
 add_test(NAME test_oos_bestspace COMMAND test_oos_bestspace)
 # pure-logic test for the bounded writer used by oos_read; no DB fixture.
 add_test(NAME test_byte_span_writer COMMAND test_byte_span_writer)
+# pure-logic test for COPY-style Internal LOB DML stream framing/lifecycle.
+add_test(NAME test_internal_lob_dml_session COMMAND test_internal_lob_dml_session)
 # add_test(NAME test_oos_persist COMMAND test_oos_persist)
 # add_test(NAME test_oos_record_descriptor COMMAND test_oos_record_descriptor)
 
