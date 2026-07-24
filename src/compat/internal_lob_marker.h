@@ -32,6 +32,9 @@
 #define DB_VALUE_INTERNAL_LOB_MARKER_FILE_SOURCE (-2691402)
 #define DB_VALUE_INTERNAL_LOB_MARKER_PENDING    (-2691403)
 #define DB_VALUE_INTERNAL_LOB_MARKER_STREAM     (-2691404)
+#define DB_VALUE_INTERNAL_LOB_MARKER_UPLOAD     (-2691405)
+
+#define INTERNAL_LOB_UPLOAD_PREFIX "@internal_lob_upload:"
 
 static inline void
 db_value_mark_internal_lob (DB_VALUE *value, int marker)

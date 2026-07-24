@@ -1475,7 +1475,12 @@ Check the path of the key file (_keys) and make sure that it includes proper key
 
 1374 Vacuum master daemon is not running; the server may be still booting or already shut down.
 
-1375 Last Error
+1375 COPY FROM is not supported for "%1$s".
+1376 COPY binary format error: %1$s.
+1377 Stream session error: %1$s.
+1378 COPY CSV format error: %1$s.
+
+1379 Last Error
 
 $set 6 MSGCAT_SET_INTERNAL
 1 Error in error subsystem (line %1$d):

@@ -28,6 +28,7 @@
 #include "load_worker_manager.hpp"
 #include "object_primitive.h"
 #include "resource_shared_pool.hpp"
+#include "session.h"
 #include "xserver_interface.h"
 
 #include <cerrno>
@@ -697,12 +698,11 @@ namespace cubload
     std::string token_string;
     char *endptr = NULL;
     long long parsed_token;
-    internal_lob_payload payload;
     const class_entry *cls_entry = NULL;
     INTERNAL_LOB_LOCATOR locator;
-    DB_BIGINT bit_length = -1;
     int error;
-    bool close_payload_file = false;
+
+    (void) max_length;
 
     if (token_data == NULL || token_len == 0 || value == NULL || (expected_type != DB_TYPE_BLOB
 	&& expected_type != DB_TYPE_CLOB))
@@ -719,71 +719,22 @@ namespace cubload
 	return ER_GENERIC_ERROR;
       }
 
-    {
-      std::unique_lock<std::mutex> ulock (m_mutex);
-      auto found = m_internal_lob_payloads.find ((INT64) parsed_token);
-      if (found == m_internal_lob_payloads.end () || !found->second.complete || found->second.file == NULL
-	  || found->second.clsid != clsid)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
-	  return ER_GENERIC_ERROR;
-	}
-      payload = found->second;
-      m_internal_lob_payloads.erase (found);
-      close_payload_file = true;
-    }
-
-    if ((expected_type == DB_TYPE_BLOB && payload.type != 'B') || (expected_type == DB_TYPE_CLOB && payload.type != 'C'))
-      {
-	error = ER_OBJ_DOMAIN_CONFLICT;
-	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 1, "internal LOB sidecar");
-	goto cleanup;
-      }
-
-    if (max_length <= 0 || max_length > DB_MAX_LOB_PRECISION)
-      {
-	max_length = DB_MAX_LOB_PRECISION;
-      }
-    if ((expected_type == DB_TYPE_CLOB && payload.data_length > max_length)
-	|| (expected_type == DB_TYPE_BLOB && payload.bit_length > max_length))
-      {
-	error = ER_IT_DATA_OVERFLOW;
-	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 1, pr_type_name (expected_type));
-	goto cleanup;
-      }
-
     cls_entry = m_class_registry.get_class_entry (clsid);
     if (cls_entry == NULL)
       {
 	error = ER_GENERIC_ERROR;
 	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
-	goto cleanup;
+	return error;
       }
 
-    if (fflush (payload.file) != 0 || fseek (payload.file, 0, SEEK_SET) != 0)
-      {
-	error = ER_GENERIC_ERROR;
-	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error, 0);
-	goto cleanup;
-      }
-
-    bit_length = expected_type == DB_TYPE_BLOB ? payload.bit_length : -1;
-    error = heap_internal_lob_insert_stream (&thread_ref, &cls_entry->get_class_oid (), internal_lob_payload_file_reader,
-	    payload.file, bit_length, &locator);
+    error = session_internal_lob_upload_consume (&thread_ref, (INT64) parsed_token, &cls_entry->get_class_oid (),
+		expected_type, &locator);
     if (error != NO_ERROR)
       {
-	goto cleanup;
+	return error;
       }
 
-    error = internal_lob_make_adopt_locator_db_value (value, expected_type, locator);
-
-cleanup:
-    if (close_payload_file && payload.file != NULL)
-      {
-	fclose (payload.file);
-	payload.file = NULL;
-      }
-    return error;
+    return internal_lob_make_adopt_locator_db_value (value, expected_type, locator);
   }
 
   void

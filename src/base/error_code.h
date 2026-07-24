@@ -1765,7 +1765,12 @@
 
 #define ER_VACUUM_MASTER_DAEMON_NOT_AVAILABLE       -1374
 
-#define ER_LAST_ERROR                               -1375
+#define ER_COPY_NOT_SUPPORTED                       -1375
+#define ER_COPY_BINARY_FORMAT_ERROR                 -1376
+#define ER_STREAM_SESSION_ERROR                     -1377
+#define ER_COPY_CSV_FORMAT_ERROR                    -1378
+
+#define ER_LAST_ERROR                               -1379
 
 
 
