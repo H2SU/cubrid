@@ -468,8 +468,23 @@ TEST_F (OosSqlInternalLobLocator, DirectLobfileConversionStreamsPayload)
   rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB, b BLOB)");
   ASSERT_GE (rc, 0);
 
-  rc = exec_sql ("INSERT INTO t_internal_lob_locator VALUES (1, NULL, NULL)");
+  std::string insert_sql = "INSERT INTO t_internal_lob_locator VALUES (1, cfile_to_clob(cfile_from_file('"
+			   + clob_path + "')), bfile_to_blob(bfile_from_file('" + blob_path + "')))";
+  rc = exec_sql (insert_sql.c_str ());
   ASSERT_GE (rc, 0);
+
+  rc = fetch_internal_lob_pair ("SELECT clob_to_char(c), blob_to_bit(b) "
+				"FROM t_internal_lob_locator WHERE id = 1", &char_value, &bit_value);
+  ASSERT_EQ (rc, NO_ERROR);
+  text = db_get_string (&char_value);
+  ASSERT_NE (text, nullptr);
+  EXPECT_EQ (std::string (text, (std::size_t) db_get_string_size (&char_value)), clob_payload);
+  bits = (const char *) db_get_bit (&bit_value, &bit_length);
+  ASSERT_NE (bits, nullptr);
+  EXPECT_EQ (bit_length, (int) blob_payload.size () * 8);
+  EXPECT_EQ (std::memcmp (bits, blob_payload.data (), blob_payload.size ()), 0);
+  pr_clear_value (&char_value);
+  pr_clear_value (&bit_value);
 
   std::string update_sql = "UPDATE t_internal_lob_locator SET c = cfile_to_clob(cfile_from_file('" + clob_path
 			   + "')), b = bfile_to_blob(bfile_from_file('" + blob_path + "')) WHERE id = 1";

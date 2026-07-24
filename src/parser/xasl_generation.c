@@ -7581,13 +7581,14 @@ pt_to_regu_variable (PARSER_CONTEXT * parser, PT_NODE * node, UNBOX unbox)
 		}
 
 	      if (node->info.expr.op == PT_BFILE_FROM_FILE || node->info.expr.op == PT_CFILE_FROM_FILE
-		  || node->info.expr.op == PT_BLOB_FROM_FILE || node->info.expr.op == PT_CLOB_FROM_FILE)
+		  || pt_is_internal_lob_direct_source_expr (node))
 		{
 		  /*
-		   * FROM_FILE expressions read a client-side file path and may create a transient internal LOB envelope.
-		   * Evaluate them while building XASL so the server receives a DB_VALUE marker instead of an unsupported
-		   * runtime arithmetic operator.  This intentionally avoids generic constant-folding to keep parser PT_VALUE
-		   * collation/domain validation from seeing transient marker metadata.
+		   * FROM_FILE expressions and direct LOBFILE-to-internal-LOB DML sources read client-side external storage
+		   * and may create a transient internal LOB envelope.  Evaluate them while building XASL so the server
+		   * receives a DB_VALUE marker instead of executing a materializing arithmetic operator.  This intentionally
+		   * avoids generic constant-folding to keep parser PT_VALUE collation/domain validation from seeing transient
+		   * marker metadata.
 		   */
 		  regu_alloc (val);
 		  if (val == NULL)
