@@ -25803,7 +25803,9 @@ db_clob_length (const DB_VALUE * src_value, DB_VALUE * result_value)
 	}
 #endif /* defined (SERVER_MODE) || defined (SA_MODE) */
 
-      db_make_bigint (result_value, db_get_string_length (src_value));
+      /* Report bytes, matching the locator branch above and the external LOB behaviour (db_elo_size ()).
+       * db_get_string_length () counts characters, which disagrees under a multi-byte codeset. */
+      db_make_bigint (result_value, db_get_string_size (src_value));
     }
   else
     {

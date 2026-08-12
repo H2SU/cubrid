@@ -1089,6 +1089,44 @@ TEST_F (OosSqlInternalLobLocator, RangedReadReturnsRequestedSlices)
   pr_clear_value (&blob_locator_value);
 }
 
+/*
+ * CLOB_LENGTH must report the same unit no matter whether the value still carries an Internal LOB locator or has
+ * already been materialized.  The two branches of db_clob_length () used to disagree under a multi-byte codeset:
+ * the locator carries a byte length while db_get_string_length () counts characters.
+ */
+TEST_F (OosSqlInternalLobLocator, ClobLengthUnitAgreesForLocatorAndMaterialized)
+{
+  /* six U+AC00..U+AC05 syllables: 6 characters, 18 bytes in UTF-8 */
+  const char *utf8_text = "\xea\xb0\x80\xea\xb0\x81\xea\xb0\x82\xea\xb0\x83\xea\xb0\x84\xea\xb0\x85";
+  char sql[512];
+  int rc;
+  int stored_length = 0;
+  int inline_length = 0;
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  snprintf (sql, sizeof (sql), "INSERT INTO t_internal_lob_locator VALUES (1, char_to_clob('%s'))", utf8_text);
+  rc = exec_sql (sql);
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  /* read back from the heap: the value is still a locator here */
+  rc = fetch_single_int ("SELECT CAST (clob_length (c) AS INT) FROM t_internal_lob_locator WHERE id = 1",
+			 &stored_length);
+  ASSERT_EQ (rc, NO_ERROR);
+
+  /* never stored: the value is materialized in place */
+  snprintf (sql, sizeof (sql),
+	    "SELECT CAST (clob_length (char_to_clob ('%s')) AS INT) FROM t_internal_lob_locator WHERE id = 1",
+	    utf8_text);
+  rc = fetch_single_int (sql, &inline_length);
+  ASSERT_EQ (rc, NO_ERROR);
+
+  EXPECT_EQ (stored_length, inline_length);
+}
+
 int
 main (int argc, char **argv)
 {
