@@ -1127,6 +1127,67 @@ TEST_F (OosSqlInternalLobLocator, ClobLengthUnitAgreesForLocatorAndMaterialized)
   EXPECT_EQ (stored_length, inline_length);
 }
 
+/*
+ * Internal LOB writes are resolved only by the server heap path (heap_internal_lob_insert_value ()).  When a trigger
+ * on the table forces the client object path instead, the transport envelope used to be serialized as if it were the
+ * user payload, storing "@internal_lob_pending:..." (source file path included) in place of the LOB.  The write must
+ * be refused instead.  (CUBRID cannot reference the new record from BEFORE INSERT, so this uses AFTER INSERT.)
+ */
+TEST_F (OosSqlInternalLobLocator, ClientObjectPathRefusesUnresolvedInternalLob)
+{
+  struct segment_size_guard
+  {
+    ~segment_size_guard ()
+    {
+      prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 128ULL * 1024ULL * 1024ULL);
+    }
+  } guard;
+
+  std::string clob_path = internal_lob_test_path ("trigger_clob.txt");
+  std::string clob_payload (3000, 'q');
+  int row_count = -1;
+  int rc;
+
+  prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 1024ULL);
+  for (std::size_t i = 0; i < clob_payload.size (); i++)
+    {
+      clob_payload[i] = (char) ('a' + (i % 26));
+    }
+  write_test_file (clob_path, clob_payload);
+
+  exec_sql ("DROP TRIGGER trg_internal_lob_marker");
+  exec_sql ("DROP TABLE IF EXISTS t_internal_lob_trigger_log");
+  db_commit_transaction ();
+
+  rc = exec_sql ("CREATE TABLE t_internal_lob_trigger_log (id INT AUTO_INCREMENT PRIMARY KEY, seen VARCHAR (128))");
+  ASSERT_GE (rc, 0);
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  /* the trigger is what pushes the statement onto the client object path */
+  rc = exec_sql ("CREATE TRIGGER trg_internal_lob_marker AFTER INSERT ON t_internal_lob_locator "
+		 "EXECUTE INSERT INTO t_internal_lob_trigger_log (seen) "
+		 "VALUES (SUBSTRING (clob_to_char (obj.c), 1, 40))");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = exec_sql (("INSERT INTO t_internal_lob_locator VALUES (1, clob_from_file('" + clob_path + "'))").c_str ());
+  EXPECT_LT (rc, 0) << "the unresolved Internal LOB envelope was accepted instead of being refused";
+  EXPECT_EQ (er_errid (), ER_STREAM_SESSION_ERROR);
+  db_abort_transaction ();
+
+  /* nothing may be stored: neither a corrupted row nor a half-applied trigger effect */
+  rc = fetch_single_int ("SELECT COUNT (*) FROM t_internal_lob_locator", &row_count);
+  ASSERT_EQ (rc, NO_ERROR);
+  EXPECT_EQ (row_count, 0);
+
+  exec_sql ("DROP TRIGGER trg_internal_lob_marker");
+  exec_sql ("DROP TABLE IF EXISTS t_internal_lob_trigger_log");
+  db_commit_transaction ();
+  std::remove (clob_path.c_str ());
+}
+
 int
 main (int argc, char **argv)
 {
