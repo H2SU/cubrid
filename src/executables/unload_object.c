@@ -625,6 +625,7 @@ check_include_object_domain (DB_DOMAIN * dom_list, DB_TYPE * db_type)
 static void
 extractobjects_cleanup ()
 {
+  internal_lob_unload_sidecar_close ();
   close_object_file ();
 
   if (obj_table != NULL)
@@ -786,6 +787,12 @@ extract_objects (extract_context & ctxt, const char *output_dirname, int nthread
     }
 
   if (init_thread_param (output_dirname, nthreads) == false)
+    {
+      status = 1;
+      goto end;
+    }
+
+  if (internal_lob_unload_sidecar_open (output_dirname, ctxt.output_prefix) != NO_ERROR)
     {
       status = 1;
       goto end;
@@ -1438,11 +1445,13 @@ unload_extractor_thread (void *param)
   pthread_t tid = pthread_self ();
   TEXT_OUTPUT *obj_out = &(parg->text_output);
   DESC_OBJ *desc_obj = make_desc_obj (g_uci->class_ptr, g_pre_alloc_varchar_size);
+
   if (desc_obj == NULL)
     {
       thr_ret = ER_FAILED;
     }
-  else
+
+  if (thr_ret == NO_ERROR)
     {
       LC_COPYAREA_NODE *node = NULL;
       cuberr::context * er_context_p;
@@ -1877,6 +1886,18 @@ process_class (extract_context & ctxt, int cl_no, int nthreads)
 		       PRINT_IDENTIFIER (sm_ch_name ((MOBJ) class_ptr)));
 	      fflush (stderr);
 	      // Notice: In this case, Do NOT use multi-threading!
+	      nthreads = 0;
+	      break;
+
+	    case DB_TYPE_BLOB:
+	    case DB_TYPE_CLOB:
+	      fprintf (stderr, "warning: %s%s%s has %s type.\n", PRINT_IDENTIFIER (sm_ch_name ((MOBJ) class_ptr)),
+		       db_get_type_name (db_type));
+	      fprintf (stderr, "So for class %s%s%s, '--thread-count' option is ignored.\n",
+		       PRINT_IDENTIFIER (sm_ch_name ((MOBJ) class_ptr)));
+	      fflush (stderr);
+	      /* Internal LOB unload materializes OOS data into the sidecar file.  Keep it single-threaded so
+	       * standalone page-buffer access and client/server requests both run through the utility thread. */
 	      nthreads = 0;
 	      break;
 

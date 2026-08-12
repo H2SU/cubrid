@@ -19,11 +19,15 @@
 #include "gtest/gtest.h"
 #include <cstdio>
 
+#include "dbtype.h"
 #include "page_buffer.h"
 #include "slotted_page.h"
 #include "storage_common.h"
+#include "internal_lob_file.hpp"
+#include "object_primitive.h"
 #include "object_representation.h"
 #include "oos_file.hpp"
+#include "system_parameter.h"
 #include "test_oos_common.hpp"
 #include "page_buffer_util.hpp"
 
@@ -220,6 +224,152 @@ TEST (OosTest, OosInsertLarge160KBString)
   recdes_free_data_area (&rec_out);
   ASSERT_EQ (rec_in.data, nullptr);
   ASSERT_EQ (rec_out.data, nullptr);
+}
+
+TEST (OosTest, OosStreamingReadPullAcrossChunks)
+{
+  int err;
+  VFID oos_vfid;
+
+  err = oos_create_file (thread_p, oos_vfid);
+  ASSERT_EQ (err, NO_ERROR);
+
+  const int large_size = 160 * 1024; // spans many chunks
+  auto large_data = test_oos_utils::make_repeated_pattern_string (large_size);
+
+  RECDES rec_in{};
+  err = test_oos_utils::from_string_into_recdes (large_data, rec_in); // includes trailing NUL
+  ASSERT_EQ (err, NO_ERROR);
+
+  OID oid;
+  err = test_oos_utils::oos_insert_from_recdes (thread_p, oos_vfid, rec_in, oid);
+  ASSERT_EQ (err, NO_ERROR);
+
+  const int total_len = rec_in.length;
+
+  // Pull the payload back in small fixed pieces and reassemble. The 100-byte
+  // buffer does not align to chunk boundaries, so this exercises copies that
+  // straddle the OOS chunk chain.
+  OOS_READER reader;
+  err = oos_read_open (thread_p, oid, reader);
+  ASSERT_EQ (err, NO_ERROR);
+
+  std::string assembled;
+  char buf[100];
+  int nread = 0;
+  int guard = 0;
+  do
+    {
+      err = oos_read_pull (thread_p, reader, oos_buffer (buf, sizeof (buf)), nread);
+      ASSERT_EQ (err, NO_ERROR);
+      ASSERT_GE (nread, 0);
+      ASSERT_LE (nread, (int) sizeof (buf));
+      assembled.append (buf, static_cast<std::size_t> (nread));
+      ASSERT_LT (++guard, total_len + 10); // guard against a non-advancing cursor
+    }
+  while (nread > 0);
+
+  ASSERT_EQ (static_cast<int> (assembled.size ()), total_len);
+  ASSERT_EQ (std::memcmp (assembled.data (), rec_in.data, static_cast<std::size_t> (total_len)), 0);
+
+  recdes_free_data_area (&rec_in);
+  ASSERT_EQ (rec_in.data, nullptr);
+}
+
+TEST (OosTest, InternalLobSegmentedInsertReadWithHeadChain)
+{
+  struct segment_size_guard
+  {
+    ~segment_size_guard ()
+    {
+      prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 128ULL * 1024ULL * 1024ULL);
+    }
+  } guard;
+
+  prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 1024ULL * 1024ULL);
+
+  VFID lob_vfid;
+  int err = internal_lob_create_file (thread_p, lob_vfid);
+  ASSERT_EQ (err, NO_ERROR);
+
+  const int segment_size = 1024 * 1024;
+  const int total_size = 3 * segment_size + 12345;
+  std::vector<char> input ((std::size_t) total_size);
+  for (int i = 0; i < total_size; i++)
+    {
+      input[static_cast<std::size_t> (i)] = (char) ((i * 31 + 7) & 0xff);
+    }
+
+  INTERNAL_LOB_WRITER writer;
+  err = internal_lob_insert_begin (thread_p, lob_vfid, writer);
+  ASSERT_EQ (err, NO_ERROR);
+
+  const int append_chunk = 257 * 1024 + 13;
+  for (int offset = 0; offset < total_size;)
+    {
+      int remaining = total_size - offset;
+      int nbytes = (remaining < append_chunk) ? remaining : append_chunk;
+
+      err = internal_lob_insert_append (thread_p, writer,
+					oos_buffer (input.data () + offset, (std::size_t) nbytes));
+      ASSERT_EQ (err, NO_ERROR);
+      offset += nbytes;
+    }
+
+  INTERNAL_LOB_LOCATOR locator;
+  err = internal_lob_insert_end (thread_p, writer, locator, DB_TYPE_BLOB, (DB_BIGINT) total_size * 8);
+  ASSERT_EQ (err, NO_ERROR);
+  ASSERT_FALSE (OID_ISNULL (&locator.oid));
+  ASSERT_EQ (locator.length, (DB_BIGINT) total_size * 8);
+
+  DB_VALUE locator_value;
+  db_make_null (&locator_value);
+  err = internal_lob_make_locator_db_value (&locator_value, DB_TYPE_BLOB, locator);
+  ASSERT_EQ (err, NO_ERROR);
+
+  int locator_bit_length = 0;
+  const char *locator_data = (const char *) db_get_bit (&locator_value, &locator_bit_length);
+  ASSERT_NE (locator_data, nullptr);
+  std::string locator_string (locator_data, (std::size_t) ((locator_bit_length + 7) / 8));
+  EXPECT_EQ (locator_string.find (INTERNAL_LOB_LOCATOR_PREFIX), 0U);
+  EXPECT_EQ (locator_string.find ("M:"), std::string::npos);
+
+  INTERNAL_LOB_LOCATOR parsed_locator;
+  ASSERT_TRUE (internal_lob_db_value_is_locator (&locator_value, &parsed_locator));
+  EXPECT_TRUE (OID_EQ (&parsed_locator.oid, &locator.oid));
+  EXPECT_EQ (parsed_locator.length, locator.length);
+  pr_clear_value (&locator_value);
+
+  INTERNAL_LOB_READER reader;
+  err = internal_lob_read_open (thread_p, locator, reader);
+  ASSERT_EQ (err, NO_ERROR);
+
+  std::vector<char> assembled;
+  assembled.reserve ((std::size_t) total_size);
+  char buf[77777];
+  int nread = 0;
+  int guard_count = 0;
+  do
+    {
+      err = internal_lob_read_pull (thread_p, reader, oos_buffer (buf, sizeof (buf)), nread);
+      ASSERT_EQ (err, NO_ERROR);
+      ASSERT_GE (nread, 0);
+      ASSERT_LE (nread, (int) sizeof (buf));
+      assembled.insert (assembled.end (), buf, buf + nread);
+      ASSERT_LT (++guard_count, total_size);
+    }
+  while (nread > 0);
+
+  ASSERT_EQ (assembled.size (), input.size ());
+  ASSERT_EQ (std::memcmp (assembled.data (), input.data (), input.size ()), 0);
+
+  std::vector<char> whole_read ((std::size_t) total_size);
+  err = internal_lob_read (thread_p, locator, oos_buffer (whole_read.data (), whole_read.size ()));
+  ASSERT_EQ (err, NO_ERROR);
+  ASSERT_EQ (std::memcmp (whole_read.data (), input.data (), input.size ()), 0);
+
+  err = internal_lob_delete (thread_p, lob_vfid, locator);
+  ASSERT_EQ (err, NO_ERROR);
 }
 
 TEST (OosTest, OosInsertAndRead100LargeStringsAroundMaxOosChunkSize)

@@ -966,7 +966,7 @@ oos_stats_update (THREAD_ENTRY *thread_p, PAGE_PTR pgptr, const VFID *vfid, int 
 // ****************************************************************************
 
 static int
-oos_create_file_internal (THREAD_ENTRY *thread_p, FILE_DESCRIPTORS des, VFID &oos_vfid)
+oos_create_file_internal (THREAD_ENTRY *thread_p, int file_type, FILE_DESCRIPTORS des, VFID &oos_vfid)
 {
   int err = NO_ERROR;
   FILE_TABLESPACE tablespace;
@@ -978,7 +978,7 @@ oos_create_file_internal (THREAD_ENTRY *thread_p, FILE_DESCRIPTORS des, VFID &oo
   tablespace.expand_min_size = DISK_SECTOR_NPAGES * DB_PAGESIZE;
   tablespace.expand_max_size = DISK_SECTOR_NPAGES * DB_PAGESIZE * 1024;
 
-  err = file_create (thread_p, FILE_OOS, &tablespace, &des,
+  err = file_create (thread_p, (FILE_TYPE) file_type, &tablespace, &des,
 		     false /* is_temp */, true /* is_numerable */, &oos_vfid);
   if (err != NO_ERROR)
     {
@@ -1053,20 +1053,25 @@ oos_create_file_internal (THREAD_ENTRY *thread_p, FILE_DESCRIPTORS des, VFID &oo
   log_addr.vfid = &oos_vfid;
   log_addr.pgptr = hdr_page;
   log_addr.offset = slotid;
+
+  /* Suppression above also protects Internal LOB replication: when an ordinary OOS file is created between
+   * Internal LOB values, an enqueued header LSA would shift every following attrid/destination pair and the
+   * slave would rebuild each value from the wrong WAL range. */
   log_append_undoredo_recdes (thread_p, RVOOS_INSERT, &log_addr, NULL, &hdr_recdes);
 
   pgbuf_set_dirty (thread_p, hdr_page, FREE);
 
   log_sysop_commit (thread_p);
 
-  oos_trace ("created OOS file {fileid=%d, volid=%d} with header page {pageid=%d}",
-	     oos_vfid.fileid, oos_vfid.volid, hdr_vpid.pageid);
+  oos_trace ("created OOS-like file type=%d {fileid=%d, volid=%d} with header page {pageid=%d}",
+	     (int) file_type, oos_vfid.fileid, oos_vfid.volid, hdr_vpid.pageid);
 
   return NO_ERROR;
 }
 
 int
-oos_create_file (THREAD_ENTRY *thread_p, const HFID &heap_hfid, const OID &class_oid, VFID &oos_vfid)
+oos_create_file_with_type (THREAD_ENTRY *thread_p, int file_type, const HFID &heap_hfid, const OID &class_oid,
+			   VFID &oos_vfid)
 {
   FILE_DESCRIPTORS des;
 
@@ -1074,7 +1079,13 @@ oos_create_file (THREAD_ENTRY *thread_p, const HFID &heap_hfid, const OID &class
   HFID_COPY (&des.heap_oos.hfid, &heap_hfid);
   COPY_OID (&des.heap_oos.class_oid, &class_oid);
 
-  return oos_create_file_internal (thread_p, des, oos_vfid);
+  return oos_create_file_internal (thread_p, file_type, des, oos_vfid);
+}
+
+int
+oos_create_file (THREAD_ENTRY *thread_p, const HFID &heap_hfid, const OID &class_oid, VFID &oos_vfid)
+{
+  return oos_create_file_with_type (thread_p, FILE_OOS, heap_hfid, class_oid, oos_vfid);
 }
 
 #if defined (CUBRID_UNIT_TEST_ENABLED)
@@ -1101,9 +1112,9 @@ oos_remove_file (THREAD_ENTRY *thread_p, const VFID &oos_vfid)
 
 // TODO: will be called by vacuum when OOS vacuum is implemented
 int
-oos_remove_page (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid)
+oos_remove_page_with_type (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid, int file_type)
 {
-  int err = file_dealloc (thread_p, &oos_vfid, &vpid, FILE_OOS);
+  int err = file_dealloc (thread_p, &oos_vfid, &vpid, (FILE_TYPE) file_type);
   if (err != NO_ERROR)
     {
       oos_error ("file_dealloc failed for vpid={pageid=%d, volid=%d}", vpid.pageid, vpid.volid);
@@ -1111,6 +1122,12 @@ oos_remove_page (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid)
     }
 
   return NO_ERROR;
+}
+
+int
+oos_remove_page (THREAD_ENTRY *thread_p, const VFID &oos_vfid, const VPID &vpid)
+{
+  return oos_remove_page_with_type (thread_p, oos_vfid, vpid, FILE_OOS);
 }
 
 
@@ -1868,6 +1885,128 @@ oos_read_many (THREAD_ENTRY *thread_p, cubbase::span<oos_read_request> requests)
       return ER_OUT_OF_VIRTUAL_MEMORY;
     }
 
+  return NO_ERROR;
+}
+
+
+/* Initializes a forward-only reader positioned at the chain head. */
+int
+oos_read_open (THREAD_ENTRY *thread_p, const OID &head_oid, OOS_READER &reader)
+{
+  (void) thread_p;
+  reader.current = head_oid;
+  reader.chunk_consumed = 0;
+  reader.next_index = 0;
+  return NO_ERROR;
+}
+
+/* Pulls up to dest.size() payload bytes into dest, advancing across chunk
+ * boundaries as needed. On success nread holds the bytes copied; nread == 0
+ * means the chain is exhausted. Sequential calls walk the chain once. */
+int
+oos_read_pull (THREAD_ENTRY *thread_p, OOS_READER &reader, oos_buffer dest, int &nread)
+{
+  cubbase::byte_span_writer writer (dest);
+
+  nread = 0;
+  while (!writer.full () && !OID_ISNULL (&reader.current))
+    {
+      const auto [pageid, slotid, volid] = reader.current;
+      auto vpid = VPID{pageid, volid};
+
+      /* OLD_PAGE_MAYBE_DEALLOCATED: the OID may be forged from a CLOB/BLOB value
+       * (e.g. char_to_clob('@internal_lob:...'), CBRD-26914) and point at a
+       * deallocated or unrelated page. Fetch without asserting so that a bogus OID is
+       * rejected cleanly below instead of crashing the server inside pgbuf_fix. */
+      PAGE_PTR page_ptr = pgbuf_fix (thread_p, &vpid, OLD_PAGE_MAYBE_DEALLOCATED, PGBUF_LATCH_READ,
+				     PGBUF_UNCONDITIONAL_LATCH);
+      if (page_ptr == nullptr)
+	{
+	  oos_error ("oos_read_pull: pgbuf_fix failed at oid={vol=%d,page=%d,slot=%d}", OID_AS_ARGS (&reader.current));
+	  if (er_errid () == NO_ERROR)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	    }
+	  return er_errid ();
+	}
+      scope_exit page_unfixer ([&]()
+      {
+	pgbuf_unfix_and_init_after_check (thread_p, page_ptr);
+      });
+
+      if (pgbuf_get_page_ptype (thread_p, page_ptr) != PAGE_OOS)
+	{
+	  /* Not a live OOS page: a forged or stale locator OID. Reject cleanly. */
+	  oos_error ("oos_read_pull: non-OOS page at oid={vol=%d,page=%d,slot=%d}", OID_AS_ARGS (&reader.current));
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	  return ER_GENERIC_ERROR;
+	}
+
+      OOS_RECDES oos_recdes;
+      SCAN_CODE code = spage_get_record (thread_p, page_ptr, slotid, &oos_recdes, PEEK);
+      if (code != S_SUCCESS)
+	{
+	  oos_error ("oos_read_pull: spage_get_record failed (code=%d) at oid={vol=%d,page=%d,slot=%d}",
+		     (int) code, OID_AS_ARGS (&reader.current));
+	  if (er_errid () == NO_ERROR)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	    }
+	  return er_errid ();
+	}
+
+      assert (oos_recdes.length >= OOS_RECORD_HEADER_SIZE);
+      if (oos_recdes.length < OOS_RECORD_HEADER_SIZE)
+	{
+	  oos_error ("oos_read_pull: OOS slot smaller than header (len=%d)", oos_recdes.length);
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	  return ER_GENERIC_ERROR;
+	}
+
+      OOS_RECORD_HEADER header;
+      std::memcpy (&header, oos_recdes.data, OOS_RECORD_HEADER_SIZE);
+
+      /* chunk_index must match the walk order; mismatch = corrupted chain. */
+      assert (header.chunk_index == reader.next_index);
+      if (header.chunk_index != reader.next_index)
+	{
+	  oos_error ("oos_read_pull: chain inconsistency: header.chunk_index=%d expected=%d",
+		     header.chunk_index, reader.next_index);
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	  return ER_GENERIC_ERROR;
+	}
+
+      const int payload_len = oos_recdes.length - OOS_RECORD_HEADER_SIZE;
+      /* A 0-byte chunk would stall the cursor forever on a cyclic chain. */
+      if (payload_len <= 0)
+	{
+	  oos_error ("oos_read_pull: empty chunk at idx=%d", header.chunk_index);
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	  return ER_GENERIC_ERROR;
+	}
+
+      assert (reader.chunk_consumed < payload_len);
+      const std::size_t avail = static_cast<std::size_t> (payload_len - reader.chunk_consumed);
+      const std::size_t to_copy = (avail < writer.remaining ()) ? avail : writer.remaining ();
+
+      if (!writer.append (oos_recdes.data + OOS_RECORD_HEADER_SIZE + reader.chunk_consumed, to_copy))
+	{
+	  oos_error ("oos_read_pull: append overflow (to_copy=%zu, remaining=%zu)", to_copy, writer.remaining ());
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+	  return ER_GENERIC_ERROR;
+	}
+      /* to_copy <= payload_len (one page chunk) so the int cast cannot overflow. */
+      reader.chunk_consumed += static_cast<int> (to_copy);
+
+      if (reader.chunk_consumed == payload_len)
+	{
+	  reader.current = header.next_chunk_oid;
+	  reader.chunk_consumed = 0;
+	  reader.next_index++;
+	}
+    }
+
+  nread = static_cast<int> (writer.written ());
   return NO_ERROR;
 }
 

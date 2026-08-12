@@ -24,10 +24,14 @@
 #define _LOAD_COMMON_HPP_
 
 #include "packable_object.hpp"
+#include "dbtype_def.h"
 
 #include <atomic>
 #include <cassert>
 #include <functional>
+#include <ios>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #define NUM_LDR_TYPES (LDR_TYPE_MAX + 1)
@@ -76,6 +80,22 @@ namespace cubload
 
   using batch_handler = std::function<int64_t (const batch &)>;
   using class_handler = std::function<int64_t (const batch &, bool &)>;
+
+  struct internal_lob_sidecar_entry
+  {
+    char type = '\0';
+    DB_BIGINT data_length = 0;
+    DB_BIGINT bit_length = -1;
+    std::streamoff hex_offset = 0;
+    std::string path;
+  };
+
+  using internal_lob_sidecar_map = std::unordered_map<std::string, internal_lob_sidecar_entry>;
+
+  int load_internal_lob_sidecar (const std::string &object_file_name, internal_lob_sidecar_map &sidecar,
+				 bool &sidecar_available);
+  int internal_lob_sidecar_read_raw_chunk (const internal_lob_sidecar_entry &entry, DB_BIGINT byte_offset, char *buf,
+      int buf_size, int *nread);
 
   /*
    * loaddb executables command line arguments
@@ -156,8 +176,9 @@ namespace cubload
     LDR_DATETIMELTZ,
     LDR_DATETIMETZ,
     LDR_JSON,
+    LDR_INTERNAL_LOB_REF,
 
-    LDR_TYPE_MAX = LDR_JSON
+    LDR_TYPE_MAX = LDR_INTERNAL_LOB_REF
   };
 
   /*

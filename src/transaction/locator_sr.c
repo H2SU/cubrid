@@ -30,6 +30,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <limits.h>
 #include <cstring>		// for std::memcpy
 
 #include "locator_sr.h"
@@ -46,6 +47,7 @@
 #include "fetch.h"
 #include "filter_pred_cache.h"
 #include "heap_file.h"
+#include "internal_lob_marker.h"
 #include "oos_file.hpp"
 #include "list_file.h"
 #include "log_lsa.hpp"
@@ -56,11 +58,13 @@
 #include "query_executor.h"
 #include "query_manager.h"
 #include "query_reevaluation.hpp"
+#include "session.h"
 #if defined(ENABLE_SYSTEMTAP)
 #include "probes.h"
 #endif /* ENABLE_SYSTEMTAP */
 #include "record_descriptor.hpp"
 #include "slotted_page.h"
+#include "system_parameter.h"
 #include "xasl_cache.h"
 #include "xasl_predicate.hpp"
 #include "thread_manager.hpp"	// for thread_get_thread_entry_info
@@ -166,6 +170,9 @@ static int locator_delete_force_internal (THREAD_ENTRY * thread_p, HFID * hfid, 
 					  MVCC_REEV_DATA * mvcc_reev_data, LOCATOR_INDEX_ACTION_FLAG idx_action_flag,
 					  OID * new_obj_oid, OID * partition_oid, bool need_locking);
 static int locator_force_for_multi_update (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area);
+static int locator_resolve_internal_lob_dml_slots (THREAD_ENTRY * thread_p, const OID * class_oid,
+						   const OID * inst_oid, RECDES * source_recdes, bool is_update,
+						   RECDES * resolved_recdes, LC_COPYAREA ** resolved_area);
 
 #if defined(ENABLE_UNUSED_FUNCTION)
 static void locator_increase_catalog_count (THREAD_ENTRY * thread_p, OID * cls_oid);
@@ -235,7 +242,8 @@ static DB_LOGICAL locator_mvcc_reev_cond_and_assignment (THREAD_ENTRY * thread_p
 /* lob */
 static int locator_lob_make_dir_path (char *buf, const HFID * hfid, int attrid);
 
-static int locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid, RECDES * recdes);
+static int locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid, RECDES * recdes,
+					      bool require_all_oos_attrs);
 
 /*
  * locator_initialize () - Initialize the locator on the server
@@ -5284,12 +5292,19 @@ error2:
 }
 
 int
-locator_oos_insert_force (THREAD_ENTRY * thread_p, OID * class_oid, RECDES * recdes)
+locator_oos_insert_force (THREAD_ENTRY * thread_p, OID * class_oid, RECDES * recdes, bool is_internal_lob, int attrid)
 {
   int error_code = NO_ERROR;
   HFID oos_hfid = HFID_INITIALIZER;
   VFID oos_vfid = VFID_INITIALIZER;
   OID oos_oid = OID_INITIALIZER;
+
+  if (is_internal_lob && attrid == NULL_ATTRID)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "missing target attribute for replicated Internal LOB insert");
+      return ER_HA_GENERIC_ERROR;
+    }
 
   error_code = heap_get_class_info (thread_p, class_oid, &oos_hfid, NULL, NULL);
   if (error_code != NO_ERROR)
@@ -5303,12 +5318,16 @@ locator_oos_insert_force (THREAD_ENTRY * thread_p, OID * class_oid, RECDES * rec
       return error_code;
     }
 
-  if (!heap_oos_find_vfid (thread_p, &oos_hfid, &oos_vfid, true))
+  bool found_vfid = is_internal_lob
+		    ? heap_internal_lob_find_vfid (thread_p, &oos_hfid, &oos_vfid, true)
+		    : heap_oos_find_vfid (thread_p, &oos_hfid, &oos_vfid, true);
+  if (!found_vfid)
     {
       if (er_errid () == NO_ERROR)
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
-		  "failed to find or create OOS file for replication insert");
+		  is_internal_lob ? "failed to find or create Internal LOB file for replication insert"
+		  : "failed to find or create OOS file for replication insert");
 	}
       error_code = er_errid ();
       return error_code;
@@ -5334,6 +5353,13 @@ locator_oos_insert_force (THREAD_ENTRY * thread_p, OID * class_oid, RECDES * rec
 	}
       return error_code;
     }
+
+  /* oos_insert publishes the applied OID itself, and a multi-chunk record also publishes a null boundary
+   * marker, so pair every newly published entry with this record's target attribute. */
+  thread_p->oos_attrids.resize (thread_p->oos_oids.size (), attrid);
+  thread_p->oos_is_internal_lob.resize (thread_p->oos_oids.size (), is_internal_lob);
+  assert (thread_p->oos_oids.size () == thread_p->oos_attrids.size ());
+  assert (thread_p->oos_oids.size () == thread_p->oos_is_internal_lob.size ());
 
   return error_code;
 }
@@ -6604,6 +6630,106 @@ error:
 }
 
 /*
+ * locator_resolve_internal_lob_dml_slots () - Rebuild a client-created record so Internal LOB DML slot markers are
+ *                                             consumed by the active COPY-style stream session.
+ *
+ * Client/workspace INSERT and UPDATE paths serialize complete records before they reach xlocator_force(). Unlike the
+ * server query executor, locator force does not normally pass DB_VALUEs through heap_attrinfo_transform_to_disk(), so
+ * a slot marker would otherwise be persisted as ordinary CLOB/BLOB data. Rebuilding only records that actually carry
+ * a DML slot keeps the legacy force path unchanged while converging Internal LOB creation on the common heap sink.
+ */
+static int
+locator_resolve_internal_lob_dml_slots (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * inst_oid,
+					RECDES * source_recdes, bool is_update, RECDES * resolved_recdes,
+					LC_COPYAREA ** resolved_area)
+{
+  HEAP_CACHE_ATTRINFO attr_info;
+  bool attr_info_inited = false;
+  bool has_dml_slot = false;
+  int error_code = NO_ERROR;
+
+  assert (class_oid != NULL);
+  assert (inst_oid != NULL);
+  assert (source_recdes != NULL);
+  assert (resolved_recdes != NULL);
+  assert (resolved_area != NULL);
+
+  *resolved_recdes = *source_recdes;
+  *resolved_area = NULL;
+
+  if (!session_has_internal_lob_dml_stream (thread_p))
+    {
+      return NO_ERROR;
+    }
+
+  error_code = heap_attrinfo_start (thread_p, class_oid, -1, NULL, &attr_info);
+  if (error_code != NO_ERROR)
+    {
+      return error_code;
+    }
+  attr_info_inited = true;
+
+  error_code = heap_attrinfo_read_dbvalues (thread_p, inst_oid, source_recdes, &attr_info);
+  if (error_code != NO_ERROR)
+    {
+      goto exit;
+    }
+
+  for (int i = 0; i < attr_info.num_values; i++)
+    {
+      DB_VALUE *value = &attr_info.values[i].dbvalue;
+      int original_marker;
+
+      if (!TP_IS_LOB_TYPE (DB_VALUE_DOMAIN_TYPE (value)) || DB_IS_NULL (value))
+	{
+	  continue;
+	}
+
+      original_marker = db_value_get_internal_lob_marker (value);
+      if (original_marker != DB_VALUE_INTERNAL_LOB_MARKER_DML_SLOT)
+	{
+	  /* Workspace object memory stores CLOB/BLOB as raw char pointers, so transient DB_VALUE metadata is lost
+	   * before the record is serialized. Only while the owning stream is active, restore the reserved envelope
+	   * marker and require the full slot syntax. consume_lob_slot() performs the authoritative slot/type check. */
+	  db_value_mark_internal_lob (value, DB_VALUE_INTERNAL_LOB_MARKER_DML_SLOT);
+	}
+
+      if (internal_lob_db_value_is_dml_slot (value, NULL))
+	{
+	  has_dml_slot = true;
+	}
+      else if (original_marker != DB_VALUE_INTERNAL_LOB_MARKER_DML_SLOT)
+	{
+	  db_value_mark_internal_lob (value, original_marker);
+	}
+    }
+
+  if (!has_dml_slot)
+    {
+      goto exit;
+    }
+
+  *resolved_area =
+    locator_allocate_copy_area_by_attr_info (thread_p, &attr_info, is_update ? source_recdes : NULL,
+					     resolved_recdes, source_recdes->length, LOB_FLAG_INCLUDE_LOBFILE);
+  if (*resolved_area == NULL)
+    {
+      error_code = er_errid ();
+      if (error_code == NO_ERROR)
+	{
+	  error_code = ER_FAILED;
+	}
+    }
+
+exit:
+  if (attr_info_inited)
+    {
+      heap_attrinfo_end (thread_p, &attr_info);
+    }
+  return error_code;
+}
+
+/*
  * locator_force_for_multi_update () -
  *
  * return: NO_ERROR if all OK, ER_ status otherwise
@@ -6732,11 +6858,29 @@ locator_force_for_multi_update (THREAD_ENTRY * thread_p, LC_COPYAREA * force_are
 	      goto error;
 	    }
 
+	  RECDES resolved_recdes;
+	  LC_COPYAREA *resolved_area = NULL;
+	  error_code =
+	    locator_resolve_internal_lob_dml_slots (thread_p, &obj->class_oid, &obj->oid, &recdes, true,
+						     &resolved_recdes, &resolved_area);
+	  if (error_code != NO_ERROR)
+	    {
+	      if (resolved_area != NULL)
+		{
+		  locator_free_copy_area (resolved_area);
+		}
+	      goto error;
+	    }
+
 	  /* update */
 	  error_code =
-	    locator_update_force (thread_p, &obj->hfid, &obj->class_oid, &obj->oid, NULL, &recdes,
+	    locator_update_force (thread_p, &obj->hfid, &obj->class_oid, &obj->oid, NULL, &resolved_recdes,
 				  has_index, NULL, 0, MULTI_ROW_UPDATE, &scan_cache, &force_count, false, repl_info,
 				  DB_NOT_PARTITIONED_CLASS, NULL, NULL, UPDATE_INPLACE_NONE, true);
+	  if (resolved_area != NULL)
+	    {
+	      locator_free_copy_area (resolved_area);
+	    }
 	  if (error_code != NO_ERROR)
 	    {
 	      /*
@@ -6903,7 +7047,7 @@ locator_repl_prepare_force (THREAD_ENTRY * thread_p, LC_COPYAREA_ONEOBJ * obj, R
     }
 
   /* OOS records are not heap records; their leading bytes are OOS_RECORD_HEADER, not a representation id. */
-  if (obj->operation != LC_FLUSH_DELETE && obj->operation != LC_FLUSH_INSERT_OOS)
+  if (obj->operation != LC_FLUSH_DELETE && !LC_IS_FLUSH_INSERT_OOS (obj->operation))
     {
       last_repr_id = heap_get_class_repr_id (thread_p, &obj->class_oid);
       if (last_repr_id == 0)
@@ -6940,6 +7084,8 @@ locator_repl_prepare_force (THREAD_ENTRY * thread_p, LC_COPYAREA_ONEOBJ * obj, R
     {
       assert (OID_ISNULL (&obj->oid) != true);
 
+      /* Only the CHN is needed here. Keep OOS locator slots in their on-disk form: generic OOS expansion cannot
+       * interpret the type-specific header of an Internal LOB chunk and may treat it as user payload. */
       scan =
 	heap_get_visible_version (thread_p, &obj->oid, &obj->class_oid, old_recdes, force_scancache, PEEK, NULL_CHN,
 				  HEAP_RECDES_CONSUME_RAW_BYTES);
@@ -7022,6 +7168,8 @@ xlocator_repl_force (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area, LC_COPYA
   int has_index;
 
   thread_p->oos_oids.clear ();
+  thread_p->oos_attrids.clear ();
+  thread_p->oos_is_internal_lob.clear ();
 
   /* need to start a topop to ensure the atomic operation. */
   error_code = xtran_server_start_topop (thread_p, &lsa);
@@ -7045,6 +7193,13 @@ xlocator_repl_force (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area, LC_COPYA
       er_clear ();
 
       obj = LC_NEXT_ONEOBJ_PTR_IN_COPYAREA (obj);
+
+      int oos_attrid = NULL_ATTRID;
+      if (LC_IS_FLUSH_INSERT_OOS (obj->operation))
+	{
+	  oos_attrid = obj->oid.pageid;
+	  OID_SET_NULL (&obj->oid);
+	}
 
       packed_key_value_len = locator_repl_get_key_value (&key_value, force_area, obj);
 
@@ -7086,11 +7241,33 @@ xlocator_repl_force (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area, LC_COPYA
 	{
 	  has_index = LC_ONEOBJ_GET_INDEX_FLAG (obj);
 
-	  if (obj->operation != LC_FLUSH_INSERT_OOS
-	      && (LC_IS_FLUSH_INSERT (obj->operation) || LC_IS_FLUSH_UPDATE (obj->operation))
-	      && heap_recdes_contains_oos (&recdes))
+	  bool is_heap_insert = !LC_IS_FLUSH_INSERT_OOS (obj->operation) && LC_IS_FLUSH_INSERT (obj->operation);
+	  bool is_heap_update = LC_IS_FLUSH_UPDATE (obj->operation);
+	  bool has_replicated_oos = !thread_p->oos_oids.empty ();
+	  bool has_typed_oos = false;
+
+	  for (int attrid : thread_p->oos_attrids)
 	    {
-	      error_code = locator_fixup_oos_oids_in_recdes (thread_p, &obj->class_oid, &recdes);
+	      if (attrid != NULL_ATTRID)
+		{
+		  has_typed_oos = true;
+		  break;
+		}
+	    }
+
+	  if ((is_heap_insert || is_heap_update) && has_replicated_oos && !heap_recdes_contains_oos (&recdes))
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+		      "replicated OOS records are not referenced by the following heap record");
+	      error_code = ER_HA_GENERIC_ERROR;
+	      goto exit_on_error;
+	    }
+
+	  /* Legacy UPDATE logs did not carry an attribute id and cannot be mapped more safely than the old behavior.
+	   * New typed UPDATE logs repair only the changed OOS attributes; INSERT must account for every OOS attribute. */
+	  if ((is_heap_insert || (is_heap_update && has_typed_oos)) && heap_recdes_contains_oos (&recdes))
+	    {
+	      error_code = locator_fixup_oos_oids_in_recdes (thread_p, &obj->class_oid, &recdes, is_heap_insert);
 	      if (error_code != NO_ERROR)
 		{
 		  goto exit_on_error;
@@ -7100,7 +7277,10 @@ xlocator_repl_force (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area, LC_COPYA
 	  switch (obj->operation)
 	    {
 	    case LC_FLUSH_INSERT_OOS:
-	      error_code = locator_oos_insert_force (thread_p, &obj->class_oid, &recdes);
+	      error_code = locator_oos_insert_force (thread_p, &obj->class_oid, &recdes, false, oos_attrid);
+	      break;
+	    case LC_FLUSH_INSERT_INTERNAL_LOB:
+	      error_code = locator_oos_insert_force (thread_p, &obj->class_oid, &recdes, true, oos_attrid);
 	      break;
 	    case LC_FLUSH_INSERT:
 	    case LC_FLUSH_INSERT_PRUNE:
@@ -7182,9 +7362,11 @@ xlocator_repl_force (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area, LC_COPYA
 	}
       pr_clear_value (&key_value);
 
-      if (obj->operation != LC_FLUSH_INSERT_OOS)
+      if (!LC_IS_FLUSH_INSERT_OOS (obj->operation))
 	{
 	  thread_p->oos_oids.clear ();
+	  thread_p->oos_attrids.clear ();
+	  thread_p->oos_is_internal_lob.clear ();
 	}
     }
 
@@ -7310,14 +7492,24 @@ xlocator_force (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area, int num_ignor
       /* delete old row must be set to true for system classes and false for others, therefore it must be updated for
        * each object. */
 
+      RECDES resolved_recdes;
+      LC_COPYAREA *resolved_area = NULL;
+
       switch (obj->operation)
 	{
 	case LC_FLUSH_INSERT:
 	case LC_FLUSH_INSERT_PRUNE:
 	case LC_FLUSH_INSERT_PRUNE_VERIFY:
+	  error_code =
+	    locator_resolve_internal_lob_dml_slots (thread_p, &obj->class_oid, &obj->oid, &recdes, false,
+						     &resolved_recdes, &resolved_area);
+	  if (error_code != NO_ERROR)
+	    {
+	      break;
+	    }
 	  pruning_type = locator_area_op_to_pruning_type (obj->operation);
 	  error_code =
-	    locator_insert_force (thread_p, &obj->hfid, &obj->class_oid, &obj->oid, &recdes, has_index,
+	    locator_insert_force (thread_p, &obj->hfid, &obj->class_oid, &obj->oid, &resolved_recdes, has_index,
 				  SINGLE_ROW_INSERT, force_scancache, &force_count, pruning_type, NULL, NULL,
 				  UPDATE_INPLACE_NONE, NULL, false, false);
 
@@ -7331,9 +7523,16 @@ xlocator_force (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area, int num_ignor
 	case LC_FLUSH_UPDATE:
 	case LC_FLUSH_UPDATE_PRUNE:
 	case LC_FLUSH_UPDATE_PRUNE_VERIFY:
+	  error_code =
+	    locator_resolve_internal_lob_dml_slots (thread_p, &obj->class_oid, &obj->oid, &recdes, true,
+						     &resolved_recdes, &resolved_area);
+	  if (error_code != NO_ERROR)
+	    {
+	      break;
+	    }
 	  pruning_type = locator_area_op_to_pruning_type (obj->operation);
 	  error_code =
-	    locator_update_force (thread_p, &obj->hfid, &obj->class_oid, &obj->oid, NULL, &recdes,
+	    locator_update_force (thread_p, &obj->hfid, &obj->class_oid, &obj->oid, NULL, &resolved_recdes,
 				  has_index, NULL, 0, SINGLE_ROW_UPDATE, force_scancache, &force_count, false,
 				  REPL_INFO_TYPE_RBR_NORMAL, pruning_type, NULL, NULL, UPDATE_INPLACE_NONE, true);
 
@@ -7367,6 +7566,11 @@ xlocator_force (THREAD_ENTRY * thread_p, LC_COPYAREA * force_area, int num_ignor
 	  error_code = ER_LC_BADFORCE_OPERATION;
 	  break;
 	}			/* end-switch */
+
+      if (resolved_area != NULL)
+	{
+	  locator_free_copy_area (resolved_area);
+	}
 
       thread_p->trigger_involved = false;
 
@@ -8149,16 +8353,33 @@ locator_add_or_remove_index_internal (THREAD_ENTRY * thread_p, RECDES * recdes, 
 	{
 	  if (heap_recdes_contains_oos (recdes))
 	    {
+	      if (thread_p->oos_oids.size () != thread_p->oos_attrids.size ()
+		  || thread_p->oos_oids.size () != thread_p->oos_is_internal_lob.size ())
+		{
+		  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+			  "inconsistent OOS replication tracking metadata");
+		  error_code = ER_HA_GENERIC_ERROR;
+		  goto error;
+		}
+
 	      // insert oos replication log
 	      for (int i = 0; i < (int) thread_p->oos_oids.size (); i++)
 		{
-		  LOG_RCVINDEX oos_repl_rcvindex =
-		    OID_ISNULL (&thread_p->oos_oids[i]) ? RVREPL_DUMMY_OOS_RECORD : RVREPL_OOS_INSERT;
-		  error_code = repl_log_insert (thread_p,
-						class_oid,
-						&thread_p->oos_oids[i],
-						LOG_REPLICATION_DATA,
-						oos_repl_rcvindex, key_dbvalue, REPL_INFO_TYPE_RBR_NORMAL);
+		  LOG_RCVINDEX oos_repl_rcvindex;
+
+		  if (OID_ISNULL (&thread_p->oos_oids[i]))
+		    {
+		      oos_repl_rcvindex = RVREPL_DUMMY_OOS_RECORD;
+		    }
+		  else
+		    {
+		      oos_repl_rcvindex =
+			thread_p->oos_is_internal_lob[i] ? RVREPL_INTERNAL_LOB_INSERT : RVREPL_OOS_INSERT;
+		    }
+
+		  error_code = repl_log_insert_oos (thread_p, class_oid, &thread_p->oos_oids[i],
+					    oos_repl_rcvindex, key_dbvalue, REPL_INFO_TYPE_RBR_NORMAL,
+					    thread_p->oos_attrids[i]);
 		  if (error_code != NO_ERROR)
 		    {
 		      assert (er_errid () != NO_ERROR);
@@ -8953,13 +9174,31 @@ locator_update_index (THREAD_ENTRY * thread_p, RECDES * new_recdes, RECDES * old
 		}
 	    }
 
+	  if (thread_p->oos_oids.size () != thread_p->oos_attrids.size ()
+	      || thread_p->oos_oids.size () != thread_p->oos_is_internal_lob.size ())
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+		      "inconsistent OOS replication tracking metadata");
+	      error_code = ER_HA_GENERIC_ERROR;
+	      goto error;
+	    }
+
 	  for (int i = 0; i < (int) thread_p->oos_oids.size (); i++)
 	    {
-	      LOG_RCVINDEX oos_repl_rcvindex =
-		OID_ISNULL (&thread_p->oos_oids[i]) ? RVREPL_DUMMY_OOS_RECORD : RVREPL_OOS_INSERT;
+	      LOG_RCVINDEX oos_repl_rcvindex;
+
+	      if (OID_ISNULL (&thread_p->oos_oids[i]))
+		{
+		  oos_repl_rcvindex = RVREPL_DUMMY_OOS_RECORD;
+		}
+	      else
+		{
+		  oos_repl_rcvindex =
+		    thread_p->oos_is_internal_lob[i] ? RVREPL_INTERNAL_LOB_INSERT : RVREPL_OOS_INSERT;
+		}
 	      error_code =
-		repl_log_insert (thread_p, class_oid, &thread_p->oos_oids[i], LOG_REPLICATION_DATA, oos_repl_rcvindex,
-				 new_key, REPL_INFO_TYPE_RBR_NORMAL);
+		repl_log_insert_oos (thread_p, class_oid, &thread_p->oos_oids[i], oos_repl_rcvindex, new_key,
+				     REPL_INFO_TYPE_RBR_NORMAL, thread_p->oos_attrids[i]);
 	      if (error_code != NO_ERROR)
 		{
 		  assert (er_errid () != NO_ERROR);
@@ -12575,6 +12814,7 @@ locator_area_op_to_pruning_type (LC_COPYAREA_OPERATION op)
     case LC_FLUSH_UPDATE:
     case LC_FLUSH_DELETE:
     case LC_FLUSH_INSERT_OOS:
+    case LC_FLUSH_INSERT_INTERNAL_LOB:
       return DB_NOT_PARTITIONED_CLASS;
 
     case LC_FLUSH_INSERT_PRUNE:
@@ -14163,7 +14403,62 @@ xsynonym_remove_xasl_by_oid (THREAD_ENTRY * thread_p, OID * oidp)
 }
 
 static int
-locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid, RECDES * recdes)
+locator_internal_lob_repl_node_count (DB_TYPE type, DB_BIGINT logical_length, int *node_count)
+{
+  DB_BIGINT payload_bytes;
+  UINT64 prm_segment_size;
+
+  if (node_count == NULL || logical_length < 0 || (type != DB_TYPE_BLOB && type != DB_TYPE_CLOB))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "invalid internal LOB replication length");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  if (type == DB_TYPE_BLOB)
+    {
+      if (logical_length > DB_BIGINT_MAX - 7)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+		  "invalid internal BLOB bit length");
+	  return ER_HA_GENERIC_ERROR;
+	}
+      payload_bytes = (logical_length + 7) / 8;
+    }
+  else
+    {
+      payload_bytes = logical_length;
+    }
+
+  if (payload_bytes <= 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "empty internal LOB unexpectedly stored as OOS");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  prm_segment_size = prm_get_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE);
+  if (prm_segment_size == 0 || prm_segment_size > (UINT64) INT_MAX)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "invalid internal_lob_segment_size during replication apply");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  if ((UINT64) payload_bytes > ((UINT64) INT_MAX) * prm_segment_size)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "too many internal LOB nodes during replication apply");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  *node_count = (int) (((UINT64) payload_bytes + prm_segment_size - 1) / prm_segment_size);
+  return NO_ERROR;
+}
+
+static int
+locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid, RECDES * recdes,
+				   bool require_all_oos_attrs)
 {
   HEAP_CACHE_ATTRINFO attr_info;
   OR_CLASSREP *classrep = NULL;
@@ -14175,11 +14470,30 @@ locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid
   int offset = 0;
   int oos_oid_count = 0;
   int error = NO_ERROR;
+  std::vector<bool> oos_oid_consumed;
+  bool has_typed_oos = false;
+  bool has_legacy_oos = false;
 
-  if (thread_p->oos_oids.empty ())
+  if (thread_p->oos_oids.empty () || thread_p->oos_oids.size () != thread_p->oos_attrids.size ()
+      || thread_p->oos_oids.size () != thread_p->oos_is_internal_lob.size ())
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
-	      "missing OOS OID while applying replicated heap record");
+	      "missing or inconsistent OOS metadata while applying replicated heap record");
+      return ER_HA_GENERIC_ERROR;
+    }
+
+  oos_oid_consumed.resize (thread_p->oos_oids.size (), false);
+
+  for (int attrid : thread_p->oos_attrids)
+    {
+      has_typed_oos |= attrid != NULL_ATTRID;
+      has_legacy_oos |= attrid == NULL_ATTRID;
+    }
+
+  if (has_typed_oos && has_legacy_oos)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+	      "mixed legacy and typed OOS replication metadata");
       return ER_HA_GENERIC_ERROR;
     }
 
@@ -14231,23 +14545,87 @@ locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid
 	  continue;
 	}
 
-      if (oos_oid_count >= (int) thread_p->oos_oids.size ())
+      int oos_oid_consume_count = 1;
+      bool is_internal_lob = (attrepr->type == DB_TYPE_BLOB || attrepr->type == DB_TYPE_CLOB);
+      if (is_internal_lob)
+	{
+	  DB_BIGINT logical_length = 0;
+	  const char *inline_ptr = (char *) recdes->data + OR_VAR_OFFSET (recdes->data, attrepr->location);
+
+	  if (inline_ptr + OR_OOS_INLINE_SIZE > (char *) recdes->data + recdes->length)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+		      "internal LOB locator inline area exceeds record bounds");
+	      error = ER_HA_GENERIC_ERROR;
+	      goto end;
+	    }
+
+	  OR_GET_BIGINT (inline_ptr + OR_OID_SIZE, &logical_length);
+	  error = locator_internal_lob_repl_node_count (attrepr->type, logical_length, &oos_oid_consume_count);
+	  if (error != NO_ERROR)
+	    {
+	      goto end;
+	    }
+	}
+      int attr_oos_oid_count = 0;
+
+      if (has_legacy_oos)
+	{
+	  if (oos_oid_count + oos_oid_consume_count > (int) thread_p->oos_oids.size ())
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+		      "not enough legacy OOS OIDs while applying replicated heap record");
+	      error = ER_HA_GENERIC_ERROR;
+	      goto end;
+	    }
+
+	  oos_oid = thread_p->oos_oids[oos_oid_count + oos_oid_consume_count - 1];
+	  attr_oos_oid_count = oos_oid_consume_count;
+	  oos_oid_count += oos_oid_consume_count;
+	}
+      else
+	{
+	  for (int oos_index = 0; oos_index < (int) thread_p->oos_oids.size (); oos_index++)
+	    {
+	      if (oos_oid_consumed[oos_index] || thread_p->oos_attrids[oos_index] != attrepr->id)
+		{
+		  continue;
+		}
+
+	      if (thread_p->oos_is_internal_lob[oos_index] != is_internal_lob)
+		{
+		  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
+			  "OOS destination type does not match target attribute");
+		  error = ER_HA_GENERIC_ERROR;
+		  goto end;
+		}
+
+	      oos_oid = thread_p->oos_oids[oos_index];
+	      oos_oid_consumed[oos_index] = true;
+	      attr_oos_oid_count++;
+	      oos_oid_count++;
+	    }
+
+	  if (attr_oos_oid_count == 0 && !require_all_oos_attrs)
+	    {
+	      continue;
+	    }
+	}
+
+      if (attr_oos_oid_count != oos_oid_consume_count)
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1,
-		  "not enough OOS OIDs while applying replicated heap record");
+		  "OOS OID count does not match target attribute");
 	  error = ER_HA_GENERIC_ERROR;
 	  goto end;
 	}
 
-      oos_oid = thread_p->oos_oids[oos_oid_count];
       oid_ptr = (char *) recdes->data + OR_VAR_OFFSET (recdes->data, attrepr->location);
 
       buf.ptr = oid_ptr;
       buf.endptr = (char *) recdes->data + recdes->length;
 
       or_put_oid (&buf, &oos_oid);
-
-      oos_oid_count++;
     }
 
   if (oos_oid_count != (int) thread_p->oos_oids.size ())
@@ -14266,7 +14644,8 @@ end:
 int
 bridge_locator_fixup_oos_oids_in_recdes (THREAD_ENTRY * thread_p, const OID * class_oid, RECDES * recdes)
 {
-  return locator_fixup_oos_oids_in_recdes (thread_p, class_oid, recdes);
+  /* Exercise the INSERT contract: every OOS attribute of the record must be accounted for. */
+  return locator_fixup_oos_oids_in_recdes (thread_p, class_oid, recdes, true);
 }
 #endif
 

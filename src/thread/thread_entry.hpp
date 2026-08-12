@@ -320,6 +320,8 @@ namespace cubthread
       bool m_skip_end_resource_tracks_in_recycle;
 
       std::vector<OID> oos_oids;
+      std::vector<int> oos_attrids;
+      std::vector<bool> oos_is_internal_lob;
 
 
       bool m_is_private_lru_enabled;

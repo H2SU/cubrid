@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <string.h>
 #if defined(WINDOWS)
 #include <io.h>
 #else
@@ -48,7 +49,9 @@
 #include "server_interface.h"
 #include "load_object.h"
 #include "db_value_printer.hpp"
+#include "internal_lob_marker.h"
 #include "network_interface_cl.h"
+#include "oid.h"
 #include "printer.hpp"
 
 #include "message_catalog.h"
@@ -58,6 +61,7 @@
 #endif
 
 #define MIGRATION_CHUNK 4096
+#define LOAD_INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
 static char migration_buffer[MIGRATION_CHUNK];
 
 static int object_disk_size (DESC_OBJ * obj, int *offset_size_ptr);
@@ -71,10 +75,150 @@ static void get_desc_old (OR_BUF * buf, SM_CLASS * class_, int repid, DESC_OBJ *
 static void init_load_err_filter (void);
 static void default_clear_err_filter (void);
 
+static int desc_get_var_table_raw_offset (char *var_table, int index, int offset_size);
+static int desc_format_internal_lob_locator (const OID *oid, DB_BIGINT logical_length, char *buf, size_t buf_size);
+static int desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type);
+
 #if (MAJOR_VERSION >= 11) || (MAJOR_VERSION == 10 && MINOR_VERSION >= 1)
 extern int data_readval_string (OR_BUF * buf, DB_VALUE * value, TP_DOMAIN * domain, int size, bool copy, char *copy_buf,
 				int copy_buf_len, DB_TYPE type);
 #endif
+
+static int
+desc_get_var_table_raw_offset (char *var_table, int index, int offset_size)
+{
+  char *offset_ptr = OR_VAR_TABLE_ELEMENT_PTR (var_table, index, offset_size);
+
+  if (offset_size == OR_BYTE_SIZE)
+    {
+      return OR_GET_BYTE (offset_ptr);
+    }
+  else if (offset_size == OR_SHORT_SIZE)
+    {
+      return OR_GET_SHORT (offset_ptr);
+    }
+  else
+    {
+      assert (offset_size == OR_INT_SIZE);
+      return OR_GET_INT (offset_ptr);
+    }
+}
+
+static unsigned long long
+desc_internal_lob_mix_u64 (unsigned long long value)
+{
+  value ^= value >> 33;
+  value *= 0xff51afd7ed558ccdULL;
+  value ^= value >> 33;
+  value *= 0xc4ceb9fe1a85ec53ULL;
+  value ^= value >> 33;
+  return value;
+}
+
+static unsigned long long
+desc_internal_lob_locator_token (const OID *oid, DB_BIGINT logical_length)
+{
+  unsigned long long token = 0x26914cbfd15cafe1ULL;
+
+  token ^= (unsigned long long) (unsigned short) oid->volid;
+  token = desc_internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) (unsigned int) oid->pageid;
+  token = desc_internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) (unsigned short) oid->slotid;
+  token = desc_internal_lob_mix_u64 (token);
+  token ^= (unsigned long long) logical_length;
+  token = desc_internal_lob_mix_u64 (token);
+  token ^= 0x10c07edULL;
+  token = desc_internal_lob_mix_u64 (token);
+
+  return token == 0 ? 1 : token;
+}
+
+static int
+desc_format_internal_lob_locator (const OID *oid, DB_BIGINT logical_length, char *buf, size_t buf_size)
+{
+  unsigned long long token = desc_internal_lob_locator_token (oid, logical_length);
+
+  return snprintf (buf, buf_size, LOAD_INTERNAL_LOB_LOCATOR_PREFIX "%d|%d|%d:%lld:%016llx",
+		   (int) oid->volid, (int) oid->pageid, (int) oid->slotid, (long long) logical_length, token);
+}
+
+static int
+desc_read_internal_lob_locator (OR_BUF * buf, DB_VALUE * value, DB_TYPE lob_type)
+{
+  OR_BUF locator_buf;
+  OID locator_oid;
+  DB_BIGINT disk_length;
+  DB_BIGINT logical_length;
+  char stack_buf[128];
+  char *locator_buf_string = NULL;
+  int locator_len;
+  int err;
+  int rc = NO_ERROR;
+
+  if (buf->ptr + OR_OOS_INLINE_SIZE > buf->endptr)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_TF_BUFFER_UNDERFLOW, 0);
+      return ER_TF_BUFFER_UNDERFLOW;
+    }
+
+  or_init (&locator_buf, buf->ptr, OR_OOS_INLINE_SIZE);
+  or_get_oid (&locator_buf, &locator_oid);
+  disk_length = or_get_bigint (&locator_buf, &rc);
+  if (rc != NO_ERROR)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+
+  or_advance (buf, OR_OOS_INLINE_SIZE);
+
+  if (disk_length < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+  logical_length = disk_length;
+
+  locator_len = desc_format_internal_lob_locator (&locator_oid, logical_length, stack_buf, sizeof (stack_buf));
+  if (locator_len <= 0 || locator_len >= (int) sizeof (stack_buf))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_GENERIC_ERROR;
+    }
+
+  locator_buf_string = (char *) db_private_alloc (NULL, (size_t) locator_len + 1);
+  if (locator_buf_string == NULL)
+    {
+      ASSERT_ERROR_AND_SET (err);
+      return err;
+    }
+  memcpy (locator_buf_string, stack_buf, (size_t) locator_len + 1);
+
+  if (lob_type == DB_TYPE_CLOB)
+    {
+      err = db_make_clob (value, DB_MAX_LOB_PRECISION, locator_buf_string, locator_len);
+    }
+  else if (lob_type == DB_TYPE_BLOB)
+    {
+      err = db_make_blob (value, DB_MAX_LOB_PRECISION, (DB_CONST_C_BIT) locator_buf_string, locator_len * 8);
+    }
+  else
+    {
+      err = ER_GENERIC_ERROR;
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
+    }
+
+  if (err != NO_ERROR)
+    {
+      db_private_free_and_init (NULL, locator_buf_string);
+      return err;
+    }
+
+  value->need_clear = true;
+  db_value_mark_internal_lob (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR);
+  return NO_ERROR;
+}
 
 /*
  * make_desc_obj - Makes an object descriptor for a particular class.
@@ -571,11 +715,12 @@ get_desc_current (OR_BUF * buf, SM_CLASS * class_, DESC_OBJ * obj, int bound_bit
 {
   SM_ATTRIBUTE *att;
   int *vars = NULL;
-  int i, j, offset, offset2, pad;
+  int *raw_vars = NULL;
+  int i, j, raw_offset2, pad;
   char *bits, *start;
-  int rc = NO_ERROR;
   bool do_copy = is_unloaddb ? false : true;
   int zvar[32];
+  int zraw[32];
 
   /* need nicer way to store these */
   if (class_->variable_count)
@@ -583,23 +728,34 @@ get_desc_current (OR_BUF * buf, SM_CLASS * class_, DESC_OBJ * obj, int bound_bit
       if (class_->variable_count <= DIM (zvar))
 	{
 	  vars = zvar;
+	  raw_vars = zraw;
 	}
       else
 	{
 	  vars = (int *) malloc (sizeof (int) * class_->variable_count);
-	  if (vars == NULL)
+	  raw_vars = (int *) malloc (sizeof (int) * class_->variable_count);
+	  if (vars == NULL || raw_vars == NULL)
 	    {
+	      if (vars != NULL)
+		{
+		  free (vars);
+		}
+	      if (raw_vars != NULL)
+		{
+		  free (raw_vars);
+		}
 	      return;
 	    }
 	}
       /* get the offsets relative to the end of the header (beginning of variable table) */
-      offset = or_get_offset_internal (buf, &rc, offset_size);
+      char *var_table = buf->ptr;
       for (i = 0; i < class_->variable_count; i++)
 	{
-	  offset2 = or_get_offset_internal (buf, &rc, offset_size);
-	  vars[i] = offset2 - offset;
-	  offset = offset2;
+	  raw_vars[i] = desc_get_var_table_raw_offset (var_table, i, offset_size);
+	  raw_offset2 = desc_get_var_table_raw_offset (var_table, i + 1, offset_size);
+	  vars[i] = OR_GET_VAR_OFFSET (raw_offset2) - OR_GET_VAR_OFFSET (raw_vars[i]);
 	}
+      or_advance (buf, OR_VAR_TABLE_SIZE_INTERNAL (class_->variable_count, offset_size));
       buf->ptr = PTR_ALIGN (buf->ptr, INT_ALIGNMENT);
     }
 
@@ -648,7 +804,14 @@ get_desc_current (OR_BUF * buf, SM_CLASS * class_, DESC_OBJ * obj, int bound_bit
 	{
 #if (MAJOR_VERSION >= 11) || (MAJOR_VERSION == 10 && MINOR_VERSION >= 1)
 	  DB_TYPE att_type_id = att->type->get_id ();
-	  if (is_unloaddb && obj->dbvalue_buf_ptr && TP_IS_CHAR_TYPE (att_type_id))
+	  if (is_unloaddb && OR_IS_OOS (raw_vars[j]) && TP_IS_LOB_TYPE (att_type_id))
+	    {
+	      if (desc_read_internal_lob_locator (buf, &obj->values[i], att_type_id) != NO_ERROR)
+		{
+		  goto cleanup;
+		}
+	    }
+	  else if (is_unloaddb && obj->dbvalue_buf_ptr && TP_IS_CHAR_TYPE (att_type_id))
 	    {
 	      data_readval_string (buf, &obj->values[i], att->domain, vars[j], false, obj->dbvalue_buf_ptr[i].buf,
 				   obj->dbvalue_buf_ptr[i].buf_size, att_type_id);
@@ -660,9 +823,14 @@ get_desc_current (OR_BUF * buf, SM_CLASS * class_, DESC_OBJ * obj, int bound_bit
 	    }
 	}
 
+    cleanup:
       if (vars != zvar)
 	{
 	  free (vars);
+	}
+      if (raw_vars != zraw)
+	{
+	  free (raw_vars);
 	}
     }
 }
@@ -711,13 +879,14 @@ get_desc_old (OR_BUF * buf, SM_CLASS * class_, int repid, DESC_OBJ * obj, int bo
   SM_ATTRIBUTE *att;
   const PR_TYPE *type;
   int *vars = NULL;
-  int i, offset, offset2, total, bytes, att_index, padded_size, fixed_size;
+  int *raw_vars = NULL;
+  int i, raw_offset2, total, bytes, att_index, padded_size, fixed_size;
   SM_ATTRIBUTE **attmap = NULL;
   char *bits, *start;
-  int rc = NO_ERROR;
   int storage_order;
   bool do_copy = is_unloaddb ? false : true;
   int zvar[32];
+  int zraw[32];
 
   oldrep = classobj_find_representation (class_, repid);
   if (oldrep == NULL)
@@ -729,26 +898,29 @@ get_desc_old (OR_BUF * buf, SM_CLASS * class_, int repid, DESC_OBJ * obj, int bo
   if (oldrep->variable_count)
     {
       /* need nicer way to store these */
-      if (class_->variable_count <= DIM (zvar))
+      if (oldrep->variable_count <= DIM (zvar))
 	{
 	  vars = zvar;
+	  raw_vars = zraw;
 	}
       else
 	{
 	  vars = (int *) malloc (sizeof (int) * oldrep->variable_count);
-	  if (vars == NULL)
+	  raw_vars = (int *) malloc (sizeof (int) * oldrep->variable_count);
+	  if (vars == NULL || raw_vars == NULL)
 	    {
 	      goto abort_on_error;
 	    }
 	}
       /* compute the variable offsets relative to the end of the header (beginning of variable table) */
-      offset = or_get_offset_internal (buf, &rc, offset_size);
+      char *var_table = buf->ptr;
       for (i = 0; i < oldrep->variable_count; i++)
 	{
-	  offset2 = or_get_offset_internal (buf, &rc, offset_size);
-	  vars[i] = offset2 - offset;
-	  offset = offset2;
+	  raw_vars[i] = desc_get_var_table_raw_offset (var_table, i, offset_size);
+	  raw_offset2 = desc_get_var_table_raw_offset (var_table, i + 1, offset_size);
+	  vars[i] = OR_GET_VAR_OFFSET (raw_offset2) - OR_GET_VAR_OFFSET (raw_vars[i]);
 	}
+      or_advance (buf, OR_VAR_TABLE_SIZE_INTERNAL (oldrep->variable_count, offset_size));
       buf->ptr = PTR_ALIGN (buf->ptr, INT_ALIGNMENT);
     }
 
@@ -841,7 +1013,14 @@ get_desc_old (OR_BUF * buf, SM_CLASS * class_, int repid, DESC_OBJ * obj, int bo
 	  storage_order = attmap[att_index]->storage_order;
 #if (MAJOR_VERSION >= 11) || (MAJOR_VERSION == 10 && MINOR_VERSION >= 1)
 	  DB_TYPE type_id = type->get_id ();
-	  if (is_unloaddb && obj->dbvalue_buf_ptr && TP_IS_CHAR_TYPE (type_id))
+	  if (is_unloaddb && OR_IS_OOS (raw_vars[i]) && TP_IS_LOB_TYPE (type_id))
+	    {
+	      if (desc_read_internal_lob_locator (buf, &obj->values[storage_order], type_id) != NO_ERROR)
+		{
+		  goto abort_on_error;
+		}
+	    }
+	  else if (is_unloaddb && obj->dbvalue_buf_ptr && TP_IS_CHAR_TYPE (type_id))
 	    {
 	      data_readval_string (buf, &obj->values[storage_order], rat->domain, vars[i], false,
 				   obj->dbvalue_buf_ptr[storage_order].buf,
@@ -887,6 +1066,10 @@ get_desc_old (OR_BUF * buf, SM_CLASS * class_, int repid, DESC_OBJ * obj, int bo
     {
       free (vars);
     }
+  if (raw_vars && raw_vars != zraw)
+    {
+      free (raw_vars);
+    }
 
   obj->updated_flag = 1;
   return;
@@ -899,6 +1082,10 @@ abort_on_error:
   if (vars && vars != zvar)
     {
       free (vars);
+    }
+  if (raw_vars && raw_vars != zraw)
+    {
+      free (raw_vars);
     }
 }
 

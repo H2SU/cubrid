@@ -25,6 +25,8 @@
 #include "config.h"
 
 #include <float.h>
+#include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 #include "csql.h"
@@ -37,6 +39,7 @@
 #include "db_value_printer.hpp"
 
 #include "dbtype.h"
+#include "internal_lob_marker.h"
 
 #if defined (SUPPRESS_STRLEN_WARNING)
 #define strlen(s1)  ((int) strlen(s1))
@@ -56,6 +59,9 @@
 #define TIME_STRING_MAX         20
 
 #define OID_LENGTH      15
+
+#define CSQL_INTERNAL_LOB_LOCATOR_PREFIX "@internal_lob:"
+#define CSQL_INTERNAL_LOB_SCALAR_STREAM_PREFIX "@internal_lob_stream:"
 
 #define COMMA_CHAR      ','
 
@@ -962,7 +968,10 @@ bit_to_string (DB_VALUE * value, char string_delimiter, bool plain_string)
 {
   char *temp_string;
   char *return_string;
+  const char *bit_format;
+  char introducer;
   int max_length;
+  int bit_length;
 
   /*
    * Allocate string length based on precision plus the the leading
@@ -970,21 +979,35 @@ bit_to_string (DB_VALUE * value, char string_delimiter, bool plain_string)
    * represents the number of bytes needed to represent the bit string in
    * hexadecimal.
    */
-  max_length = ((db_get_string_length (value) + 3) / 4) + 4;
+  bit_length = db_get_string_length (value);
+  if (bit_length % 4 == 0)
+    {
+      bit_format = "%X";
+      introducer = 'X';
+      max_length = ((bit_length + 3) / 4) + 4;
+    }
+  else
+    {
+      /* Hex literals round to a nibble and lose the exact bit length.  Use a binary literal for non-nibble strings. */
+      bit_format = "%B";
+      introducer = 'B';
+      max_length = bit_length + 4;
+    }
+
   temp_string = (char *) malloc (max_length);
   if (temp_string == NULL)
     {
       return (NULL);
     }
 
-  if (db_bit_string (value, "%X", temp_string, max_length) != CSQL_SUCCESS)
+  if (db_bit_string (value, bit_format, temp_string, max_length) != CSQL_SUCCESS)
     {
       free_and_init (temp_string);
       return (NULL);		/* Should never get here */
     }
 
   return_string =
-    string_to_string (temp_string, string_delimiter, 'X', strlen (temp_string), NULL, plain_string, false);
+    string_to_string (temp_string, string_delimiter, introducer, strlen (temp_string), NULL, plain_string, false);
   free_and_init (temp_string);
 
   return (return_string);
@@ -1141,6 +1164,297 @@ duplicate_string (const char *string)
 
   return (new_string);
 
+}
+
+static bool
+csql_parse_internal_lob_locator_metadata (const char *data, int size, DB_BIGINT * length, DB_BIGINT * bit_length)
+{
+  char locator_buf[128];
+  int volid = 0;
+  int pageid = 0;
+  int slotid = 0;
+  long long parsed_length = 0;
+  unsigned long long parsed_token = 0;
+  int consumed = 0;
+  int token_consumed = 0;
+  int prefix_len = (int) strlen (CSQL_INTERNAL_LOB_LOCATOR_PREFIX);
+  char *oid_part = NULL;
+
+  if (length != NULL)
+    {
+      *length = 0;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = -1;
+    }
+
+  if (data == NULL || size <= prefix_len || size >= (int) sizeof (locator_buf))
+    {
+      return false;
+    }
+  if (memcmp (data, CSQL_INTERNAL_LOB_LOCATOR_PREFIX, (size_t) prefix_len) != 0)
+    {
+      return false;
+    }
+
+  memcpy (locator_buf, data, (size_t) size);
+  locator_buf[size] = '\0';
+
+  oid_part = locator_buf + prefix_len;
+  if (oid_part[0] == 'A' && oid_part[1] == ':')
+    {
+      oid_part += 2;
+    }
+
+  if (sscanf (oid_part, "%d|%d|%d:%lld%n", &volid, &pageid, &slotid, &parsed_length, &consumed) != 4
+      || parsed_length < 0)
+    {
+      return false;
+    }
+  (void) volid;
+  (void) pageid;
+  (void) slotid;
+
+  if (oid_part[consumed] != ':'
+      || sscanf (oid_part + consumed + 1, "%llx%n", &parsed_token, &token_consumed) != 1
+      || parsed_token == 0 || token_consumed <= 0
+      || oid_part[consumed + 1 + token_consumed] != '\0')
+    {
+      return false;
+    }
+
+  if (length != NULL)
+    {
+      *length = (DB_BIGINT) parsed_length;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = -1;
+    }
+  return true;
+}
+
+bool
+csql_db_value_is_internal_lob_locator (DB_VALUE * value, char *lob_type, const char **locator, int *locator_len,
+				       DB_BIGINT * data_len, DB_BIGINT * bit_length)
+{
+  DB_TYPE type;
+  const char *data = NULL;
+  int size = 0;
+  int locator_bit_length = 0;
+  DB_BIGINT parsed_length = 0;
+  DB_BIGINT parsed_bit_length = -1;
+
+  if (locator != NULL)
+    {
+      *locator = NULL;
+    }
+  if (locator_len != NULL)
+    {
+      *locator_len = 0;
+    }
+  if (data_len != NULL)
+    {
+      *data_len = 0;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = -1;
+    }
+
+  if (value == NULL || DB_IS_NULL (value)
+      || !db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR))
+    {
+      return false;
+    }
+
+  type = DB_VALUE_TYPE (value);
+  if (type == DB_TYPE_CLOB)
+    {
+      data = db_get_string (value);
+      size = db_get_string_size (value);
+      if (lob_type != NULL)
+	{
+	  *lob_type = 'C';
+	}
+    }
+  else if (type == DB_TYPE_BLOB)
+    {
+      data = (const char *) db_get_bit (value, &locator_bit_length);
+      size = (locator_bit_length + 7) / 8;
+      if (lob_type != NULL)
+	{
+	  *lob_type = 'B';
+	}
+    }
+  else
+    {
+      return false;
+    }
+
+  if (!csql_parse_internal_lob_locator_metadata (data, size, &parsed_length, &parsed_bit_length))
+    {
+      return false;
+    }
+
+  if (locator != NULL)
+    {
+      *locator = data;
+    }
+  if (locator_len != NULL)
+    {
+      *locator_len = size;
+    }
+  if (data_len != NULL)
+    {
+      if (type == DB_TYPE_BLOB)
+	{
+	  if (parsed_length > DB_BIGINT_MAX - 7)
+	    {
+	      return false;
+	    }
+	  *data_len = (parsed_length + 7) / 8;
+	}
+      else
+	{
+	  *data_len = parsed_length;
+	}
+    }
+  if (bit_length != NULL)
+    {
+      if (type == DB_TYPE_CLOB)
+	{
+	  *bit_length = 0;
+	}
+      else
+	{
+	  *bit_length = parsed_length;
+	}
+    }
+  return true;
+}
+
+bool
+csql_db_value_is_internal_lob_stream_marker (DB_VALUE * value, char *lob_type, const char **locator, int *locator_len,
+					     DB_BIGINT * data_len, DB_BIGINT * bit_length)
+{
+  DB_TYPE type;
+  const char *data = NULL;
+  const char *locator_data = NULL;
+  int size = 0;
+  int locator_size = 0;
+  int marker_prefix_len = (int) strlen (CSQL_INTERNAL_LOB_SCALAR_STREAM_PREFIX);
+  int marker_bit_length = 0;
+  DB_BIGINT parsed_length = 0;
+  DB_BIGINT parsed_bit_length = -1;
+  char marker_type = '\0';
+
+  if (locator != NULL)
+    {
+      *locator = NULL;
+    }
+  if (locator_len != NULL)
+    {
+      *locator_len = 0;
+    }
+  if (data_len != NULL)
+    {
+      *data_len = 0;
+    }
+  if (bit_length != NULL)
+    {
+      *bit_length = -1;
+    }
+
+  if (value == NULL || DB_IS_NULL (value)
+      || !db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_STREAM))
+    {
+      return false;
+    }
+
+  type = DB_VALUE_TYPE (value);
+  if (TP_IS_CHAR_TYPE (type))
+    {
+      data = db_get_string (value);
+      size = db_get_string_size (value);
+    }
+  else if (TP_IS_BIT_TYPE (type))
+    {
+      data = (const char *) db_get_bit (value, &marker_bit_length);
+      if (marker_bit_length < 0 || marker_bit_length % 8 != 0)
+	{
+	  return false;
+	}
+      size = marker_bit_length / 8;
+    }
+  else
+    {
+      return false;
+    }
+
+  if (data == NULL || size <= marker_prefix_len + 2
+      || memcmp (data, CSQL_INTERNAL_LOB_SCALAR_STREAM_PREFIX, (size_t) marker_prefix_len) != 0)
+    {
+      return false;
+    }
+
+  marker_type = data[marker_prefix_len];
+  if (data[marker_prefix_len + 1] != ':' || (marker_type != 'C' && marker_type != 'B'))
+    {
+      return false;
+    }
+  if ((marker_type == 'C' && !TP_IS_CHAR_TYPE (type)) || (marker_type == 'B' && !TP_IS_BIT_TYPE (type)))
+    {
+      return false;
+    }
+
+  locator_data = data + marker_prefix_len + 2;
+  locator_size = size - marker_prefix_len - 2;
+  if (!csql_parse_internal_lob_locator_metadata (locator_data, locator_size, &parsed_length, &parsed_bit_length))
+    {
+      return false;
+    }
+
+  if (lob_type != NULL)
+    {
+      *lob_type = marker_type;
+    }
+  if (locator != NULL)
+    {
+      *locator = locator_data;
+    }
+  if (locator_len != NULL)
+    {
+      *locator_len = locator_size;
+    }
+  if (data_len != NULL)
+    {
+      if (marker_type == 'B')
+	{
+	  if (parsed_length > DB_BIGINT_MAX - 7)
+	    {
+	      return false;
+	    }
+	  *data_len = (parsed_length + 7) / 8;
+	}
+      else
+	{
+	  *data_len = parsed_length;
+	}
+    }
+  if (bit_length != NULL)
+    {
+      if (marker_type == 'C')
+	{
+	  *bit_length = 0;
+	}
+      else
+	{
+	  *bit_length = parsed_length;
+	}
+    }
+  return true;
 }
 
 /*
@@ -1874,7 +2188,14 @@ csql_db_value_as_string (DB_VALUE * value, int *length, const CSQL_ARGUMENT * cs
 
     case DB_TYPE_BLOB:
       // TODO: Uses VARCHAR/VARBIT code, update when storage structure is improved.
-      result = bit_to_string (value, string_delimiter, plain_string);
+      if (db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR))
+	{
+	  result = duplicate_string ("<INTERNAL BLOB>");
+	}
+      if (result == NULL)
+	{
+	  result = bit_to_string (value, string_delimiter, plain_string);
+	}
       if (result)
 	{
 	  len = strlen (result);
@@ -1891,6 +2212,15 @@ csql_db_value_as_string (DB_VALUE * value, int *length, const CSQL_ARGUMENT * cs
 
 	str = db_get_char (value);
 	bytes_size = db_get_string_size (value);
+	if (db_value_has_internal_lob_marker (value, DB_VALUE_INTERNAL_LOB_MARKER_LOCATOR))
+	  {
+	    result = duplicate_string ("<INTERNAL CLOB>");
+	  }
+	if (result != NULL)
+	  {
+	    len = strlen (result);
+	    break;
+	  }
 	if (bytes_size > 0 && db_get_string_codeset (value) == INTL_CODESET_UTF8)
 	  {
 	    need_decomp =

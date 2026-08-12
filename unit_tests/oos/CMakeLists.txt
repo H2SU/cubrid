@@ -28,6 +28,7 @@ set(SA_MODE_TESTS
   test_oos_record_flags
   test_byte_span_writer
   test_oos_tde_gate
+  test_internal_lob_dml_session
 )
 
 foreach(test_name ${SA_MODE_TESTS})
@@ -90,6 +91,8 @@ add_test(NAME test_oos_record_flags COMMAND test_oos_record_flags)
 add_test(NAME test_byte_span_writer COMMAND test_byte_span_writer)
 # pure-logic guard that the OOS forward-delete rcvindex is TDE-gated (CBRD-26668); no DB fixture.
 add_test(NAME test_oos_tde_gate COMMAND test_oos_tde_gate)
+# pure-logic test for COPY-style Internal LOB DML stream framing/lifecycle.
+add_test(NAME test_internal_lob_dml_session COMMAND test_internal_lob_dml_session)
 
 set_tests_properties(
   test_oos test_oos_delete test_oos_remove_file test_oos_bestspace
