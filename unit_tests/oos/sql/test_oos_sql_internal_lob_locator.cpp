@@ -1188,6 +1188,84 @@ TEST_F (OosSqlInternalLobLocator, ClientObjectPathRefusesUnresolvedInternalLob)
   std::remove (clob_path.c_str ());
 }
 
+/*
+ * A multi-table UPDATE cannot use the direct reverse-to-storage path because do_get_internal_lob_update_class_oid ()
+ * gives up as soon as two different classes are updated, so every slot falls back to the non-direct path.  That
+ * fallback must at least still store the right payload in each table.
+ */
+TEST_F (OosSqlInternalLobLocator, MultiTableUpdateStoresEachInternalLobPayload)
+{
+  struct segment_size_guard
+  {
+    ~segment_size_guard ()
+    {
+      prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 128ULL * 1024ULL * 1024ULL);
+    }
+  } guard;
+
+  std::string left_path = internal_lob_test_path ("multi_left.txt");
+  std::string right_path = internal_lob_test_path ("multi_right.txt");
+  std::string left_payload (2500, 'L');
+  std::string right_payload (1700, 'R');
+  DB_VALUE left_value, right_value;
+  DB_QUERY_RESULT *result = nullptr;
+  int rc;
+
+  prm_set_bigint_value (PRM_ID_INTERNAL_LOB_SEGMENT_SIZE, 1024ULL);
+  for (std::size_t i = 0; i < left_payload.size (); i++)
+    {
+      left_payload[i] = (char) ('a' + (i % 26));
+    }
+  for (std::size_t i = 0; i < right_payload.size (); i++)
+    {
+      right_payload[i] = (char) ('A' + (i % 26));
+    }
+  write_test_file (left_path, left_payload);
+  write_test_file (right_path, right_payload);
+
+  exec_sql ("DROP TABLE IF EXISTS t_internal_lob_locator_copy");
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator (id INT PRIMARY KEY, c CLOB)");
+  ASSERT_GE (rc, 0);
+  rc = exec_sql ("CREATE TABLE t_internal_lob_locator_copy (id INT PRIMARY KEY, c CLOB)");
+  ASSERT_GE (rc, 0);
+  rc = exec_sql ("INSERT INTO t_internal_lob_locator VALUES (1, NULL)");
+  ASSERT_GE (rc, 0);
+  rc = exec_sql ("INSERT INTO t_internal_lob_locator_copy VALUES (1, NULL)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  std::string update_sql = "UPDATE t_internal_lob_locator a, t_internal_lob_locator_copy b "
+			   "SET a.c = clob_from_file('" + left_path + "'), "
+			   "b.c = clob_from_file('" + right_path + "') "
+			   "WHERE a.id = b.id";
+  rc = exec_sql (update_sql.c_str ());
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  db_make_null (&left_value);
+  db_make_null (&right_value);
+  rc = exec_sql_with_result ("SELECT clob_to_char (a.c), clob_to_char (b.c) "
+			     "FROM t_internal_lob_locator a, t_internal_lob_locator_copy b WHERE a.id = b.id",
+			     &result);
+  ASSERT_GE (rc, 0);
+  ASSERT_NE (result, nullptr);
+  ASSERT_EQ (db_query_first_tuple (result), DB_CURSOR_SUCCESS);
+  ASSERT_EQ (db_query_get_tuple_value (result, 0, &left_value), NO_ERROR);
+  ASSERT_EQ (db_query_get_tuple_value (result, 1, &right_value), NO_ERROR);
+
+  ASSERT_NE (db_get_string (&left_value), nullptr);
+  ASSERT_NE (db_get_string (&right_value), nullptr);
+  EXPECT_EQ (std::string (db_get_string (&left_value), (std::size_t) db_get_string_size (&left_value)), left_payload);
+  EXPECT_EQ (std::string (db_get_string (&right_value), (std::size_t) db_get_string_size (&right_value)),
+	     right_payload);
+
+  pr_clear_value (&left_value);
+  pr_clear_value (&right_value);
+  db_query_end (result);
+  std::remove (left_path.c_str ());
+  std::remove (right_path.c_str ());
+}
+
 int
 main (int argc, char **argv)
 {
