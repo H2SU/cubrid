@@ -282,6 +282,69 @@ TEST_F (OosSqlTxn, DeleteRollback)
   EXPECT_EQ (len, 4096);
 }
 
+/*
+ * The OOS transaction tests above cover plain out-of-row columns only.  Internal LOB payloads take a different write
+ * path (a FILE_INTERNAL_LOB chunk chain written through oos_insert ()), so COMMIT/ROLLBACK atomicity needs its own
+ * coverage.  Space reclamation for an aborted write is tracked separately; this asserts visible data only.
+ */
+TEST_F (OosSqlTxn, RollbackInternalLobInsertAndUpdate)
+{
+  std::string first (9000, 'x');
+  std::string second (5000, 'y');
+  int row_count = -1;
+  int length = -1;
+  int rc;
+
+  for (std::size_t i = 0; i < first.size (); i++)
+    {
+      first[i] = (char) ('a' + (i % 26));
+    }
+  for (std::size_t i = 0; i < second.size (); i++)
+    {
+      second[i] = (char) ('A' + (i % 26));
+    }
+
+  rc = exec_sql ("CREATE TABLE t_oos_txn (id INT PRIMARY KEY, c CLOB)");
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  /* ROLLBACK cancels an Internal LOB INSERT */
+  rc = exec_sql (("INSERT INTO t_oos_txn VALUES (1, char_to_clob('" + first + "'))").c_str ());
+  ASSERT_GE (rc, 0);
+  db_abort_transaction ();
+
+  rc = fetch_single_int ("SELECT COUNT (*) FROM t_oos_txn", &row_count);
+  ASSERT_EQ (rc, NO_ERROR);
+  EXPECT_EQ (row_count, 0);
+
+  /* a committed Internal LOB row survives and reads back at full length */
+  rc = exec_sql (("INSERT INTO t_oos_txn VALUES (1, char_to_clob('" + first + "'))").c_str ());
+  ASSERT_GE (rc, 0);
+  db_commit_transaction ();
+
+  rc = fetch_single_int ("SELECT CAST (clob_length (c) AS INT) FROM t_oos_txn WHERE id = 1", &length);
+  ASSERT_EQ (rc, NO_ERROR);
+  EXPECT_EQ (length, (int) first.size ());
+
+  /* ROLLBACK cancels an Internal LOB UPDATE and leaves the committed payload intact */
+  rc = exec_sql (("UPDATE t_oos_txn SET c = char_to_clob('" + second + "') WHERE id = 1").c_str ());
+  ASSERT_GE (rc, 0);
+  db_abort_transaction ();
+
+  rc = fetch_single_int ("SELECT CAST (clob_length (c) AS INT) FROM t_oos_txn WHERE id = 1", &length);
+  ASSERT_EQ (rc, NO_ERROR);
+  EXPECT_EQ (length, (int) first.size ()) << "rolled-back UPDATE did not restore the committed Internal LOB";
+
+  /* ROLLBACK cancels an Internal LOB DELETE */
+  rc = exec_sql ("DELETE FROM t_oos_txn WHERE id = 1");
+  ASSERT_GE (rc, 0);
+  db_abort_transaction ();
+
+  rc = fetch_single_int ("SELECT CAST (clob_length (c) AS INT) FROM t_oos_txn WHERE id = 1", &length);
+  ASSERT_EQ (rc, NO_ERROR);
+  EXPECT_EQ (length, (int) first.size ());
+}
+
 int
 main (int argc, char **argv)
 {
