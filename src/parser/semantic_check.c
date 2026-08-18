@@ -277,12 +277,72 @@ static int pt_check_range_partition_strict_increasing (PARSER_CONTEXT * parser, 
 						       PT_NODE * part_next, PT_NODE * column_dt);
 static int pt_coerce_partition_value_with_data_type (PARSER_CONTEXT * parser, PT_NODE * value, PT_NODE * data_type);
 static int pt_check_default_value_param_for_stored_procedure (PARSER_CONTEXT * parser, PT_NODE * param);
-static bool pt_is_direct_internal_lob_dml_source (PT_TYPE_ENUM target_type, const PT_NODE * source);
+static bool pt_is_direct_internal_lob_dml_source (PARSER_CONTEXT * parser, PT_TYPE_ENUM target_type,
+						  const PT_NODE * source);
+
+static PT_NODE *
+pt_internal_lob_find_host_var (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  bool *found = (bool *) arg;
+
+  if (node != NULL && node->node_type == PT_HOST_VAR)
+    {
+      *found = true;
+      *continue_walk = PT_STOP_WALK;
+    }
+  else
+    {
+      *continue_walk = PT_CONTINUE_WALK;
+    }
+
+  return node;
+}
+
+/*
+ * pt_internal_lob_source_has_host_var () - Does this direct source value depend on a host variable?
+ *   return: true if a host variable appears anywhere below arg
+ *   parser(in):
+ *   arg(in): the source argument subtree
+ *
+ * Note:
+ *   A direct Internal LOB source is folded during prepare by
+ *   pt_fold_internal_lob_direct_source_values (), which evaluates the subtree and replaces it with
+ *   the resulting constant.  A host variable is not bound yet at that point, so the subtree would
+ *   evaluate to NULL and the bound value would be discarded without any error.  Such a source must
+ *   not take the direct path; the ordinary path evaluates it after binding.
+ */
+static bool
+pt_internal_lob_source_has_host_var (PARSER_CONTEXT * parser, PT_NODE * arg)
+{
+  PT_NODE *save_next;
+  bool found = false;
+
+  if (arg == NULL)
+    {
+      return false;
+    }
+
+  /* walk the argument alone; its siblings belong to the enclosing list */
+  save_next = arg->next;
+  arg->next = NULL;
+  (void) parser_walk_tree (parser, arg, pt_internal_lob_find_host_var, &found, NULL, NULL);
+  arg->next = save_next;
+
+  return found;
+}
 
 static bool
-pt_is_direct_internal_lob_dml_source (PT_TYPE_ENUM target_type, const PT_NODE * source)
+pt_is_direct_internal_lob_dml_source (PARSER_CONTEXT * parser, PT_TYPE_ENUM target_type, const PT_NODE * source)
 {
+  PT_NODE *arg1;
+
   if (source == NULL || source->node_type != PT_EXPR)
+    {
+      return false;
+    }
+
+  arg1 = (PT_NODE *) source->info.expr.arg1;
+  if (pt_internal_lob_source_has_host_var (parser, arg1))
     {
       return false;
     }
@@ -293,8 +353,7 @@ pt_is_direct_internal_lob_dml_source (PT_TYPE_ENUM target_type, const PT_NODE * 
 	{
 	  return true;
 	}
-      return source->info.expr.op == PT_CHAR_TO_CLOB
-	&& pt_is_const_expr_node ((PT_NODE *) source->info.expr.arg1);
+      return source->info.expr.op == PT_CHAR_TO_CLOB && pt_is_const_expr_node (arg1);
     }
 
   if (target_type == PT_TYPE_BLOB)
@@ -304,7 +363,7 @@ pt_is_direct_internal_lob_dml_source (PT_TYPE_ENUM target_type, const PT_NODE * 
 	  return true;
 	}
       return (source->info.expr.op == PT_BIT_TO_BLOB || source->info.expr.op == PT_CHAR_TO_BLOB)
-	&& pt_is_const_expr_node ((PT_NODE *) source->info.expr.arg1);
+	&& pt_is_const_expr_node (arg1);
     }
 
   return false;
@@ -11186,7 +11245,7 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 		    {
 		      continue;
 		    }
-		  if (pt_is_direct_internal_lob_dml_source (ins_attr->type_enum, ins_val))
+		  if (pt_is_direct_internal_lob_dml_source (parser, ins_attr->type_enum, ins_val))
 		    {
 		      PT_EXPR_INFO_SET_FLAG (ins_val, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		    }
@@ -11582,7 +11641,7 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 		{
 		  continue;
 		}
-	      if (pt_is_direct_internal_lob_dml_source (lhs->type_enum, rhs))
+	      if (pt_is_direct_internal_lob_dml_source (parser, lhs->type_enum, rhs))
 		{
 		  PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		}
@@ -11755,7 +11814,7 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	    }
 	  if (rhs != NULL && rhs->node_type == PT_EXPR && PT_IS_LOB_TYPE (t_node->type_enum))
 	    {
-	      if (pt_is_direct_internal_lob_dml_source (t_node->type_enum, rhs))
+	      if (pt_is_direct_internal_lob_dml_source (parser, t_node->type_enum, rhs))
 		{
 		  PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		}
@@ -11802,7 +11861,7 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	      for (; ins_attr != NULL && ins_val != NULL; ins_attr = ins_attr->next, ins_val = ins_val->next)
 		{
 		  if (PT_IS_LOB_TYPE (ins_attr->type_enum) && ins_val->node_type == PT_EXPR
-		      && pt_is_direct_internal_lob_dml_source (ins_attr->type_enum, ins_val))
+		      && pt_is_direct_internal_lob_dml_source (parser, ins_attr->type_enum, ins_val))
 		    {
 		      PT_EXPR_INFO_SET_FLAG (ins_val, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 		    }
@@ -17716,7 +17775,7 @@ pt_check_odku_assignments (PARSER_CONTEXT * parser, PT_NODE * insert)
       rhs = assignment->info.expr.arg2;
       if (rhs != NULL && rhs->node_type == PT_EXPR && PT_IS_LOB_TYPE (lhs->type_enum))
 	{
-	  if (pt_is_direct_internal_lob_dml_source (lhs->type_enum, rhs))
+	  if (pt_is_direct_internal_lob_dml_source (parser, lhs->type_enum, rhs))
 	    {
 	      PT_EXPR_INFO_SET_FLAG (rhs, PT_EXPR_INFO_LOB_DIRECT_INSERT);
 	    }
