@@ -522,6 +522,7 @@ struct vacuum_heap_helper
   HFID hfid;			/* Heap file identifier. */
   VFID overflow_vfid;		/* Overflow file identifier. */
   VFID oos_vfid;		/* OOS file identifier (if any). */
+  bool oos_vfid_resolved;	/* True once the heap's OOS file has been looked up (before any latch). */
   bool reusable;		/* True if heap file has reusable slots. */
 
   MVCC_SATISFIES_VACUUM_RESULT can_vacuum;	/* Result of vacuum check. */
@@ -1649,6 +1650,7 @@ vacuum_heap_page (THREAD_ENTRY * thread_p, VACUUM_HEAP_OBJECT * heap_objects, in
   helper.initial_home_free_space = -1;
   VFID_SET_NULL (&helper.overflow_vfid);
   VFID_SET_NULL (&helper.oos_vfid);
+  helper.oos_vfid_resolved = false;
 
   /* Fix heap page. */
   if (was_interrupted)
@@ -1729,6 +1731,23 @@ vacuum_heap_page (THREAD_ENTRY * thread_p, VACUUM_HEAP_OBJECT * heap_objects, in
     {
       helper.reusable = *reusable;
       helper.hfid = *hfid;
+    }
+
+  /* Resolve the heap's OOS file once for the whole page, now that the HFID is known.
+   *
+   * Looking it up per record instead used an unconditional latch on the heap header page while this
+   * thread already holds the home page.  DML takes those pages in the opposite order (header first),
+   * so the inversion deadlocked until the latch timed out, and the timeout was then misreported as
+   * "OOS flag set but no OOS VFID".  A conditional latch cannot wait, so contention costs one
+   * skipped cleanup - reclaimed by a later run - instead of a stalled vacuum worker. */
+  helper.oos_vfid_resolved = true;
+  if (!heap_oos_find_vfid (thread_p, &helper.hfid, &helper.oos_vfid, false, true))
+    {
+      vacuum_er_log_warning (VACUUM_ER_LOG_HEAP,
+			     "Could not read the OOS file id of heap %d|%d - skipping OOS cleanup on page %d|%d",
+			     HFID_AS_ARGS (&helper.hfid), VPID_AS_ARGS (&helper.home_vpid));
+      er_clear ();
+      VFID_SET_NULL (&helper.oos_vfid);
     }
 
   helper.crt_slotid = -1;
@@ -2084,7 +2103,8 @@ retry_prepare:
 	}
 
       error_code = vacuum_oos_find_vfid_for_heap_record (thread_p, &helper->hfid, &helper->record,
-							 helper->crt_slotid, helper->record_type, &helper->oos_vfid);
+							 helper->crt_slotid, helper->record_type, &helper->oos_vfid,
+							 helper->oos_vfid_resolved);
       if (error_code != NO_ERROR)
 	{
 	  return error_code;
@@ -2200,7 +2220,8 @@ retry_prepare:
 	}
 
       error_code = vacuum_oos_find_vfid_for_heap_record (thread_p, &helper->hfid, &helper->record,
-							 helper->crt_slotid, helper->record_type, &helper->oos_vfid);
+							 helper->crt_slotid, helper->record_type, &helper->oos_vfid,
+							 helper->oos_vfid_resolved);
       if (error_code != NO_ERROR)
 	{
 	  return error_code;

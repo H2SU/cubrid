@@ -5320,7 +5320,7 @@ locator_oos_insert_force (THREAD_ENTRY * thread_p, OID * class_oid, RECDES * rec
 
   bool found_vfid = is_internal_lob
 		    ? heap_internal_lob_find_vfid (thread_p, &oos_hfid, &oos_vfid, true)
-		    : heap_oos_find_vfid (thread_p, &oos_hfid, &oos_vfid, true);
+		    : heap_oos_find_vfid (thread_p, &oos_hfid, &oos_vfid, true, false);
   if (!found_vfid)
     {
       if (er_errid () == NO_ERROR)

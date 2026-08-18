@@ -748,7 +748,8 @@ extern int heap_rv_postpone_append_pages_to_heap (THREAD_ENTRY * thread_p, LOG_R
 extern int heap_rv_postpone_mark_pages_in_heap (THREAD_ENTRY * thread_p, LOG_RCV * recv);
 extern void heap_rv_dump_append_pages_to_heap (FILE * fp, int length, void *data);
 
-extern bool heap_oos_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * oos_vfid, bool docreate);
+extern bool heap_oos_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * oos_vfid, bool docreate,
+				bool conditional);
 extern bool heap_internal_lob_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * lob_vfid,
 					 bool docreate);
 extern bool heap_recdes_contains_oos (const RECDES * record);

@@ -668,7 +668,7 @@ heap_oos_insert_serialized_values (THREAD_ENTRY *thread_p, const OID *class_oid,
       return S_ERROR;
     }
 #endif
-  if (!heap_oos_find_vfid (thread_p, &oos_hfid, &oos_vfid, true))
+  if (!heap_oos_find_vfid (thread_p, &oos_hfid, &oos_vfid, true, false))
     {
       return S_ERROR;
     }
@@ -808,7 +808,7 @@ heap_oos_delete_unreferenced (THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *co
 	{
 	  if (VFID_ISNULL (&oos_vfid))
 	    {
-	      if (!heap_oos_find_vfid (thread_p, &context->hfid, &oos_vfid, false) || VFID_ISNULL (&oos_vfid))
+	      if (!heap_oos_find_vfid (thread_p, &context->hfid, &oos_vfid, false, false) || VFID_ISNULL (&oos_vfid))
 		{
 		  ASSERT_ERROR ();
 		  return er_errid () != NO_ERROR ? er_errid () : ER_FAILED;
@@ -900,7 +900,7 @@ heap_oos_next_scan (THREAD_ENTRY *thread_p, int cursor, DB_VALUE **out_values, i
   VFID_SET_NULL (&stats.oos_vfid);
 
   VFID_SET_NULL (&oos_vfid);
-  if (!heap_oos_find_vfid (thread_p, hfid_p, &oos_vfid, false))
+  if (!heap_oos_find_vfid (thread_p, hfid_p, &oos_vfid, false, false))
     {
       ASSERT_ERROR_AND_SET (error);
       goto cleanup;

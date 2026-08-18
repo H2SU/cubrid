@@ -5490,7 +5490,7 @@ xheap_destroy (THREAD_ENTRY * thread_p, const HFID * hfid, const OID * class_oid
   {
     VFID oos_vfid;
     VFID_SET_NULL (&oos_vfid);
-    if (!heap_oos_find_vfid (thread_p, hfid, &oos_vfid, false))
+    if (!heap_oos_find_vfid (thread_p, hfid, &oos_vfid, false, false))
       {
 	ASSERT_ERROR ();
 	return er_errid ();
@@ -5568,7 +5568,7 @@ xheap_destroy_newly_created (THREAD_ENTRY * thread_p, const HFID * hfid, const O
   {
     VFID oos_vfid;
     VFID_SET_NULL (&oos_vfid);
-    if (!heap_oos_find_vfid (thread_p, hfid, &oos_vfid, false))
+    if (!heap_oos_find_vfid (thread_p, hfid, &oos_vfid, false, false))
       {
 	ASSERT_ERROR ();
 	return er_errid ();
@@ -12384,7 +12384,7 @@ heap_attrinfo_determine_disk_layout (HEAP_CACHE_ATTRINFO * attr_info, bool is_mv
  *   oos_vfid (VFID_ISNULL) to tell whether an OOS file actually exists.
  */
 bool
-heap_oos_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * oos_vfid, bool docreate)
+heap_oos_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * oos_vfid, bool docreate, bool conditional)
 {
   HEAP_HDR_STATS *heap_hdr;	/* Header of heap structure */
   LOG_DATA_ADDR addr_hdr;	/* Address of logging data */
@@ -12403,8 +12403,13 @@ heap_oos_find_vfid (THREAD_ENTRY * thread_p, const HFID * hfid, VFID * oos_vfid,
   vpid.volid = hfid->vfid.volid;
   vpid.pageid = hfid->hpgid;
 
+  /* A conditional latch is for callers that already hold another page of this heap: waiting there
+   * would invert the page order DML uses and deadlock.  Creating the file needs the write latch,
+   * so it is never conditional. */
+  assert (!(docreate && conditional));
   mode = (docreate == true ? PGBUF_LATCH_WRITE : PGBUF_LATCH_READ);
-  addr_hdr.pgptr = pgbuf_fix (thread_p, &vpid, OLD_PAGE, mode, PGBUF_UNCONDITIONAL_LATCH);
+  addr_hdr.pgptr = pgbuf_fix (thread_p, &vpid, OLD_PAGE, mode,
+			      conditional ? PGBUF_CONDITIONAL_LATCH : PGBUF_UNCONDITIONAL_LATCH);
   if (addr_hdr.pgptr == NULL)
     {
       goto exit_on_error;

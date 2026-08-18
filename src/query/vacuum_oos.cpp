@@ -34,7 +34,6 @@
 #include "vacuum.h"
 
 #include <algorithm>
-#include <cstdlib>		/* abort - TODO: remove before develop merge (temporary CI crash) */
 #include <cstring>
 
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
@@ -113,7 +112,7 @@ vacuum_oos_vfid_lookup (THREAD_ENTRY *thread_p, VACUUM_OOS_VFID_MEMO *memo, cons
       return VACUUM_OOS_VFID_ERROR;
     }
 
-  if (!heap_oos_find_vfid (thread_p, &hfid, out_oos_vfid, false))
+  if (!heap_oos_find_vfid (thread_p, &hfid, out_oos_vfid, false, false))
     {
       VFID_SET_NULL (out_oos_vfid);
       if (er_errid () != NO_ERROR)
@@ -304,15 +303,16 @@ vacuum_forward_walk_reclaim_oos (THREAD_ENTRY *thread_p, char *undo_data, int un
     }
   else
     {
-      /* VACUUM_OOS_VFID_NONE. TODO(do not review, remove before develop merge): the guard above already
-       * confirmed this undo image is REC_HOME/REC_NEWHOME and heap_recdes_contains_oos, so reaching here
-       * means the record's OOS flag is set but its heap has no OOS file - an invariant violation, not the
-       * benign "nothing to do" case. CI runs the release build where assert_release only logs, so abort()
-       * to crash and surface the bug now instead of leaking silently. */
+      /* VACUUM_OOS_VFID_NONE. The guard above already confirmed this undo image is REC_HOME/REC_NEWHOME
+       * and heap_recdes_contains_oos, so the record's OOS flag is set while its heap has no OOS file.
+       * That is an invariant violation rather than the benign "nothing to do" case, so assert in debug
+       * builds - but never take the server down over it: the block must complete, and the unreclaimed
+       * OOS records are a bounded, logged leak. */
       vacuum_er_log_error (VACUUM_ER_LOG_HEAP,
 			   "forward-walk oos cleanup: undo image has OOS flag but heap has no OOS file; "
 			   "heap_vfid=%d|%d", VFID_AS_ARGS (heap_vfid));
-      abort ();
+      assert_release (false);
+      er_clear ();
     }
 
   db_private_free_and_init (thread_p, stable_copy);
@@ -337,13 +337,21 @@ vacuum_forward_walk_reclaim_oos (THREAD_ENTRY *thread_p, char *undo_data, int un
  */
 int
 vacuum_oos_find_vfid_for_heap_record (THREAD_ENTRY *thread_p, const HFID *hfid, const RECDES *record,
-				      PGSLOTID slotid, INT16 record_type, VFID *oos_vfid)
+				      PGSLOTID slotid, INT16 record_type, VFID *oos_vfid, bool already_resolved)
 {
   if (!VFID_ISNULL (oos_vfid) || !heap_recdes_contains_oos (record))
     {
       return NO_ERROR;
     }
-  if (heap_oos_find_vfid (thread_p, hfid, oos_vfid, false))
+  if (already_resolved)
+    {
+      /* The caller looked the OOS file up before latching any page and the heap has none.  Do not
+       * look again from here: this runs with the home page held, and fixing the heap header page
+       * under that latch inverts the order DML uses and deadlocks until the latch times out.  Leave
+       * oos_vfid NULL so this record's OOS cleanup is skipped and reclaimed by a later run. */
+      return NO_ERROR;
+    }
+  if (heap_oos_find_vfid (thread_p, hfid, oos_vfid, false, false))
     {
       return NO_ERROR;
     }
@@ -365,15 +373,20 @@ vacuum_oos_find_vfid_for_heap_record (THREAD_ENTRY *thread_p, const HFID *hfid, 
 			 VFID_AS_ARGS (&hfid->vfid), (int) slotid, (int) record_type,
 			 record->length, repid_and_flags, record_flags, offset_size);
   }
-  /* TODO(do not review, remove before develop merge): force a hard crash in CI. CI runs the release
-   * build (NDEBUG), where assert_release below only logs a notification - which the er_clear() then
-   * wipes - so it never aborts. This case is an invariant violation (the record's OOS flag is set but
-   * its heap has no OOS file), so abort() to surface the bug in CI instead of leaking silently. */
-  abort ();
-  /* In debug builds, abort so the bug that set the bad flag is caught the first time vacuum sees it.
-   * In release builds, assert_release only records a notification error, which the er_clear() below
-   * wipes out before we skip - so vacuum keeps running. */
-  assert_release (false);
+  /* Not every failure here is an invariant violation.  A page latch timeout or an interruption is
+   * transient: the OOS file is fine, this thread simply could not read the heap header right now.
+   * Only assert for the genuine case, so a transient stall never brings the server down. */
+  {
+    int err = er_errid ();
+
+    if (err != ER_PAGE_LATCH_TIMEDOUT && err != ER_INTERRUPTED)
+      {
+	/* In debug builds, assert so the bug that set the bad flag is caught the first time vacuum
+	 * sees it.  In release builds, assert_release only records a notification error, which the
+	 * er_clear () below wipes out before we skip - so vacuum keeps running. */
+	assert_release (false);
+      }
+  }
   er_clear ();
   VFID_SET_NULL (oos_vfid);
   return NO_ERROR;

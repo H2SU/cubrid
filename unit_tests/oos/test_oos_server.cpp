@@ -262,7 +262,7 @@ TEST (OosServerTest, OosOwnerDescriptorSupportsDiagnosticsAndProtectedIteration)
 
   VFID oos_vfid;
   VFID_SET_NULL (&oos_vfid);
-  ASSERT_TRUE (heap_oos_find_vfid (thread_p, &hfid, &oos_vfid, true));
+  ASSERT_TRUE (heap_oos_find_vfid (thread_p, &hfid, &oos_vfid, true, false));
   ASSERT_FALSE (VFID_ISNULL (&oos_vfid));
 
   FILE_DESCRIPTORS descriptor;
