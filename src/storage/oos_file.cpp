@@ -605,12 +605,17 @@ oos_stats_find_page_in_bestspace (THREAD_ENTRY *thread_p, const VFID *vfid,
 	  break;
 	}
 
-      /* Phase C: Try to fix the candidate page with conditional latch */
-      *out_pgptr = pgbuf_fix (thread_p, &candidate_vpid, OLD_PAGE,
+      /* Phase C: Try to fix the candidate page with conditional latch.
+       *
+       * A hint may name a page that has since been deallocated — an UPDATE or a rollback frees the
+       * chunk chain it pointed into.  That is a stale hint, not an error, so the page is fetched
+       * with OLD_PAGE_MAYBE_DEALLOCATED: it reports ER_PB_BAD_PAGEID at warning severity instead of
+       * raising it as an error with a call stack dump on every single attempt. */
+      *out_pgptr = pgbuf_fix (thread_p, &candidate_vpid, OLD_PAGE_MAYBE_DEALLOCATED,
 			      PGBUF_LATCH_WRITE, PGBUF_CONDITIONAL_LATCH);
       if (*out_pgptr == NULL)
 	{
-	  /* Page is busy — skip it and try next */
+	  /* Deallocated or busy — skip it and try next */
 	  int err = er_errid ();
 	  if (err == ER_INTERRUPTED)
 	    {
@@ -623,6 +628,19 @@ oos_stats_find_page_in_bestspace (THREAD_ENTRY *thread_p, const VFID *vfid,
 	      oos_trace ("conditional latch failed for vpid={vol=%d,page=%d}, er_errid=%d — skipping",
 			 candidate_vpid.volid, candidate_vpid.pageid, err);
 	      er_clear ();
+	    }
+
+	  /* Forget the hint.  Without this the same unusable page is handed out again on every
+	   * insert, which is how one deallocated page produced thousands of retries. */
+	  if (found_in_hash)
+	    {
+	      (void) oos_stats_del_bestspace_by_vpid (thread_p, &candidate_vpid);
+	    }
+	  else if (bestspace != NULL && best_array_index >= 0 && best_array_index < OOS_NUM_BEST_SPACESTATS
+		   && VPID_EQ (&bestspace[best_array_index].vpid, &candidate_vpid))
+	    {
+	      VPID_SET_NULL (&bestspace[best_array_index].vpid);
+	      bestspace[best_array_index].freespace = 0;
 	    }
 	  notfound_cnt++;
 	  continue;
@@ -2611,7 +2629,7 @@ xoos_get_stats_by_class_oid (THREAD_ENTRY *thread_p, const OID *class_oid, OOS_S
 
   VFID oos_vfid;
   VFID_SET_NULL (&oos_vfid);
-  if (!heap_oos_find_vfid (thread_p, &hfid, &oos_vfid, false))
+  if (!heap_oos_find_vfid (thread_p, &hfid, &oos_vfid, false, false))
     {
       /* false return is overloaded: real read errors set er_errid; the
        * legitimate "no OOS file" path (docreate=false, NULL in heap header)
