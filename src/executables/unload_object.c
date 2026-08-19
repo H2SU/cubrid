@@ -1546,7 +1546,8 @@ unload_fetcher (LC_FETCH_VERSION_TYPE fetch_type)
       TIMER_BEGIN ((g_sampling_records >= 0), &(g_uci->wi_fetch));
       error = locator_fetch_all (hfid, &lock, fetch_type, class_oid, &nobjects, &nfetched, &last_oid, &fetch_area,
 				 g_request_pages, g_parallel_process_cnt,
-				 (g_parallel_process_idx - 1) /* to zero base */ );
+				 (g_parallel_process_idx - 1) /* to zero base */,
+				 false);
       TIMER_END ((g_sampling_records >= 0), &(g_uci->wi_fetch));
       if (error == NO_ERROR)
 	{

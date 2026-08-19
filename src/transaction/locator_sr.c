@@ -2788,7 +2788,7 @@ xlocator_get_class (THREAD_ENTRY * thread_p, OID * class_oid, int class_chn, con
 int
 xlocator_fetch_all (THREAD_ENTRY * thread_p, const HFID * hfid, LOCK * lock, LC_FETCH_VERSION_TYPE fetch_version_type,
 		    OID * class_oid, int *nobjects, int *nfetched, OID * last_oid, LC_COPYAREA ** fetch_area,
-		    int request_pages)
+		    int request_pages, bool keep_oos_locators)
 {
   LC_COPYAREA_DESC prefetch_des;	/* Descriptor for decache of objects related to transaction isolation level */
   LC_COPYAREA_MANYOBJS *mobjs;	/* Describe multiple objects in area */
@@ -2917,8 +2917,12 @@ xlocator_fetch_all (THREAD_ENTRY * thread_p, const HFID * hfid, LOCK * lock, LC_
       mobjs->num_objs = 0;
       offset = 0;
 
+      /* unloaddb asks for the stored locators instead of their payload: it writes the locator into the
+       * main object file and streams the payload into the sidecar itself.  Everyone else needs the
+       * values inline, because a CS-mode client cannot resolve an inline OOS slot on its own. */
       while ((scan = heap_next (thread_p, hfid, class_oid, &oid, &recdes, &scan_cache, COPY,
-				HEAP_RECDES_CONSUME_RAW_BYTES)) == S_SUCCESS)
+				keep_oos_locators ? HEAP_RECDES_DONT_CONSUME_RAW_BYTES
+				: HEAP_RECDES_CONSUME_RAW_BYTES)) == S_SUCCESS)
 	{
 	  mobjs->num_objs++;
 	  COPY_OID (&obj->class_oid, class_oid);
