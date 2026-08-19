@@ -7092,7 +7092,7 @@ locator_repl_prepare_force (THREAD_ENTRY * thread_p, LC_COPYAREA_ONEOBJ * obj, R
        * interpret the type-specific header of an Internal LOB chunk and may treat it as user payload. */
       scan =
 	heap_get_visible_version (thread_p, &obj->oid, &obj->class_oid, old_recdes, force_scancache, PEEK, NULL_CHN,
-				  HEAP_RECDES_CONSUME_RAW_BYTES);
+				  HEAP_RECDES_DONT_CONSUME_RAW_BYTES);
 
       if (scan != S_SUCCESS)
 	{
