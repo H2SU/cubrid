@@ -43,6 +43,8 @@
 #include <sys/stat.h>
 
 #include "authenticate.h"
+#include "authenticate_password.hpp"
+#include "crypt_opfunc.h"
 #include "client_support.h"
 #include "cubrid_log.h"
 #include "error_code.h"
@@ -115,6 +117,9 @@ char **g_extraction_user;
 int g_extraction_user_count = 0;
 
 char g_dbname[CUBRID_LOG_MAX_DBNAME_LEN + 1] = "";
+
+/* Authenticated db user, sent so the server can enforce DBA on the identity-less CDC channel. */
+char g_db_user[DB_MAX_USER_LENGTH + 1] = "";
 
 FILE *g_trace_log = NULL;
 char g_trace_log_base[PATH_MAX + 1] = ".";
@@ -743,6 +748,7 @@ cubrid_log_send_configurations (void)
   int err_code;
 
   request_size = OR_INT_SIZE * 5;
+  request_size += or_packed_string_length (g_db_user, NULL);
 
   for (i = 0; i < g_extraction_user_count; i++)
     {
@@ -760,7 +766,8 @@ cubrid_log_send_configurations (void)
 
   request = PTR_ALIGN (a_request, MAX_ALIGNMENT);
 
-  ptr = or_pack_int (request, g_max_log_item);
+  ptr = or_pack_string (request, g_db_user);
+  ptr = or_pack_int (ptr, g_max_log_item);
   ptr = or_pack_int (ptr, g_extraction_timeout);
   ptr = or_pack_int (ptr, g_all_in_cond);
   ptr = or_pack_int (ptr, g_extraction_user_count);
@@ -906,6 +913,11 @@ cubrid_log_db_login (char *hostname, char *dbname, char *username, char *passwor
       goto error;
     }
 
+  /* remember the account so cubrid_log_authenticate () can prove it to the server
+   * once the CDC channel is open */
+  strncpy (g_db_user, username, DB_MAX_USER_LENGTH);
+  g_db_user[DB_MAX_USER_LENGTH] = '\0';
+
   db_shutdown ();
 
   return CUBRID_LOG_SUCCESS;
@@ -915,6 +927,203 @@ error:
   db_shutdown ();
 
   return CUBRID_LOG_FAILED_LOGIN;
+}
+
+/*
+ * cubrid_log_authenticate () - prove to the server which account this channel runs as.
+ *   return: CUBRID_LOG_SUCCESS, or a CUBRID_LOG_* error code.
+ *   password(in): the password the caller supplied, in plain text
+ *
+ * The CDC channel is opened after db_shutdown(), so the server sees no registered
+ * client on it and cannot tell who is asking. Two exchanges settle that: the
+ * server sends a one-time challenge together with the scheme its stored password
+ * uses, and this answers with a digest over the challenge and the password in
+ * that same stored form. The password itself is never sent.
+ */
+static int
+cubrid_log_authenticate (char *password)
+{
+  unsigned short rid = 0;
+
+  char *a_request = NULL;
+  char *request, *ptr;
+  int request_size;
+
+  OR_ALIGNED_BUF (OR_INT_SIZE * 2 + CSS_CDC_AUTH_NONCE_SIZE + MAX_ALIGNMENT) a_challenge_reply;
+  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
+  char *challenge_reply = OR_ALIGNED_BUF_START (a_challenge_reply);
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+
+  char *recv_data = NULL;
+  int recv_data_size;
+
+  char encrypted[AU_MAX_PASSWORD_BUF + 4] = { '\0' };
+  char plain_buffer[CSS_CDC_AUTH_NONCE_SIZE + AU_MAX_PASSWORD_BUF + 4];
+  char *nonce = NULL;
+  char *digest = NULL;
+  int digest_len;
+  int scheme, reply_code;
+
+  /* A server that predates these requests answers with an error packet, which
+   * css_receive_data () does not recognise and simply keeps waiting through. The
+   * handshake is two small round trips on an already-open connection, so cap the
+   * wait well below the connect timeout to turn that into a prompt failure. */
+  int timeout = ((g_connection_timeout < 30) ? g_connection_timeout : 30) * 1000;
+
+  CSS_QUEUE_ENTRY *queue_entry;
+  int err_code;
+
+  /* --- ask for a challenge --- */
+
+  request_size = or_packed_string_length (g_db_user, NULL);
+
+  a_request = (char *) malloc (request_size + MAX_ALIGNMENT);
+  if (a_request == NULL)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_MALLOC, "Failed to malloc for request. (size : %d)\n",
+				 request_size + MAX_ALIGNMENT);
+    }
+
+  request = PTR_ALIGN (a_request, MAX_ALIGNMENT);
+  ptr = or_pack_string (request, g_db_user);
+  request_size = (int) (ptr - request);
+
+  if (__gv_cvar.css_send_request_with_data_buffer_with_padding
+      (g_conn_entry, NET_SERVER_CDC_AUTH_CHALLENGE, &rid, request, request_size, challenge_reply,
+       OR_ALIGNED_BUF_SIZE (a_challenge_reply)) != NO_ERRORS)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_CONNECT,
+				 "Request(NET_SERVER_CDC_AUTH_CHALLENGE) failed. request size (%d)\n", request_size);
+    }
+
+  if (__gv_cvar.css_receive_data (g_conn_entry, rid, &recv_data, &recv_data_size, timeout) != NO_ERRORS)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN,
+				 "receive data from the request(NET_SERVER_CDC_AUTH_CHALLENGE) failed. The server may "
+				 "predate CDC channel authentication. (timeout : %d sec)\n", timeout / 1000);
+    }
+
+  if (recv_data == NULL || recv_data_size < OR_INT_SIZE * 3)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN, "recv_data is %s, receive data size : %d\n",
+				 recv_data ? "not null" : "null", recv_data_size);
+    }
+
+  ptr = or_unpack_int (recv_data, &reply_code);
+  if (reply_code != NO_ERROR)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN, "reply code from server is %d\n", reply_code);
+    }
+
+  ptr = or_unpack_int (ptr, &scheme);
+  ptr = or_unpack_string_nocopy (ptr, &nonce);
+  if (nonce == NULL || strlen (nonce) != CSS_CDC_AUTH_NONCE_SIZE - 1)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN, "Server sent a malformed authentication challenge\n");
+    }
+
+  /* --- answer it --- */
+
+  switch (scheme)
+    {
+    case ENCODE_PREFIX_DES:
+      encrypt_password (password, 1, encrypted);
+      break;
+    case ENCODE_PREFIX_SHA1:
+      encrypt_password_sha1 (password, 1, encrypted);
+      break;
+    case ENCODE_PREFIX_SHA2_512:
+      encrypt_password_sha2_512 (password, encrypted);
+      break;
+    default:
+      /* stored unencrypted, or the account has no password at all */
+      strncpy (encrypted, password, sizeof (encrypted) - 1);
+      break;
+    }
+
+  snprintf (plain_buffer, sizeof (plain_buffer), "%s%s", nonce, encrypted);
+
+  if (crypt_sha_two (NULL, plain_buffer, (int) strlen (plain_buffer), 256, &digest, &digest_len) != NO_ERROR
+      || digest == NULL)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN, "Failed to compute the authentication response\n");
+    }
+
+  /* css_receive_data () hands back the caller's own buffer when the reply fits in it */
+  if (recv_data != challenge_reply)
+    {
+      free_and_init (recv_data);
+    }
+  recv_data = NULL;
+  free_and_init (a_request);
+
+  request_size = or_packed_string_length (digest, NULL);
+
+  a_request = (char *) malloc (request_size + MAX_ALIGNMENT);
+  if (a_request == NULL)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_MALLOC, "Failed to malloc for request. (size : %d)\n",
+				 request_size + MAX_ALIGNMENT);
+    }
+
+  request = PTR_ALIGN (a_request, MAX_ALIGNMENT);
+  ptr = or_pack_string (request, digest);
+  request_size = (int) (ptr - request);
+
+  if (__gv_cvar.css_send_request_with_data_buffer_with_padding
+      (g_conn_entry, NET_SERVER_CDC_AUTH_RESPONSE, &rid, request, request_size, reply,
+       OR_ALIGNED_BUF_SIZE (a_reply)) != NO_ERRORS)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_CONNECT,
+				 "Request(NET_SERVER_CDC_AUTH_RESPONSE) failed. request size (%d)\n", request_size);
+    }
+
+  if (__gv_cvar.css_receive_data (g_conn_entry, rid, &recv_data, &recv_data_size, timeout) != NO_ERRORS)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN,
+				 "receive data from the request(NET_SERVER_CDC_AUTH_RESPONSE) failed. "
+				 "(timeout : %d sec)\n", timeout / 1000);
+    }
+
+  if (recv_data == NULL || recv_data_size != OR_INT_SIZE)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN, "recv_data is %s, receive data size : %d (should be %d)\n",
+				 recv_data ? "not null" : "null", recv_data_size, OR_INT_SIZE);
+    }
+
+  or_unpack_int (recv_data, &reply_code);
+  if (reply_code != NO_ERROR)
+    {
+      CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN,
+				 "The server did not accept %s on the CDC channel. reply code is %d\n", g_db_user,
+				 reply_code);
+    }
+
+  db_private_free_and_init (NULL, digest);
+  free_and_init (a_request);
+
+  return CUBRID_LOG_SUCCESS;
+
+cubrid_log_error:
+
+  if (digest != NULL)
+    {
+      db_private_free_and_init (NULL, digest);
+    }
+
+  if (recv_data != NULL && recv_data != challenge_reply && recv_data != reply)
+    {
+      free_and_init (recv_data);
+    }
+
+  __gv_cvar.css_queue_find_and_remove_header_entry_ptr (g_conn_entry, rid);
+
+  if (a_request != NULL)
+    {
+      free_and_init (a_request);
+    }
+
+  return err_code;
 }
 
 /*
@@ -987,6 +1196,12 @@ cubrid_log_connect_server (char *host, int port, char *dbname, char *user, char 
   if (cubrid_log_connect_server_internal (host, port, dbname) != CUBRID_LOG_SUCCESS)
     {
       CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_CONNECT, NULL);
+    }
+
+  err_code = cubrid_log_authenticate (password);
+  if (err_code != CUBRID_LOG_SUCCESS)
+    {
+      CUBRID_LOG_ERROR_HANDLING (err_code, NULL);
     }
 
   if (cubrid_log_send_configurations () != CUBRID_LOG_SUCCESS)
@@ -1298,6 +1513,15 @@ cubrid_log_extract_internal (LOG_LSA * next_lsa, int *num_infos, int *total_leng
 	  CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_CONNECT,
 				     "receive data from the request(NET_SERVER_CDC_GET_LOGINFO) failed. (timeout : %d sec)\n",
 				     g_extraction_timeout);
+	}
+
+      /* CBRD-27436: the server rejects a caller that does not own the CDC
+       * session with an empty buffer, and reports why in the packet header
+       * (this reply has no error-code framing of its own). */
+      if (g_conn_entry->db_error == ER_AU_DBA_ONLY)
+	{
+	  CUBRID_LOG_ERROR_HANDLING (CUBRID_LOG_FAILED_LOGIN,
+				     "this connection does not own the CDC session (DBA authorization required)\n");
 	}
 
       if (recv_data == NULL || recv_data_size != *total_length)

@@ -287,7 +287,11 @@
   NET_SERVER_REQUEST_ITEM(NET_SERVER_CLEANFILEDB_DELETE_TARGET_FILE) /* Debug only: unsafe, may break DB consistency */ \
   \
   /* server-side full-scan reservoir histogram build */ \
-  NET_SERVER_REQUEST_ITEM(NET_SERVER_QST_HISTOGRAM_BUILD_BY_RESERVOIR)
+  NET_SERVER_REQUEST_ITEM(NET_SERVER_QST_HISTOGRAM_BUILD_BY_RESERVOIR) \
+  \
+  /* cdc channel authentication - appended at the end so no existing request number moves */ \
+  NET_SERVER_REQUEST_ITEM(NET_SERVER_CDC_AUTH_CHALLENGE) \
+  NET_SERVER_REQUEST_ITEM(NET_SERVER_CDC_AUTH_RESPONSE)
 
 enum net_server_request
 {
