@@ -9402,12 +9402,22 @@ slogin_user (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqle
   OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
   char *reply = OR_ALIGNED_BUF_START (a_reply);
   char *username = NULL;
+  char *proof = NULL;
+  char *ptr;
 
-  or_unpack_string_nocopy (request, &username);
+  ptr = or_unpack_string_nocopy (request, &username);
+  /* CBRD-27445: the proof is appended by patched clients; may be absent */
+  (void) or_unpack_string_nocopy (ptr, &proof);
   if (username == NULL)
     {
       (void) return_error_to_client (thread_p, rid);
       err = ER_FAILED;
+    }
+  /* re-authenticate the switch on the server: trust the name only after the
+   * account's password is proven, exactly as boot registration now does. */
+  else if ((err = boot_verify_client_password (thread_p, username, proof)) != NO_ERROR)
+    {
+      (void) return_error_to_client (thread_p, rid);
     }
   else
     {

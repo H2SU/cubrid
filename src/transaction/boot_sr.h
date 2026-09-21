@@ -163,6 +163,9 @@ extern int xboot_soft_rename (THREAD_ENTRY * thread_p, const char *old_db_name, 
 			      const char *new_volext_path, const char *fileof_vols_and_renamepaths,
 			      bool new_db_overwrite, bool extern_rename, bool force_delete);
 extern int xboot_delete (const char *db_name, bool force_delete, BOOT_SERVER_SHUTDOWN_MODE shutdown_common_modules);
+#if defined (SERVER_MODE)
+extern int boot_verify_client_password (THREAD_ENTRY * thread_p, const char *db_user, const char *sent_proof);
+#endif /* SERVER_MODE */
 extern int xboot_emergency_patch (const char *db_name, bool recreate_log, DKNPAGES log_npages, const char *db_locale,
 				  FILE * out_fp);
 extern void boot_server_all_finalize (THREAD_ENTRY * thread_p, ER_FINAL_CODE is_er_final,

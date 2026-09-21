@@ -3245,12 +3245,16 @@ boot_read_stored_password (THREAD_ENTRY * thread_p, const char *user_name, char 
   const char *stored;
   bool found = false, scan_started = false, attrinfo_started = false;
 
+  char upper_name[DB_MAX_IDENTIFIER_LENGTH];
+
   password[0] = '\0';
 
   if (user_name == NULL || *user_name == '\0' || strlen (user_name) >= DB_MAX_IDENTIFIER_LENGTH)
     {
       return false;
     }
+  intl_identifier_upper (user_name, upper_name);
+  user_name = upper_name;
 
   if (heap_get_index_with_name (thread_p, oid_User_class_oid, "u_db_user_name", &btid) != NO_ERROR
       || BTID_IS_NULL (&btid))
@@ -3368,7 +3372,7 @@ end:
  * so a hand-built client that skips the client-side check is still stopped: it
  * reads the stored password and compares the form that matches its scheme.
  */
-static int
+int
 boot_verify_client_password (THREAD_ENTRY * thread_p, const char *db_user, const char *sent_proof)
 {
   char stored[AU_MAX_PASSWORD_BUF + 4] = { '\0' };

@@ -278,7 +278,22 @@ authenticate_context::login (const char *name, const char *password, bool ignore
     }
   else
     {
-      /* Change users within an active database. */
+      /* Change users within an active database. Keep the encrypted forms current
+       * so a following clogin_user () can prove this user to the server
+       * (CBRD-27445). */
+      if (password == NULL || strlen (password) == 0)
+	{
+	  strcpy (user_password_des_oldstyle, "");
+	  strcpy (user_password_sha1, "");
+	  strcpy (user_password_sha2_512, "");
+	}
+      else
+	{
+	  encrypt_password (password, 1, user_password_des_oldstyle);
+	  encrypt_password_sha1 (password, 1, user_password_sha1);
+	  encrypt_password_sha2_512 (password, user_password_sha2_512);
+	}
+
       AU_DISABLE (save);
       error = perform_login (name, password, ignore_dba_privilege);
       AU_ENABLE (save);
