@@ -874,6 +874,19 @@ boot_restart_client (BOOT_CLIENT_CREDENTIAL * client_credential)
 	  client_credential->db_user = AU_PUBLIC_USER_NAME;
 	}
     }
+
+  /* CBRD-27445: carry the entered password (its three encrypted forms) so the
+   * server can verify the declared identity itself. au_login () already stored
+   * these; join with '\n' for the server to pick the form matching the stored
+   * scheme. */
+  if (client_credential->db_password.empty ())
+    {
+      char proof[AU_MAX_PASSWORD_BUF * 3 + 8];
+      snprintf (proof, sizeof (proof), "%s\n%s\n%s", Au_user_password_des_oldstyle, Au_user_password_sha1,
+		Au_user_password_sha2_512);
+      client_credential->db_password = proof;
+    }
+
   /* Get the login name, host, and process identifier */
   if (client_credential->login_name.empty ())
     {

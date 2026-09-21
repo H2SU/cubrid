@@ -84,6 +84,10 @@
 #include "tde.h"
 #include "porting.h"
 #include "log_manager.h"
+#include "oid.h"
+#include "object_representation.h"
+#include "dbtype.h"
+#include "authenticate_password.hpp"
 
 #if defined(SERVER_MODE)
 #include "connection_sr.h"
@@ -3214,6 +3218,219 @@ xboot_get_server_session_key (void)
  *       recovery tasks, such transaction is assigned to the client and
  *       and the transaction state is returned as a side effect.
  */
+#if defined (SERVER_MODE)
+/*
+ * boot_read_stored_password () - read an account's stored password from the
+ *   catalog (CBRD-27445).
+ *   return: true if the account was found and read.
+ *   thread_p (in):
+ *   user_name (in)     : account name, already upper-cased
+ *   password (out)     : the stored (encrypted) password, empty if none
+ *   password_size (in) : size of the buffer
+ *
+ * db_user.password references a db_password instance; the string lives there.
+ */
+static bool
+boot_read_stored_password (THREAD_ENTRY * thread_p, const char *user_name, char *password, int password_size)
+{
+  BTID btid;
+  DB_VALUE key;
+  OID user_oid, pwd_class_oid;
+  HEAP_SCANCACHE scan;
+  RECDES recdes, class_record;
+  HEAP_CACHE_ATTRINFO attr_info;
+  DB_VALUE *value;
+  char *attr_name;
+  int i, alloced, pwd_attr = -1;
+  const char *stored;
+  bool found = false, scan_started = false, attrinfo_started = false;
+
+  password[0] = '\0';
+
+  if (user_name == NULL || *user_name == '\0' || strlen (user_name) >= DB_MAX_IDENTIFIER_LENGTH)
+    {
+      return false;
+    }
+
+  if (heap_get_index_with_name (thread_p, oid_User_class_oid, "u_db_user_name", &btid) != NO_ERROR
+      || BTID_IS_NULL (&btid))
+    {
+      return false;
+    }
+
+  db_make_string (&key, user_name);
+  if (xbtree_find_unique (thread_p, &btid, S_SELECT, &key, oid_User_class_oid, &user_oid, false) != BTREE_KEY_FOUND)
+    {
+      pr_clear_value (&key);
+      return false;
+    }
+  pr_clear_value (&key);
+
+  if (heap_scancache_quick_start_with_class_oid (thread_p, &scan, oid_User_class_oid) != NO_ERROR)
+    {
+      return false;
+    }
+  scan_started = true;
+
+  /* resolve the "password" attribute id from the class record */
+  if (heap_get_class_record (thread_p, oid_User_class_oid, &class_record, &scan, PEEK) != S_SUCCESS
+      || heap_attrinfo_start (thread_p, oid_User_class_oid, -1, NULL, &attr_info) != NO_ERROR)
+    {
+      goto end;
+    }
+  attrinfo_started = true;
+  for (i = 0; i < attr_info.num_values; i++)
+    {
+      attr_name = NULL;
+      alloced = 0;
+      if (or_get_attrname (&class_record, i, &attr_name, &alloced) == NO_ERROR && attr_name != NULL
+	  && strcmp (attr_name, "password") == 0)
+	{
+	  pwd_attr = i;
+	}
+      if (alloced && attr_name != NULL)
+	{
+	  db_private_free_and_init (thread_p, attr_name);
+	}
+    }
+  if (pwd_attr == -1)
+    {
+      goto end;
+    }
+
+  if (heap_get_visible_version (thread_p, &user_oid, oid_User_class_oid, &recdes, &scan, PEEK, NULL_CHN) != S_SUCCESS
+      || heap_attrinfo_read_dbvalues (thread_p, &user_oid, &recdes, &attr_info) != NO_ERROR)
+    {
+      goto end;
+    }
+
+  /* the account exists; with no password object it simply has no password */
+  found = true;
+
+  value = heap_attrinfo_access (pwd_attr, &attr_info);
+  if (value == NULL || DB_IS_NULL (value) || DB_VALUE_TYPE (value) != DB_TYPE_OID)
+    {
+      goto end;
+    }
+
+  heap_attrinfo_end (thread_p, &attr_info);
+  attrinfo_started = false;
+
+  /* follow the OID into the db_password instance and read its one string attr */
+  if (heap_get_class_oid (thread_p, db_get_oid (value), &pwd_class_oid) != S_SUCCESS)
+    {
+      goto end;
+    }
+  if (heap_get_visible_version (thread_p, db_get_oid (value), &pwd_class_oid, &recdes, &scan, PEEK, NULL_CHN)
+      != S_SUCCESS || heap_attrinfo_start (thread_p, &pwd_class_oid, -1, NULL, &attr_info) != NO_ERROR)
+    {
+      goto end;
+    }
+  attrinfo_started = true;
+  if (heap_attrinfo_read_dbvalues (thread_p, db_get_oid (value), &recdes, &attr_info) != NO_ERROR)
+    {
+      goto end;
+    }
+  value = heap_attrinfo_access (0, &attr_info);
+  if (value != NULL && !DB_IS_NULL (value) && TP_IS_CHAR_TYPE (DB_VALUE_TYPE (value)))
+    {
+      stored = db_get_string (value);
+      if (stored != NULL)
+	{
+	  strncpy (password, stored, password_size - 1);
+	  password[password_size - 1] = '\0';
+	}
+    }
+
+end:
+  if (attrinfo_started)
+    {
+      heap_attrinfo_end (thread_p, &attr_info);
+    }
+  if (scan_started)
+    {
+      (void) heap_scancache_end (thread_p, &scan);
+    }
+  return found;
+}
+
+/*
+ * boot_verify_client_password () - confirm the client proved the password of
+ *   the account it is registering as (CBRD-27445).
+ *   return: NO_ERROR on match (or a passwordless account), else
+ *           ER_AU_INVALID_PASSWORD.
+ *   thread_p (in):
+ *   db_user (in)   : account name, already upper-cased
+ *   sent_proof (in): the DES, SHA1 and SHA2-512 encrypted forms the client
+ *                    computed from the entered password, joined by '\n'
+ *
+ * The server does what the client's match_password () does, but on its own side
+ * so a hand-built client that skips the client-side check is still stopped: it
+ * reads the stored password and compares the form that matches its scheme.
+ */
+static int
+boot_verify_client_password (THREAD_ENTRY * thread_p, const char *db_user, const char *sent_proof)
+{
+  char stored[AU_MAX_PASSWORD_BUF + 4] = { '\0' };
+  char proof[AU_MAX_PASSWORD_BUF * 3 + 8] = { '\0' };
+  const char *des = "", *sha1 = "", *sha2 = "", *want;
+  char *p, *nl;
+
+  if (!boot_read_stored_password (thread_p, db_user, stored, sizeof (stored)) || stored[0] == '\0')
+    {
+      /* account absent or has no password: nothing to prove (documented gap) */
+      return NO_ERROR;
+    }
+
+  /* split the sent proof into its three forms */
+  if (sent_proof != NULL)
+    {
+      strncpy (proof, sent_proof, sizeof (proof) - 1);
+    }
+  p = proof;
+  des = p;
+  nl = strchr (p, '\n');
+  if (nl != NULL)
+    {
+      *nl = '\0';
+      p = nl + 1;
+      sha1 = p;
+      nl = strchr (p, '\n');
+      if (nl != NULL)
+	{
+	  *nl = '\0';
+	  sha2 = nl + 1;
+	}
+    }
+
+  if (IS_ENCODED_DES (stored))
+    {
+      want = des;
+    }
+  else if (IS_ENCODED_SHA1 (stored))
+    {
+      want = sha1;
+    }
+  else if (IS_ENCODED_SHA2_512 (stored))
+    {
+      want = sha2;
+    }
+  else
+    {
+      /* plaintext stored password (pre-historic db): leave it to the client */
+      return NO_ERROR;
+    }
+
+  if (want[0] != '\0' && strcmp (want, stored) == 0)
+    {
+      return NO_ERROR;
+    }
+
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_AU_INVALID_PASSWORD, 0);
+  return ER_AU_INVALID_PASSWORD;
+}
+#endif /* SERVER_MODE */
+
 int
 xboot_register_client (THREAD_ENTRY * thread_p, BOOT_CLIENT_CREDENTIAL * client_credential, int client_lock_wait,
 		       TRAN_ISOLATION client_isolation, TRAN_STATE * tran_state,
@@ -3307,6 +3524,18 @@ xboot_register_client (THREAD_ENTRY * thread_p, BOOT_CLIENT_CREDENTIAL * client_
     {
 #if defined (SERVER_MODE)
       thread_p->conn_entry->set_tran_index (tran_index);
+
+      /* CBRD-27445: the identity above is only what the client declared; verify it
+       * proved the account's password before this connection is trusted. */
+      if (BOOT_NORMAL_CLIENT_TYPE (client_credential->client_type)
+	  && boot_verify_client_password (thread_p, client_credential->get_db_user (),
+					  client_credential->get_db_password ()) != NO_ERROR)
+	{
+	  logtb_release_tran_index (thread_p, tran_index);
+	  *tran_state = TRAN_UNACTIVE_UNKNOWN;
+	  client_credential->db_user = db_user_save;
+	  return NULL_TRAN_INDEX;
+	}
 #endif /* SERVER_MODE */
       server_credential->db_full_name = boot_Db_full_name;
       server_credential->host_name = boot_Host_name;
