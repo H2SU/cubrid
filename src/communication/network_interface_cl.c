@@ -54,6 +54,8 @@
 #include "error_manager.h"
 #include "object_primitive.h"
 #include "object_representation.h"
+#include "authenticate.h"
+#include "authenticate_password.hpp"
 #include "log_comm.h"
 #include "log_writer.h"
 #include "arithmetic.h"
@@ -5313,10 +5315,17 @@ clogin_user (const char *username)
 #if defined (CS_MODE)
   int req_error;
   OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
-  char *request = NULL;
-  int username_len, req_len;
+  char *request = NULL, *ptr;
+  int username_len, proof_len, req_len;
+  /* CBRD-27445: send the entered password (its three encrypted forms) so the
+   * server can re-authenticate the switch instead of trusting the name. */
+  char proof[AU_MAX_PASSWORD_BUF * 3 + 8];
+
+  snprintf (proof, sizeof (proof), "%s\n%s\n%s", Au_user_password_des_oldstyle, Au_user_password_sha1,
+	    Au_user_password_sha2_512);
 
   req_len = length_const_string (username, &username_len);
+  req_len += length_const_string (proof, &proof_len);
 
   request = (char *) malloc (req_len);
   if (request == NULL)
@@ -5325,7 +5334,8 @@ clogin_user (const char *username)
       return ER_FAILED;
     }
 
-  pack_const_string_with_length (request, username, username_len);
+  ptr = pack_const_string_with_length (request, username, username_len);
+  ptr = pack_const_string_with_length (ptr, proof, proof_len);
 
   req_error =
     net_client_request (NET_SERVER_AU_LOGIN_USER, request, req_len, OR_ALIGNED_BUF_START (a_reply),
