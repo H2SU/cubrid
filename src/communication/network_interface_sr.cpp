@@ -11465,7 +11465,7 @@ cdc_flashback_unpack_bounded_string (char *ptr, char *request, int reqlen, char 
  * password never crosses the channel and a recorded answer dies with its nonce.
  */
 static int
-cdc_auth_make_response (THREAD_ENTRY * thread_p, const char *nonce, const char *stored_password, char *response)
+cdc_auth_make_response (THREAD_ENTRY *thread_p, const char *nonce, const char *stored_password, char *response)
 {
   char buffer[CSS_CDC_AUTH_NONCE_SIZE + AU_MAX_PASSWORD_BUF + 4];
   char *digest = NULL;
@@ -11495,7 +11495,7 @@ cdc_auth_make_response (THREAD_ENTRY * thread_p, const char *nonce, const char *
  * shape, so this does not reveal which names are real.
  */
 void
-scdc_auth_challenge (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen)
+scdc_auth_challenge (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 {
   OR_ALIGNED_BUF (OR_INT_SIZE * 2 + CSS_CDC_AUTH_NONCE_SIZE + MAX_ALIGNMENT) a_reply;
   char *reply = OR_ALIGNED_BUF_START (a_reply);
@@ -11528,11 +11528,38 @@ scdc_auth_challenge (THREAD_ENTRY * thread_p, unsigned int rid, char *request, i
     }
   str_to_hex_prealloced (nonce_bytes, sizeof (nonce_bytes), nonce, sizeof (nonce), HEX_UPPERCASE);
 
-  /* an account that does not exist still gets a challenge; it simply has no
-   * stored password to answer it with */
-  (void) cdc_get_user_info (thread_p, user_name, stored_password, sizeof (stored_password), &is_dba);
+  /* An account that does not exist -- or one whose password could not be read --
+   * still gets a same-shaped challenge, but one it cannot answer: the expected
+   * value is derived from a random secret the client can never know, and the
+   * connection is not a DBA. This keeps a missing account indistinguishable from
+   * a passwordless one, and stops a failed password read from being treated as an
+   * empty password that a hash of the public nonce alone would satisfy. */
+  if (!cdc_get_user_info (thread_p, user_name, stored_password, sizeof (stored_password), &is_dba))
+    {
+      char secret_bytes[CSS_CDC_AUTH_NONCE_SIZE / 2];
+      char secret[CSS_CDC_AUTH_NONCE_SIZE];
 
-  if (cdc_auth_make_response (thread_p, nonce, stored_password, thread_p->conn_entry->cdc_auth_expected) != NO_ERROR)
+      is_dba = false;
+      stored_password[0] = '\0';	/* report scheme 0, as a passwordless account would */
+
+      if (crypt_generate_random_bytes (secret_bytes, sizeof (secret_bytes)) != NO_ERROR)
+	{
+	  return_error_to_client (thread_p, rid);
+	  css_send_abort_to_client (thread_p->conn_entry, rid);
+	  return;
+	}
+      str_to_hex_prealloced (secret_bytes, sizeof (secret_bytes), secret, sizeof (secret), HEX_UPPERCASE);
+
+      if (cdc_auth_make_response (thread_p, nonce, secret, thread_p->conn_entry->cdc_auth_expected) != NO_ERROR)
+	{
+	  thread_p->conn_entry->cdc_auth_expected[0] = '\0';
+	  return_error_to_client (thread_p, rid);
+	  css_send_abort_to_client (thread_p->conn_entry, rid);
+	  return;
+	}
+    }
+  else if (cdc_auth_make_response (thread_p, nonce, stored_password, thread_p->conn_entry->cdc_auth_expected) !=
+	   NO_ERROR)
     {
       thread_p->conn_entry->cdc_auth_expected[0] = '\0';
       return_error_to_client (thread_p, rid);
@@ -11578,7 +11605,7 @@ cdc_auth_response_matches (const char *expected, const char *given)
  * which is spent either way so a wrong answer cannot be retried against it.
  */
 void
-scdc_auth_response (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqlen)
+scdc_auth_response (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 {
   OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
   char *reply = OR_ALIGNED_BUF_START (a_reply);
