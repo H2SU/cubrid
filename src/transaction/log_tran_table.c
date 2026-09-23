@@ -66,6 +66,9 @@
 #include "tz_support.h"
 #include "db_date.h"
 #include "dbtype.h"
+#include "heap_file.h"
+#include "set_object.h"
+#include "intl_support.h"
 #if defined (SERVER_MODE)
 #include "server_support.h"
 #endif // SERVER_MODE
@@ -758,6 +761,218 @@ logtb_am_i_dba_client (THREAD_ENTRY * thread_p)
 
   db_user = logtb_find_current_client_name (thread_p);
   return (db_user != NULL && !strcasecmp (db_user, "DBA"));
+}
+
+/*
+ * logtb_find_user_oid () - locate a db_user instance by account name.
+ *   return: true if the account exists.
+ *   thread_p (in):
+ *   user_name (in): account name
+ *   user_oid (out): the instance oid
+ *
+ * db_user has a unique index on "name", so this is a key lookup, not a scan.
+ */
+static bool
+logtb_find_user_oid (THREAD_ENTRY * thread_p, const char *user_name, OID * user_oid)
+{
+  BTID btid;
+  DB_VALUE key;
+  char upper_name[DB_MAX_IDENTIFIER_LENGTH];
+  BTREE_SEARCH search;
+
+  if (user_name == NULL || *user_name == '\0' || strlen (user_name) >= DB_MAX_IDENTIFIER_LENGTH)
+    {
+      return false;
+    }
+
+  /* account names are stored upper-cased */
+  intl_identifier_upper (user_name, upper_name);
+
+  if (heap_get_index_with_name (thread_p, oid_User_class_oid, "u_db_user_name", &btid) != NO_ERROR
+      || BTID_IS_NULL (&btid))
+    {
+      return false;
+    }
+
+  db_make_string (&key, upper_name);
+  search = xbtree_find_unique (thread_p, &btid, S_SELECT, &key, oid_User_class_oid, user_oid, false);
+  pr_clear_value (&key);
+
+  return (search == BTREE_KEY_FOUND);
+}
+
+/*
+ * logtb_find_user_groups_attr () - position of db_user.groups in the class
+ *   representation, resolved once per server.
+ *   return: the attribute id, or -1 if it could not be read.
+ *   thread_p (in):
+ */
+static int
+logtb_find_user_groups_attr (THREAD_ENTRY * thread_p)
+{
+  static int groups_id = -1;
+  HEAP_SCANCACHE scan;
+  RECDES class_record;
+  HEAP_CACHE_ATTRINFO attr_info;
+  char *attr_name;
+  int alloced;
+  int i, found_id = -1;
+  bool attrinfo_started = false;
+
+  if (groups_id != -1)
+    {
+      return groups_id;
+    }
+
+  if (heap_scancache_quick_start_with_class_oid (thread_p, &scan, oid_User_class_oid) != NO_ERROR)
+    {
+      return -1;
+    }
+
+  if (heap_get_class_record (thread_p, oid_User_class_oid, &class_record, &scan, PEEK) != S_SUCCESS
+      || heap_attrinfo_start (thread_p, oid_User_class_oid, -1, NULL, &attr_info) != NO_ERROR)
+    {
+      goto end;
+    }
+  attrinfo_started = true;
+
+  for (i = 0; i < attr_info.num_values && found_id == -1; i++)
+    {
+      attr_name = NULL;
+      alloced = 0;
+
+      if (or_get_attrname (&class_record, i, &attr_name, &alloced) != NO_ERROR || attr_name == NULL)
+	{
+	  goto end;
+	}
+
+      if (strcmp (attr_name, "groups") == 0)
+	{
+	  found_id = i;
+	}
+
+      if (alloced)
+	{
+	  db_private_free_and_init (thread_p, attr_name);
+	}
+    }
+
+  /* a race resolves the same id twice; it is published only once known good */
+  groups_id = found_id;
+
+end:
+  if (attrinfo_started)
+    {
+      heap_attrinfo_end (thread_p, &attr_info);
+    }
+  (void) heap_scancache_end (thread_p, &scan);
+
+  return found_id;
+}
+
+/*
+ * logtb_set_contains_oid () - does an object set hold this instance?
+ *   return: true if found.
+ *   set_value (in): a set-typed attribute value read from a heap record
+ *   oid (in)      : instance to look for
+ */
+static bool
+logtb_set_contains_oid (DB_VALUE * set_value, const OID * oid)
+{
+  DB_COLLECTION *set;
+  DB_VALUE element;
+  int i, size;
+
+  set = db_get_set (set_value);
+  if (set == NULL)
+    {
+      return false;
+    }
+
+  size = set_size (set);
+  for (i = 0; i < size; i++)
+    {
+      if (set_get_element_nocopy (set, i, &element) != NO_ERROR)
+	{
+	  continue;
+	}
+
+      /* object-typed attributes come back as plain oids on the server side */
+      if (DB_VALUE_TYPE (&element) == DB_TYPE_OID && OID_EQ (db_get_oid (&element), oid))
+	{
+	  return true;
+	}
+    }
+
+  return false;
+}
+
+/*
+ * logtb_am_i_dba_group_client () - is the caller DBA, or a member of the DBA
+ *   group?
+ *   return: true if the account this request runs as is DBA or in its group.
+ *   thread_p (in):
+ *
+ * CBRD-27447: kill_or_interrupt used to take this answer from the client. It is
+ * read from the catalog here instead. db_user.groups is the flattened
+ * membership set, so nested groups need no extra walk.
+ */
+static bool
+logtb_am_i_dba_group_client (THREAD_ENTRY * thread_p)
+{
+  const char *user_name;
+  OID user_oid, dba_oid;
+  HEAP_SCANCACHE scan;
+  RECDES recdes;
+  HEAP_CACHE_ATTRINFO attr_info;
+  DB_VALUE *groups;
+  int groups_id;
+  bool is_member = false, attrinfo_started = false;
+
+  if (logtb_am_i_dba_client (thread_p))
+    {
+      return true;
+    }
+
+  user_name = logtb_find_current_client_name (thread_p);
+  groups_id = logtb_find_user_groups_attr (thread_p);
+  if (groups_id == -1 || !logtb_find_user_oid (thread_p, user_name, &user_oid)
+      || !logtb_find_user_oid (thread_p, "DBA", &dba_oid))
+    {
+      return false;
+    }
+
+  if (heap_scancache_quick_start_with_class_oid (thread_p, &scan, oid_User_class_oid) != NO_ERROR)
+    {
+      return false;
+    }
+
+  if (heap_get_visible_version (thread_p, &user_oid, oid_User_class_oid, &recdes, &scan, PEEK, NULL_CHN) != S_SUCCESS
+      || heap_attrinfo_start (thread_p, oid_User_class_oid, -1, NULL, &attr_info) != NO_ERROR)
+    {
+      goto end;
+    }
+  attrinfo_started = true;
+
+  if (heap_attrinfo_read_dbvalues (thread_p, &user_oid, &recdes, &attr_info) != NO_ERROR)
+    {
+      goto end;
+    }
+
+  groups = heap_attrinfo_access (groups_id, &attr_info);
+  if (groups != NULL && !DB_IS_NULL (groups))
+    {
+      is_member = logtb_set_contains_oid (groups, &dba_oid);
+    }
+
+end:
+  if (attrinfo_started)
+    {
+      heap_attrinfo_end (thread_p, &attr_info);
+    }
+  (void) heap_scancache_end (thread_p, &scan);
+
+  return is_member;
 }
 
 /*
@@ -5674,7 +5889,7 @@ logtb_check_kill_tran_auth (THREAD_ENTRY * thread_p, int tran_id, bool * has_aut
 
   *has_authorization = false;
 
-  if (logtb_am_i_dba_client (thread_p) == true)
+  if (logtb_am_i_dba_group_client (thread_p) == true)
     {
       *has_authorization = true;
       return NO_ERROR;
@@ -5791,11 +6006,10 @@ xlogtb_kill_tran_index (THREAD_ENTRY * thread_p, int kill_tran_index, char *kill
  *   return:
  *   thread_p(in):
  *   tran_index(in):
- *   is_dba_group_member(in):
  *   kill_query_only(in):
  */
 int
-xlogtb_kill_or_interrupt_tran (THREAD_ENTRY * thread_p, int tran_index, bool is_dba_group_member, bool interrupt_only)
+xlogtb_kill_or_interrupt_tran (THREAD_ENTRY * thread_p, int tran_index, bool interrupt_only)
 {
   int error;
   bool interrupt, has_authorization;
@@ -5810,19 +6024,19 @@ xlogtb_kill_or_interrupt_tran (THREAD_ENTRY * thread_p, int tran_index, bool is_
       return ER_KILL_TR_NOT_ALLOWED;
     }
 
-  if (!is_dba_group_member)
+  /* CBRD-27447: the server decides who may kill what; whether the caller is in
+   * the DBA group is looked up in logtb_check_kill_tran_auth (), never taken
+   * from the request. */
+  error = logtb_check_kill_tran_auth (thread_p, tran_index, &has_authorization);
+  if (error != NO_ERROR)
     {
-      error = logtb_check_kill_tran_auth (thread_p, tran_index, &has_authorization);
-      if (error != NO_ERROR)
-	{
-	  return error;
-	}
+      return error;
+    }
 
-      if (has_authorization == false)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_KILL_TR_NOT_ALLOWED, 1, tran_index);
-	  return ER_KILL_TR_NOT_ALLOWED;
-	}
+  if (has_authorization == false)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_KILL_TR_NOT_ALLOWED, 1, tran_index);
+      return ER_KILL_TR_NOT_ALLOWED;
     }
 
   is_trx_exists = logtb_set_tran_index_interrupt (thread_p, tran_index, true);
