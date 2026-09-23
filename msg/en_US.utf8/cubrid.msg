@@ -1469,6 +1469,8 @@ Check the path of the key file (_keys) and make sure that it includes proper key
 
 1371 WITH FULLSCAN is downgraded to sampling (class "%1$s", heap pages : %2$d, stats_fullscan_max_pages : %3$d).
 
+1372 A connection used transaction index %1$d, but the server assigned it index %2$d. The assigned index was used instead.
+
 1372 Last Error
 
 $set 6 MSGCAT_SET_INTERNAL

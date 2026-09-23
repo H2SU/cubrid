@@ -2933,7 +2933,60 @@ css_conn_entry::set_tran_index (int tran_index)
       assert (false);
       tran_index = NULL_TRAN_INDEX;
     }
+
+#if defined (SERVER_MODE)
+  /* CBRD-27446: this is where the transaction index a packet carries reaches the
+   * connection, and the peer chose that value -- nothing so far has asked whether
+   * the index is one this connection was ever given. Once the server has assigned
+   * an index here, that is the only one this connection may act under; an index
+   * belonging to some other session is answered with the assigned one instead.
+   *
+   * The claim is ignored rather than refused so that a legitimate flow not
+   * accounted for here keeps working, and it is reported once per connection so
+   * that a peer repeating it cannot fill the log. */
+  if (owned_tran_index != NULL_TRAN_INDEX && tran_index != NULL_TRAN_INDEX && tran_index != owned_tran_index)
+    {
+      if (!reported_foreign_tran_index)
+	{
+	  reported_foreign_tran_index = true;
+	  er_set (ER_NOTIFICATION_SEVERITY, ARG_FILE_LINE, ER_CSS_TRAN_INDEX_NOT_OWNED, 2, tran_index,
+		  owned_tran_index);
+	}
+
+      transaction_id = owned_tran_index;
+      return;
+    }
+#endif /* SERVER_MODE */
+
   transaction_id = tran_index;
+}
+
+/*
+ * css_conn_entry::assign_tran_index () - remember the transaction index the
+ *   server assigned to this connection, and use it from now on.
+ *
+ * Called only where the server itself hands out an index (client registration),
+ * never from a path that takes the value off the wire.
+ */
+void
+css_conn_entry::assign_tran_index (int tran_index)
+{
+  owned_tran_index = tran_index;
+  reported_foreign_tran_index = false;
+  set_tran_index (tran_index);
+}
+
+/*
+ * css_conn_entry::release_tran_index () - forget the assigned index, once the
+ *   server has released it, so the connection is not pinned to an index that no
+ *   longer belongs to it.
+ */
+void
+css_conn_entry::release_tran_index (void)
+{
+  owned_tran_index = NULL_TRAN_INDEX;
+  reported_foreign_tran_index = false;
+  set_tran_index (NULL_TRAN_INDEX);
 }
 
 int

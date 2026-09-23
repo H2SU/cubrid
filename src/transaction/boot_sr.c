@@ -3306,7 +3306,9 @@ xboot_register_client (THREAD_ENTRY * thread_p, BOOT_CLIENT_CREDENTIAL * client_
   if (tran_index != NULL_TRAN_INDEX)
     {
 #if defined (SERVER_MODE)
-      thread_p->conn_entry->set_tran_index (tran_index);
+      /* CBRD-27446: the index is assigned here and nowhere else, so record it as
+       * the one this connection owns; a request naming another one is not it. */
+      thread_p->conn_entry->assign_tran_index (tran_index);
 #endif /* SERVER_MODE */
       server_credential->db_full_name = boot_Db_full_name;
       server_credential->host_name = boot_Host_name;
@@ -3451,6 +3453,14 @@ xboot_unregister_client (REFPTR (THREAD_ENTRY, thread_p), int tran_index)
 
       /* Release the transaction index */
       logtb_release_tran_index (thread_p, tran_index);
+
+#if defined (SERVER_MODE)
+      /* the index is no longer this connection's, so stop holding requests to it */
+      if (conn != NULL)
+	{
+	  conn->release_tran_index ();
+	}
+#endif /* SERVER_MODE */
 
       LOG_SET_CURRENT_TRAN_INDEX (thread_p, save_index);
     }
