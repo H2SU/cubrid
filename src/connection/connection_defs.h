@@ -489,8 +489,7 @@ struct css_conn_entry
   void set_tran_index (int tran_index);
   int get_tran_index (void);
 
-  // CBRD-27446: record the index the server itself handed to this connection,
-  // so set_tran_index () can tell it apart from one a peer merely claims.
+  // CBRD-27446: the index the server assigned, as opposed to one a packet claims
   void assign_tran_index (int tran_index);
   void release_tran_index (void);
 
@@ -503,12 +502,8 @@ struct css_conn_entry
 private:
   // note - I want to protect this.
   int transaction_id;
-  /* the index xboot_register_client () assigned to this connection, or
-   * NULL_TRAN_INDEX before one was assigned (CBRD-27446) */
-  int owned_tran_index;
-  /* whether a mismatching claim was already reported for this connection, so a
-   * peer repeating it cannot flood the server log */
-  bool reported_foreign_tran_index;
+  int owned_tran_index;		/* assigned by xboot_register_client (), or NULL_TRAN_INDEX */
+  bool reported_foreign_tran_index;	/* a mismatch is logged once per connection */
   // *INDENT-OFF*
   std::atomic<size_t> pending_request_count;
   // *INDENT-ON*
