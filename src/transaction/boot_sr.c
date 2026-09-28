@@ -3453,13 +3453,6 @@ xboot_unregister_client (REFPTR (THREAD_ENTRY, thread_p), int tran_index)
       /* Release the transaction index */
       logtb_release_tran_index (thread_p, tran_index);
 
-#if defined (SERVER_MODE)
-      if (conn != NULL)
-	{
-	  conn->release_tran_index ();
-	}
-#endif /* SERVER_MODE */
-
       LOG_SET_CURRENT_TRAN_INDEX (thread_p, save_index);
     }
 

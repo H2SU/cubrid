@@ -502,9 +502,9 @@ struct css_conn_entry
 private:
   // note - I want to protect this.
   int transaction_id;
-  int owned_tran_index;		/* assigned by xboot_register_client (), or NULL_TRAN_INDEX */
-  bool reported_foreign_tran_index;	/* a mismatch is logged once per connection */
   // *INDENT-OFF*
+  std::atomic<int> owned_tran_index;	/* assigned by the server, or NULL_TRAN_INDEX (CBRD-27446) */
+  std::atomic<bool> reported_foreign_tran_index;	/* a mismatching claim is logged once */
   std::atomic<size_t> pending_request_count;
   // *INDENT-ON*
 #else				// not c++ = c
