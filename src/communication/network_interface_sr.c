@@ -7114,10 +7114,7 @@ sthread_kill_or_interrupt_tran (THREAD_ENTRY * thread_p, unsigned int rid, char 
   int num_killed_tran = 0;
   int client_claims_dba_group = 0;
 
-  /* CBRD-27447: the client still sends whether it believes it is in the DBA
-   * group, but the server no longer acts on it -- xlogtb_kill_or_interrupt_tran ()
-   * looks the membership up itself. The field is read only to keep the rest of
-   * the request aligned for existing clients. */
+  /* CBRD-27447: read only to stay in step with the request; the server decides */
   ptr = or_unpack_int (request, &client_claims_dba_group);
   ptr = or_unpack_int (ptr, &num_tran_index);
   ptr = or_unpack_int_array (ptr, num_tran_index, &tran_index_list);
