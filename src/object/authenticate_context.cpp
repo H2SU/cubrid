@@ -228,24 +228,32 @@ authenticate_context::start (void)
 */
 
 /*
+ * encode_password () - the password in each form the server may store it in;
+ *   all empty for no password.
+ */
+static void
+encode_password (const char *password, char *des, char *sha1, char *sha2)
+{
+  if (password == NULL || strlen (password) == 0)
+    {
+      des[0] = sha1[0] = sha2[0] = '\0';
+    }
+  else
+    {
+      encrypt_password (password, 1, des);
+      encrypt_password_sha1 (password, 1, sha1);
+      encrypt_password_sha2_512 (password, sha2);
+    }
+}
+
+/*
  * store_password () - keep the password only in its encrypted forms, so no
  *   buffer holds it in plain text.
  */
 void
 authenticate_context::store_password (const char *password)
 {
-  if (password == NULL || strlen (password) == 0)
-    {
-      strcpy (user_password_des_oldstyle, "");
-      strcpy (user_password_sha1, "");
-      strcpy (user_password_sha2_512, "");
-    }
-  else
-    {
-      encrypt_password (password, 1, user_password_des_oldstyle);
-      encrypt_password_sha1 (password, 1, user_password_sha1);
-      encrypt_password_sha2_512 (password, user_password_sha2_512);
-    }
+  encode_password (password, user_password_des_oldstyle, user_password_sha1, user_password_sha2_512);
 }
 
 int
@@ -286,8 +294,21 @@ authenticate_context::login (const char *name, const char *password, bool ignore
     }
   else
     {
-      /* Change users within an active database. Keep the encrypted forms current
-       * for the clogin_user () that follows (CBRD-27445). */
+      /* Change users within an active database. CBRD-27445: the server switches
+       * only after the new password is proven, and the stored forms change only then. */
+#if defined (CS_MODE)
+      if (name != NULL && name[0] != '\0')
+	{
+	  char des[AU_MAX_PASSWORD_BUF + 4], sha1[AU_MAX_PASSWORD_BUF + 4], sha2[AU_MAX_PASSWORD_BUF + 4];
+
+	  encode_password (password, des, sha1, sha2);
+	  error = au_prove_password (name, des, sha1, sha2);
+	  if (error != NO_ERROR)
+	    {
+	      return error;
+	    }
+	}
+#endif /* CS_MODE */
       store_password (password);
 
       AU_DISABLE (save);

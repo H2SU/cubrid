@@ -449,6 +449,9 @@ struct css_conn_entry
   char cdc_auth_expected[CSS_CDC_AUTH_RESPONSE_SIZE];	/* answer to the outstanding challenge, empty if none */
   bool cdc_auth_is_dba;		/* the challenged account is DBA or a DBA group member */
   bool cdc_auth_done;		/* the challenge was answered correctly */
+  /* the account whose password this connection proved (CBRD-27445); used once */
+  char auth_user[DB_MAX_USER_LENGTH + 1];
+  bool auth_verified;
   int idx;			/* connection index */
   BOOT_CLIENT_TYPE client_type;
   SYNC_RMUTEX rmutex;		/* connection mutex */

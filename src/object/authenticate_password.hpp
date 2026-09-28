@@ -28,8 +28,6 @@
 
 #define AU_MAX_PASSWORD_CHARS   31
 #define AU_MAX_PASSWORD_BUF     2048
-/* the entered password's DES, SHA1 and SHA2-512 forms, joined by '\n' */
-#define AU_PASSWORD_PROOF_BUF   (3 * (AU_MAX_PASSWORD_BUF + 4))
 #define AU_MAX_COMMENT_CHARS    SM_MAX_COMMENT_LENGTH
 
 #define PASSWORD_ENCRYPTION_SEED        "U9a$y1@zw~a0%"

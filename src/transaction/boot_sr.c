@@ -84,7 +84,6 @@
 #include "tde.h"
 #include "porting.h"
 #include "log_manager.h"
-#include "authenticate_password.hpp"
 
 #if defined(SERVER_MODE)
 #include "connection_sr.h"
@@ -3215,97 +3214,6 @@ xboot_get_server_session_key (void)
  *       recovery tasks, such transaction is assigned to the client and
  *       and the transaction state is returned as a side effect.
  */
-#if defined (SERVER_MODE)
-/*
- * boot_split_password_proof () - cut a password proof into its three forms.
- *   proof (in/out): "<DES>\n<SHA1>\n<SHA2-512>", split in place
- *   forms (out)   : the three forms, in that order; "" for any that is missing
- */
-static void
-boot_split_password_proof (char *proof, const char *forms[3])
-{
-  char *nl;
-  int i;
-
-  for (i = 0; i < 3; i++)
-    {
-      forms[i] = (proof != NULL) ? proof : "";
-      nl = (proof != NULL) ? strchr (proof, '\n') : NULL;
-      if (nl != NULL)
-	{
-	  *nl = '\0';
-	  proof = nl + 1;
-	}
-      else
-	{
-	  proof = NULL;
-	}
-    }
-}
-
-/*
- * boot_verify_client_password () - check that the client proved the password of
- *   the account it names (CBRD-27445).
- *   return: NO_ERROR if proven, or the account has no password or does not exist;
- *           ER_AU_INVALID_PASSWORD otherwise, including when it cannot be read.
- *   db_user (in)   : account name as the client declared it
- *   sent_proof (in): the entered password's DES, SHA1 and SHA2-512 forms, '\n'-joined
- *
- * An unknown account is let through: its name carries no privilege, and the
- * client reports it with the usual error.
- */
-int
-boot_verify_client_password (THREAD_ENTRY * thread_p, const char *db_user, const char *sent_proof)
-{
-  char stored[AU_MAX_PASSWORD_BUF + 4];
-  char proof[AU_PASSWORD_PROOF_BUF] = { '\0' };
-  const char *forms[3];
-  const char *want;
-  bool is_dba_group;
-  int error;
-
-  error = cdc_find_user_info (thread_p, db_user, stored, sizeof (stored), &is_dba_group);
-  if (error == ER_AU_INVALID_USER || (error == NO_ERROR && stored[0] == '\0'))
-    {
-      return NO_ERROR;
-    }
-
-  if (error == NO_ERROR)
-    {
-      if (sent_proof != NULL)
-	{
-	  strncpy (proof, sent_proof, sizeof (proof) - 1);
-	}
-      boot_split_password_proof (proof, forms);
-
-      if (IS_ENCODED_DES (stored))
-	{
-	  want = forms[0];
-	}
-      else if (IS_ENCODED_SHA1 (stored))
-	{
-	  want = forms[1];
-	}
-      else if (IS_ENCODED_SHA2_512 (stored))
-	{
-	  want = forms[2];
-	}
-      else
-	{
-	  /* stored in plain text (very old databases): left to the client, as before */
-	  return NO_ERROR;
-	}
-
-      if (want[0] != '\0' && strcmp (want, stored) == 0)
-	{
-	  return NO_ERROR;
-	}
-    }
-
-  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_AU_INVALID_PASSWORD, 0);
-  return ER_AU_INVALID_PASSWORD;
-}
-#endif /* SERVER_MODE */
 
 int
 xboot_register_client (THREAD_ENTRY * thread_p, BOOT_CLIENT_CREDENTIAL * client_credential, int client_lock_wait,
@@ -3401,11 +3309,11 @@ xboot_register_client (THREAD_ENTRY * thread_p, BOOT_CLIENT_CREDENTIAL * client_
 #if defined (SERVER_MODE)
       thread_p->conn_entry->set_tran_index (tran_index);
 
-      /* CBRD-27445: the declared user is trusted only once its password is proven */
+      /* CBRD-27445: the declared user is trusted only once this connection proved its password */
       if (BOOT_NORMAL_CLIENT_TYPE (client_credential->client_type)
-	  && boot_verify_client_password (thread_p, client_credential->get_db_user (),
-					  client_credential->get_db_password ()) != NO_ERROR)
+	  && !css_consume_auth_proof (thread_p->conn_entry, client_credential->get_db_user ()))
 	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_AU_INVALID_PASSWORD, 0);
 	  logtb_release_tran_index (thread_p, tran_index);
 	  *tran_state = TRAN_UNACTIVE_UNKNOWN;
 	  client_credential->db_user = db_user_save;

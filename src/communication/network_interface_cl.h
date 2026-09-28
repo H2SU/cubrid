@@ -419,6 +419,8 @@ extern int csession_get_prepared_statement (const char *name, XASL_ID * xasl_id,
 extern int csession_delete_prepared_statement (const char *name);
 
 extern int clogin_user (const char *username);
+extern int cau_challenge (const char *user_name, int *scheme, char *nonce, int nonce_size);
+extern int cau_response (const char *answer);
 
 extern int csession_set_session_variables (DB_VALUE * variables, const int count);
 extern int csession_get_variable (DB_VALUE * name, DB_VALUE * value);

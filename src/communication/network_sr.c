@@ -743,6 +743,13 @@ net_server_init (void)
   req_p = &net_Requests[NET_SERVER_CDC_AUTH_RESPONSE];
   req_p->processing_function = scdc_auth_response;
 
+  /* a client proves its password with these two before logging in or switching users */
+  req_p = &net_Requests[NET_SERVER_AU_CHALLENGE];
+  req_p->processing_function = sau_challenge;
+
+  req_p = &net_Requests[NET_SERVER_AU_RESPONSE];
+  req_p->processing_function = sau_response;
+
   /* flashback : DBA-only, enforced server-side before the handler is ever entered */
   req_p = &net_Requests[NET_SERVER_FLASHBACK_GET_SUMMARY];
   req_p->action_attribute = CHECK_AUTHORIZATION;

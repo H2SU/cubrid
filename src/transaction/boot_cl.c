@@ -92,7 +92,6 @@
 #include "sp_catalog.hpp"
 
 #include "authenticate_context.hpp"
-#include "authenticate_password.hpp"
 
 #include <signal.h>
 
@@ -876,15 +875,6 @@ boot_restart_client (BOOT_CLIENT_CREDENTIAL * client_credential)
 	}
     }
 
-  /* CBRD-27445: let the server check the password itself */
-  if (client_credential->db_password.empty ())
-    {
-      char proof[AU_PASSWORD_PROOF_BUF];
-
-      au_get_password_proof (proof, sizeof (proof));
-      client_credential->db_password = proof;
-    }
-
   /* Get the login name, host, and process identifier */
   if (client_credential->login_name.empty ())
     {
@@ -1144,6 +1134,19 @@ boot_restart_client (BOOT_CLIENT_CREDENTIAL * client_credential)
 		client_credential->get_program_name (),
 		client_credential->get_login_name (), client_credential->get_host_name (),
 		client_credential->process_id);
+
+#if defined (CS_MODE)
+  /* CBRD-27445: the server registers the user only after its password is proven */
+  if (BOOT_NORMAL_CLIENT_TYPE (client_credential->client_type))
+    {
+      error_code = au_prove_password (client_credential->get_db_user (), Au_user_password_des_oldstyle,
+				      Au_user_password_sha1, Au_user_password_sha2_512);
+      if (error_code != NO_ERROR)
+	{
+	  goto error;
+	}
+    }
+#endif /* CS_MODE */
 
   tran_index =
     boot_register_client (client_credential, tran_lock_wait_msecs, tran_isolation, &transtate, &boot_Server_credential);

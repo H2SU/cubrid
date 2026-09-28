@@ -5305,6 +5305,107 @@ csession_delete_prepared_statement (const char *name)
 }
 
 /*
+ * cau_challenge () - ask the server for a one-time password challenge (CBRD-27445).
+ *   return: NO_ERROR, or the server's error (ER_AU_INVALID_USER for an unknown account)
+ *   user_name (in) : account to prove
+ *   scheme (out)   : form its password is stored in, 0 if none
+ *   nonce (out)    : the challenge
+ *   nonce_size (in): size of nonce
+ */
+int
+cau_challenge (const char *user_name, int *scheme, char *nonce, int nonce_size)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT_SIZE * 3 + CSS_CDC_AUTH_NONCE_SIZE + MAX_ALIGNMENT) a_reply;
+  char *reply = OR_ALIGNED_BUF_START (a_reply);
+  char *request, *ptr, *server_nonce = NULL;
+  int user_len, req_len, declared_len, error;
+
+  req_len = length_const_string (user_name, &user_len);
+  request = (char *) malloc (req_len);
+  if (request == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) req_len);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+  pack_const_string_with_length (request, user_name, user_len);
+
+  memset (reply, 0, OR_ALIGNED_BUF_SIZE (a_reply));
+  error = net_client_request (NET_SERVER_AU_CHALLENGE, request, req_len, reply, OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0,
+			      NULL, 0);
+  free_and_init (request);
+  if (error != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  ptr = or_unpack_int (reply, &error);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+  ptr = or_unpack_int (ptr, scheme);
+
+  /* trust the nonce's length prefix only once it lies inside the reply */
+  declared_len = OR_GET_INT (ptr);
+  if (declared_len <= 0 || declared_len > (int) OR_ALIGNED_BUF_SIZE (a_reply) - (int) (ptr - reply) - OR_INT_SIZE
+      || memchr (ptr + OR_INT_SIZE, '\0', declared_len) == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_SERVER_DATA_RECEIVE, 0);
+      return ER_NET_SERVER_DATA_RECEIVE;
+    }
+  (void) or_unpack_string_nocopy (ptr, &server_nonce);
+  if (server_nonce == NULL || (int) strlen (server_nonce) >= nonce_size)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_SERVER_DATA_RECEIVE, 0);
+      return ER_NET_SERVER_DATA_RECEIVE;
+    }
+  strcpy (nonce, server_nonce);
+
+  return NO_ERROR;
+#else
+  return NO_ERROR;
+#endif
+}
+
+/*
+ * cau_response () - answer the outstanding challenge (CBRD-27445).
+ *   return: NO_ERROR if the server accepted it, else ER_AU_INVALID_PASSWORD
+ *   answer (in): digest over the challenge and the password's stored form
+ */
+int
+cau_response (const char *answer)
+{
+#if defined (CS_MODE)
+  OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
+  char *request;
+  int answer_len, req_len, error;
+
+  req_len = length_const_string (answer, &answer_len);
+  request = (char *) malloc (req_len);
+  if (request == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) req_len);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+  pack_const_string_with_length (request, answer, answer_len);
+
+  error = net_client_request (NET_SERVER_AU_RESPONSE, request, req_len, OR_ALIGNED_BUF_START (a_reply),
+			      OR_ALIGNED_BUF_SIZE (a_reply), NULL, 0, NULL, 0);
+  free_and_init (request);
+  if (error != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  or_unpack_int (OR_ALIGNED_BUF_START (a_reply), &error);
+  return error;
+#else
+  return NO_ERROR;
+#endif
+}
+
+/*
  * clogin_user () - login user
  * return	  : error code or NO_ERROR
  * username (in) : name of the user
@@ -5315,15 +5416,10 @@ clogin_user (const char *username)
 #if defined (CS_MODE)
   int req_error;
   OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
-  char *request = NULL, *ptr;
-  int username_len, proof_len, req_len;
-  /* CBRD-27445: the server re-checks the password before switching users */
-  char proof[AU_PASSWORD_PROOF_BUF];
-
-  au_get_password_proof (proof, sizeof (proof));
+  char *request = NULL;
+  int username_len, req_len;
 
   req_len = length_const_string (username, &username_len);
-  req_len += length_const_string (proof, &proof_len);
 
   request = (char *) malloc (req_len);
   if (request == NULL)
@@ -5332,8 +5428,7 @@ clogin_user (const char *username)
       return ER_FAILED;
     }
 
-  ptr = pack_const_string_with_length (request, username, username_len);
-  ptr = pack_const_string_with_length (ptr, proof, proof_len);
+  pack_const_string_with_length (request, username, username_len);
 
   req_error =
     net_client_request (NET_SERVER_AU_LOGIN_USER, request, req_len, OR_ALIGNED_BUF_START (a_reply),
