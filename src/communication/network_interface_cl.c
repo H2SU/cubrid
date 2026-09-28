@@ -5317,12 +5317,10 @@ clogin_user (const char *username)
   OR_ALIGNED_BUF (OR_INT_SIZE) a_reply;
   char *request = NULL, *ptr;
   int username_len, proof_len, req_len;
-  /* CBRD-27445: send the entered password (its three encrypted forms) so the
-   * server can re-authenticate the switch instead of trusting the name. */
-  char proof[AU_MAX_PASSWORD_BUF * 3 + 8];
+  /* CBRD-27445: the server re-checks the password before switching users */
+  char proof[AU_PASSWORD_PROOF_BUF];
 
-  snprintf (proof, sizeof (proof), "%s\n%s\n%s", Au_user_password_des_oldstyle, Au_user_password_sha1,
-	    Au_user_password_sha2_512);
+  au_get_password_proof (proof, sizeof (proof));
 
   req_len = length_const_string (username, &username_len);
   req_len += length_const_string (proof, &proof_len);

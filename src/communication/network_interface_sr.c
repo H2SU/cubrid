@@ -143,6 +143,7 @@ static int trace_log_slow_query (THREAD_ENTRY * thread_p, EXECUTION_INFO * info,
 				 char *queryinfo_string, int trace_level);
 static void event_log_many_ioreads (THREAD_ENTRY * thread_p, EXECUTION_INFO * info, int time, UINT64 * diff_stats);
 static void event_log_extend_pages (THREAD_ENTRY * thread_p, EXECUTION_INFO * info);
+static char *cdc_flashback_unpack_bounded_string (char *ptr, char *request, int reqlen, char **out_string);
 
 /*
  * stran_server_commit_internal - commit transaction on server.
@@ -9407,16 +9408,17 @@ slogin_user (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqle
   char *proof = NULL;
   char *ptr;
 
-  ptr = or_unpack_string_nocopy (request, &username);
-  /* CBRD-27445: the proof is appended by patched clients; may be absent */
-  (void) or_unpack_string_nocopy (ptr, &proof);
+  ptr = cdc_flashback_unpack_bounded_string (request, request, reqlen, &username);
+  /* CBRD-27445: clients from before this change send no proof, which then fails below */
+  if (ptr != NULL)
+    {
+      (void) cdc_flashback_unpack_bounded_string (ptr, request, reqlen, &proof);
+    }
   if (username == NULL)
     {
       (void) return_error_to_client (thread_p, rid);
       err = ER_FAILED;
     }
-  /* re-authenticate the switch on the server: trust the name only after the
-   * account's password is proven, exactly as boot registration now does. */
   else if ((err = boot_verify_client_password (thread_p, username, proof)) != NO_ERROR)
     {
       (void) return_error_to_client (thread_p, rid);

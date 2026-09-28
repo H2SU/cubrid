@@ -227,6 +227,27 @@ authenticate_context::start (void)
 *       bo_restart is called.
 */
 
+/*
+ * store_password () - keep the password only in its encrypted forms, so no
+ *   buffer holds it in plain text.
+ */
+void
+authenticate_context::store_password (const char *password)
+{
+  if (password == NULL || strlen (password) == 0)
+    {
+      strcpy (user_password_des_oldstyle, "");
+      strcpy (user_password_sha1, "");
+      strcpy (user_password_sha2_512, "");
+    }
+  else
+    {
+      encrypt_password (password, 1, user_password_des_oldstyle);
+      encrypt_password_sha1 (password, 1, user_password_sha1);
+      encrypt_password_sha2_512 (password, user_password_sha2_512);
+    }
+}
+
 int
 authenticate_context::login (const char *name, const char *password, bool ignore_dba_privilege)
 {
@@ -261,38 +282,13 @@ authenticate_context::login (const char *name, const char *password, bool ignore
 	  user_name[0] = '\0';
 	}
 
-      if (password == NULL || strlen (password) == 0)
-	{
-	  strcpy (user_password_des_oldstyle, "");
-	  strcpy (user_password_sha1, "");
-	  strcpy (user_password_sha2_512, "");
-	}
-      else
-	{
-	  /* store the password encrypted(DES and SHA1 both) so we don't have buffers lying around with the obvious
-	   * passwords in it. */
-	  encrypt_password (password, 1, user_password_des_oldstyle);
-	  encrypt_password_sha1 (password, 1, user_password_sha1);
-	  encrypt_password_sha2_512 (password, user_password_sha2_512);
-	}
+      store_password (password);
     }
   else
     {
       /* Change users within an active database. Keep the encrypted forms current
-       * so a following clogin_user () can prove this user to the server
-       * (CBRD-27445). */
-      if (password == NULL || strlen (password) == 0)
-	{
-	  strcpy (user_password_des_oldstyle, "");
-	  strcpy (user_password_sha1, "");
-	  strcpy (user_password_sha2_512, "");
-	}
-      else
-	{
-	  encrypt_password (password, 1, user_password_des_oldstyle);
-	  encrypt_password_sha1 (password, 1, user_password_sha1);
-	  encrypt_password_sha2_512 (password, user_password_sha2_512);
-	}
+       * for the clogin_user () that follows (CBRD-27445). */
+      store_password (password);
 
       AU_DISABLE (save);
       error = perform_login (name, password, ignore_dba_privilege);

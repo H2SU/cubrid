@@ -92,6 +92,7 @@
 #include "sp_catalog.hpp"
 
 #include "authenticate_context.hpp"
+#include "authenticate_password.hpp"
 
 #include <signal.h>
 
@@ -875,15 +876,12 @@ boot_restart_client (BOOT_CLIENT_CREDENTIAL * client_credential)
 	}
     }
 
-  /* CBRD-27445: carry the entered password (its three encrypted forms) so the
-   * server can verify the declared identity itself. au_login () already stored
-   * these; join with '\n' for the server to pick the form matching the stored
-   * scheme. */
+  /* CBRD-27445: let the server check the password itself */
   if (client_credential->db_password.empty ())
     {
-      char proof[AU_MAX_PASSWORD_BUF * 3 + 8];
-      snprintf (proof, sizeof (proof), "%s\n%s\n%s", Au_user_password_des_oldstyle, Au_user_password_sha1,
-		Au_user_password_sha2_512);
+      char proof[AU_PASSWORD_PROOF_BUF];
+
+      au_get_password_proof (proof, sizeof (proof));
       client_credential->db_password = proof;
     }
 

@@ -92,6 +92,18 @@ au_login (const char *name, const char *password, bool ignore_dba_privilege)
   return au_ctx ()->login (name, password, ignore_dba_privilege);
 }
 
+/*
+ * au_get_password_proof () - the password au_login () was given, in every form
+ *   the server may have stored it, so the server can check it (CBRD-27445).
+ *   proof (out): DES, SHA1 and SHA2-512 forms joined by '\n'
+ */
+void
+au_get_password_proof (char *proof, int proof_size)
+{
+  snprintf (proof, proof_size, "%s\n%s\n%s", Au_user_password_des_oldstyle, Au_user_password_sha1,
+	    Au_user_password_sha2_512);
+}
+
 authenticate_context *
 au_ctx (void)
 {

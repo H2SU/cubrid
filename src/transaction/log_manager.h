@@ -236,6 +236,8 @@ extern LOG_PAGEID cdc_min_log_pageid_to_keep ();
 
 /* cdc functions */
 extern int cdc_find_lsa (THREAD_ENTRY * thread_p, time_t * input_time, LOG_LSA * start_lsa);
+extern int cdc_find_user_info (THREAD_ENTRY * thread_p, const char *user_name, char *password, int password_size,
+			       bool * is_dba_group);
 extern bool cdc_get_user_info (THREAD_ENTRY * thread_p, const char *user_name, char *password, int password_size,
 			       bool * is_dba_group);
 extern bool cdc_check_dba_authorization (THREAD_ENTRY * thread_p);
