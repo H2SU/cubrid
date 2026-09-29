@@ -771,15 +771,18 @@ static bool
 logtb_am_i_dba_group_client (THREAD_ENTRY * thread_p)
 {
   char password[AU_MAX_PASSWORD_BUF + 4];
-  bool is_dba_group = false;
+  bool is_dba_group = false, found;
 
   if (logtb_am_i_dba_client (thread_p))
     {
       return true;
     }
 
-  return (cdc_get_user_info (thread_p, logtb_find_current_client_name (thread_p), password, sizeof (password),
-			     &is_dba_group) && is_dba_group);
+  found = cdc_get_user_info (thread_p, logtb_find_current_client_name (thread_p), password, sizeof (password),
+			     &is_dba_group);
+  memset (password, 0, sizeof (password));	/* only the group answer is needed */
+
+  return found && is_dba_group;
 }
 
 /*
