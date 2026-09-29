@@ -144,6 +144,7 @@ static int trace_log_slow_query (THREAD_ENTRY * thread_p, EXECUTION_INFO * info,
 static void event_log_many_ioreads (THREAD_ENTRY * thread_p, EXECUTION_INFO * info, int time, UINT64 * diff_stats);
 static void event_log_extend_pages (THREAD_ENTRY * thread_p, EXECUTION_INFO * info);
 static char *cdc_flashback_unpack_bounded_string (char *ptr, char *request, int reqlen, char **out_string);
+static bool auth_may_switch_user (THREAD_ENTRY * thread_p, const char *user_name);
 
 /*
  * stran_server_commit_internal - commit transaction on server.
@@ -8971,11 +8972,10 @@ ssession_find_or_create_session (THREAD_ENTRY * thread_p, unsigned int rid, char
 	  intl_identifier_upper (db_user, db_user_upper);
 	}
 
-      /* CBRD-27445: the session changes user only to an account whose password
-       * this connection just proved (a broker switching users does, in au_login ()) */
+      /* CBRD-27445: same rule as slogin_user () */
       if (db_user_upper[0] != '\0'
 	  && (current_user == NULL || intl_identifier_casecmp (current_user, db_user_upper) != 0)
-	  && css_consume_auth_proof (thread_p->conn_entry, db_user_upper))
+	  && auth_may_switch_user (thread_p, db_user_upper))
 	{
 	  logtb_set_current_user_name (thread_p, db_user_upper);
 	  current_user = db_user_upper;
@@ -9429,8 +9429,8 @@ slogin_user (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int reqle
       (void) return_error_to_client (thread_p, rid);
       err = ER_FAILED;
     }
-  /* CBRD-27445: switch only to the account whose password this connection just proved */
-  else if (!css_consume_auth_proof (thread_p->conn_entry, username))
+  /* CBRD-27445: switch only with a proof of the new account's password, or as DBA */
+  else if (!auth_may_switch_user (thread_p, username))
     {
       err = ER_AU_INVALID_PASSWORD;
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, err, 0);
@@ -10915,10 +10915,14 @@ auth_issue_challenge (THREAD_ENTRY * thread_p, const char *user_name, bool conce
   str_to_hex_prealloced (random_bytes, sizeof (random_bytes), nonce, CSS_CDC_AUTH_NONCE_SIZE, HEX_UPPERCASE);
 
   error = cdc_find_user_info (thread_p, user_name, stored, sizeof (stored), &is_dba);
-  if (error == ER_AU_INVALID_USER && !conceal_absent)
+  if (error != NO_ERROR && !conceal_absent)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_AU_INVALID_USER, 1, user_name);
-      return ER_AU_INVALID_USER;
+      /* a SQL login reports why it failed; the CDC channel hides it */
+      if (error == ER_AU_INVALID_USER)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_AU_INVALID_USER, 1, user_name);
+	}
+      return error;
     }
 
   if (error != NO_ERROR)
@@ -11086,6 +11090,26 @@ scdc_auth_response (THREAD_ENTRY * thread_p, unsigned int rid, char *request, in
 }
 
 /*
+ * auth_may_switch_user () - may this session become user_name? It may if it
+ *   just proved that account's password, or if the session is already DBA or a
+ *   DBA group member, who may switch users without one (CALL LOGIN spec).
+ */
+static bool
+auth_may_switch_user (THREAD_ENTRY * thread_p, const char *user_name)
+{
+  char password[AU_MAX_PASSWORD_BUF + 4];
+  bool is_dba_group = false;
+
+  if (css_consume_auth_proof (thread_p->conn_entry, user_name))
+    {
+      return true;
+    }
+
+  return (cdc_get_user_info (thread_p, logtb_find_current_client_name (thread_p), password, sizeof (password),
+			     &is_dba_group) && is_dba_group);
+}
+
+/*
  * sau_challenge () - first half of proving a password before a client login or
  *   user switch (CBRD-27445).
  */
@@ -11116,6 +11140,8 @@ sau_challenge (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int req
       (void) return_error_to_client (thread_p, rid);
     }
 
+  /* the client reads a fixed-size reply; zero it so no stale stack bytes go out */
+  memset (reply, 0, OR_ALIGNED_BUF_SIZE (a_reply));
   ptr = or_pack_int (reply, error);
   ptr = or_pack_int (ptr, scheme);
   ptr = or_pack_string (ptr, nonce);

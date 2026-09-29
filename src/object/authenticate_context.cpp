@@ -294,10 +294,13 @@ authenticate_context::login (const char *name, const char *password, bool ignore
     }
   else
     {
-      /* Change users within an active database. CBRD-27445: the server switches
-       * only after the new password is proven, and the stored forms change only then. */
+      /* Change users within an active database. CBRD-27445: prove the new
+       * password to the server wherever perform_login () checks it (a DBA group
+       * member may switch without one), and keep its forms only once it holds. */
+      bool needs_password = !ignore_passwords && (!au_is_dba_group_member (current_user) || ignore_dba_privilege);
+
 #if defined (CS_MODE)
-      if (name != NULL && name[0] != '\0')
+      if (needs_password && name != NULL && name[0] != '\0')
 	{
 	  char des[AU_MAX_PASSWORD_BUF + 4], sha1[AU_MAX_PASSWORD_BUF + 4], sha2[AU_MAX_PASSWORD_BUF + 4];
 
@@ -309,11 +312,15 @@ authenticate_context::login (const char *name, const char *password, bool ignore
 	    }
 	}
 #endif /* CS_MODE */
-      store_password (password);
 
       AU_DISABLE (save);
       error = perform_login (name, password, ignore_dba_privilege);
       AU_ENABLE (save);
+
+      if (error == NO_ERROR)
+	{
+	  store_password (password);
+	}
     }
   return (error);
 }

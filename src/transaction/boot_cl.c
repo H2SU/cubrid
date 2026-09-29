@@ -1143,6 +1143,7 @@ boot_restart_client (BOOT_CLIENT_CREDENTIAL * client_credential)
 				      Au_user_password_sha1, Au_user_password_sha2_512);
       if (error_code != NO_ERROR)
 	{
+	  (void) net_client_final ();	/* not registered yet: nothing else closes it */
 	  goto error;
 	}
     }
