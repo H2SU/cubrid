@@ -11185,12 +11185,31 @@ scdc_start_session (THREAD_ENTRY * thread_p, unsigned int rid, char *request, in
 
   ptr = or_unpack_int (ptr, &num_extraction_class);
 
-  /* Bound the count against the remaining request length -- each class oid
-   * is packed as an int64. */
-  CDC_FLASHBACK_CHECK_REQ_COUNT (num_extraction_class, ptr, request, reqlen, OR_BIGINT_SIZE);
+  if (num_extraction_class < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, 0, num_extraction_class);
+      error_code = ER_NET_DATASIZE_MISMATCH;
+      goto error;
+    }
 
   if (num_extraction_class > 0)
     {
+      /* Bound the count against the remaining request length -- each class oid
+       * is packed as an int64. or_unpack_int64() aligns the pointer up to
+       * MAX_ALIGNMENT before reading, and the first read also consumes that
+       * padding, so measure from the aligned position; counting from the
+       * unaligned pointer would let the loop read up to MAX_ALIGNMENT-1 bytes
+       * past the request. */
+      char *aligned_ptr = PTR_ALIGN (ptr, MAX_ALIGNMENT);
+
+      if ((INT64) num_extraction_class > (INT64) (reqlen - (int) (aligned_ptr - request)) / OR_BIGINT_SIZE)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2,
+		  (int) ((reqlen - (int) (aligned_ptr - request)) / OR_BIGINT_SIZE), num_extraction_class);
+	  error_code = ER_NET_DATASIZE_MISMATCH;
+	  goto error;
+	}
+
       extraction_classoids = (UINT64 *) malloc (sizeof (UINT64) * num_extraction_class);
       if (extraction_classoids == NULL)
 	{
@@ -11564,9 +11583,11 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
   char *reply = OR_ALIGNED_BUF_START (a_reply);
   char *area = NULL;
   int area_size = 0;
+  UINT64 area_size64 = 0;
 
   int error_code = NO_ERROR;
   char *ptr;
+  char *aligned_ptr;
   char *start_ptr;
 
   char *num_ptr;		//pointer in which 'number of summary' is located
@@ -11634,11 +11655,15 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
     }
   /* Unpacked unconditionally right after a variable-length string field --
    * a request crafted to exactly exhaust reqlen there would otherwise read
-   * these two int64s past the buffer. */
-  if (reqlen - (int) (ptr - request) < 2 * OR_INT64_SIZE)
+   * these two int64s past the buffer. or_unpack_int64() aligns the pointer up
+   * to MAX_ALIGNMENT before reading, so the reads can consume that padding on
+   * top of 2 * OR_INT64_SIZE; measure the remaining bytes from the aligned
+   * position to avoid reading past the request. */
+  aligned_ptr = PTR_ALIGN (ptr, MAX_ALIGNMENT);
+  if (reqlen - (int) (aligned_ptr - request) < 2 * OR_INT64_SIZE)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2,
-	      (reqlen - (int) (ptr - request)), 2 * OR_INT64_SIZE);
+	      (reqlen - (int) (aligned_ptr - request)), 2 * OR_INT64_SIZE);
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11654,7 +11679,7 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
 
   assert (!LSA_ISNULL (&context.start_lsa));
 
-  flashback_set_min_log_pageid_to_keep (&context.start_lsa);
+  flashback_set_min_log_pageid_to_keep (thread_p, &context.start_lsa);
 
   /* get summary list */
   error_code = flashback_make_summary_list (thread_p, &context);
@@ -11667,13 +11692,21 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
    * summary entry : | trid | user | start/end time | num insert/update/delete | num class | class oid list |
    * OR_OID_SIZE * context.num_class means maximum class oid list size per summary entry */
 
-  area_size = OR_OID_SIZE * context.num_class + OR_INT64_SIZE + OR_INT64_SIZE + OR_INT_SIZE
-    + (OR_SUMMARY_ENTRY_SIZE_WITHOUT_CLASS + OR_OID_SIZE * context.num_class) * context.num_summary;
+  /* Computed in UINT64: num_class is bounded only by the request length and
+   * num_summary by flashback_max_transaction (INT_MAX by default), so the
+   * product overflows an int -- and would under-allocate the area the summary
+   * entries are packed into -- long before it can overflow 64 bits. */
+  area_size64 = (UINT64) OR_OID_SIZE * context.num_class + OR_INT64_SIZE + OR_INT64_SIZE + OR_INT_SIZE
+    + ((UINT64) OR_SUMMARY_ENTRY_SIZE_WITHOUT_CLASS + (UINT64) OR_OID_SIZE * context.num_class) * context.num_summary;
 
-  area = (char *) db_private_alloc (thread_p, area_size);
+  if (area_size64 <= INT_MAX)
+    {
+      area_size = (int) area_size64;
+      area = (char *) db_private_alloc (thread_p, area_size);
+    }
   if (area == NULL)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, area_size);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) area_size64);
       error_code = ER_OUT_OF_VIRTUAL_MEMORY;
       goto error;
     }
@@ -11769,6 +11802,7 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
   char *reply = OR_ALIGNED_BUF_START (a_reply);
   char *area = NULL;
   int area_size = 0;
+  UINT64 area_size64 = 0;
 
   int error_code = NO_ERROR;
   char *ptr;
@@ -11860,19 +11894,26 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
       goto error;
     }
 
-  area_size = OR_LOG_LSA_ALIGNED_SIZE * 2 + OR_INT_SIZE;
-
-  /* log info entries are chunks of memory that already packed together, and they need to be aligned  
+  /* log info entries are chunks of memory that already packed together, and they need to be aligned
    * | lsa | lsa | num item | align | log info 1 | align | log info 2 | align | log info 3 | ..
-   * */
+   *
+   * Computed in UINT64: queue_size is the total length actually generated, which
+   * the requested batch size does not bound, so a huge transaction can push it
+   * past INT_MAX. */
+  area_size64 = (UINT64) OR_LOG_LSA_ALIGNED_SIZE * 2 + OR_INT_SIZE
+    + (UINT64) context.queue_size + (UINT64) context.num_loginfo * MAX_ALIGNMENT;
 
-  area_size += context.queue_size + context.num_loginfo * MAX_ALIGNMENT;
-
-  area = (char *) db_private_alloc (thread_p, area_size);
+  if (area_size64 <= INT_MAX)
+    {
+      area_size = (int) area_size64;
+      area = (char *) db_private_alloc (thread_p, area_size);
+    }
   if (area == NULL)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, area_size);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) area_size64);
       error_code = ER_OUT_OF_VIRTUAL_MEMORY;
+      /* nothing has been packed yet, so the generated entries are still only in the queue */
+      flashback_free_loginfo_queue (thread_p, &context);
       goto error;
     }
 
@@ -11907,7 +11948,7 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
       if (context.forward)
 	{
 	  /* start_lsa is increased only if direction is forward */
-	  flashback_set_min_log_pageid_to_keep (&context.start_lsa);
+	  flashback_set_min_log_pageid_to_keep (thread_p, &context.start_lsa);
 	}
     }
 
