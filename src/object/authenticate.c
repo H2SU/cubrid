@@ -106,12 +106,14 @@ au_prove_password (const char *user_name, const char *des, const char *sha1, con
 {
 #if defined (CS_MODE)
   char nonce[CSS_CDC_AUTH_NONCE_SIZE];
+  char tag[CSS_CDC_AUTH_RESPONSE_SIZE];
   char buffer[CSS_CDC_AUTH_NONCE_SIZE + AU_MAX_PASSWORD_BUF + 4];
   const char *form;
   char *digest = NULL;
+  INT64 issued_at = 0;
   int scheme, digest_len, error;
 
-  error = cau_challenge (user_name, &scheme, nonce, sizeof (nonce));
+  error = cau_challenge (user_name, &scheme, nonce, sizeof (nonce), &issued_at, tag, sizeof (tag));
   if (error != NO_ERROR)
     {
       return error;
@@ -139,7 +141,7 @@ au_prove_password (const char *user_name, const char *des, const char *sha1, con
       return (er_errid () != NO_ERROR) ? er_errid () : ER_FAILED;
     }
 
-  error = cau_response (digest);
+  error = cau_response (user_name, nonce, issued_at, tag, digest);
   db_private_free_and_init (NULL, digest);
 
   return error;
