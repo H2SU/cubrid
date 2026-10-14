@@ -11667,7 +11667,7 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
   if (reqlen - (int) (aligned_ptr - request) < 2 * OR_INT64_SIZE)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2,
-	      (reqlen - (int) (aligned_ptr - request)), 2 * OR_INT64_SIZE);
+	      2 * OR_INT64_SIZE, (reqlen - (int) (aligned_ptr - request)));
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11743,6 +11743,11 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
       or_pack_int (num_ptr, tmp_num);
     }
 
+  /* Release the request before the reply goes out: the client may send its
+   * GET_LOGINFO as soon as it has the summary, and that request must not find
+   * this one still being served. The session itself stays open for it. */
+  flashback_end_request (thread_p);
+
   error_code =
     css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), area,
 				       area_size);
@@ -11753,9 +11758,6 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
     {
       goto css_send_error;
     }
-
-  /* the session stays open for the GET_LOGINFO requests that follow */
-  flashback_end_request (thread_p);
 
   return;
 error:
@@ -11877,7 +11879,7 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
   if (reqlen - (int) (ptr - request) < 2 * OR_LOG_LSA_ALIGNED_SIZE + 2 * OR_INT_SIZE)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2,
-	      (reqlen - (int) (ptr - request)), 2 * OR_LOG_LSA_ALIGNED_SIZE + 2 * OR_INT_SIZE);
+	      2 * OR_LOG_LSA_ALIGNED_SIZE + 2 * OR_INT_SIZE, (reqlen - (int) (ptr - request)));
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11947,17 +11949,9 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
 
   ptr = flashback_pack_loginfo (thread_p, ptr, context);
 
-  error_code =
-    css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), area,
-				       area_size);
-
-  db_private_free_and_init (thread_p, area);
-
-  if (error_code != NO_ERROR)
-    {
-      goto css_send_error;
-    }
-
+  /* Settle the session before the reply goes out, as GET_SUMMARY does: the
+   * client may send its next GET_LOGINFO as soon as it has this reply, and
+   * that request must not find this one still being served. */
   if (flashback_is_loginfo_generation_finished (&context.start_lsa, &context.end_lsa))
     {
       flashback_reset_if_owner (thread_p);
@@ -11974,6 +11968,17 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
 	}
 
       flashback_end_request (thread_p);
+    }
+
+  error_code =
+    css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), area,
+				       area_size);
+
+  db_private_free_and_init (thread_p, area);
+
+  if (error_code != NO_ERROR)
+    {
+      goto css_send_error;
     }
 
   return;
