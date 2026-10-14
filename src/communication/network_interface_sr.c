@@ -10735,7 +10735,7 @@ smethod_invoke_fold_constants (THREAD_ENTRY * thread_p, unsigned int rid, char *
       if ((reqlen) - (int) ((ptr) - (request)) < (needed)) \
 	{ \
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, \
-		  ((reqlen) - (int) ((ptr) - (request))), (needed)); \
+		  (needed), ((reqlen) - (int) ((ptr) - (request)))); \
 	  error_code = ER_NET_DATASIZE_MISMATCH; \
 	  goto error; \
 	} \
@@ -11616,7 +11616,7 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
    * past a zero-byte allocation at the unconditional unpack below. */
   if (request == NULL || reqlen < OR_INT_SIZE)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_INT_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_INT_SIZE, reqlen);
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11842,7 +11842,7 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
    * past a zero-byte allocation at the unconditional unpack below. */
   if (request == NULL || reqlen < OR_INT_SIZE)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_INT_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_INT_SIZE, reqlen);
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
