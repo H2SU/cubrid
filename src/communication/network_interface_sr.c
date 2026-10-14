@@ -10735,7 +10735,7 @@ smethod_invoke_fold_constants (THREAD_ENTRY * thread_p, unsigned int rid, char *
       if ((reqlen) - (int) ((ptr) - (request)) < (needed)) \
 	{ \
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, \
-		  ((reqlen) - (int) ((ptr) - (request))), (needed)); \
+		  (needed), ((reqlen) - (int) ((ptr) - (request)))); \
 	  error_code = ER_NET_DATASIZE_MISMATCH; \
 	  goto error; \
 	} \
@@ -11644,7 +11644,7 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
    * past a zero-byte allocation at the unconditional unpack below. */
   if (request == NULL || reqlen < OR_INT_SIZE)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_INT_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_INT_SIZE, reqlen);
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11695,7 +11695,7 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
   if (reqlen - (int) (aligned_ptr - request) < 2 * OR_INT64_SIZE)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2,
-	      (reqlen - (int) (aligned_ptr - request)), 2 * OR_INT64_SIZE);
+	      2 * OR_INT64_SIZE, (reqlen - (int) (aligned_ptr - request)));
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11729,7 +11729,7 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
    * num_summary by flashback_max_transaction (INT_MAX by default), so the
    * product overflows an int -- and would under-allocate the area the summary
    * entries are packed into -- long before it can overflow 64 bits. */
-  area_size64 = (UINT64) OR_OID_SIZE * context.num_class + OR_INT64_SIZE + OR_INT64_SIZE + OR_INT_SIZE
+  area_size64 = OR_OID_SIZE * (UINT64) context.num_class + OR_INT64_SIZE + OR_INT64_SIZE + OR_INT_SIZE
     + ((UINT64) OR_SUMMARY_ENTRY_SIZE_WITHOUT_CLASS + (UINT64) OR_OID_SIZE * context.num_class) * context.num_summary;
 
   if (area_size64 <= INT_MAX)
@@ -11771,6 +11771,11 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
       or_pack_int (num_ptr, tmp_num);
     }
 
+  /* Release the request before the reply goes out: the client may send its
+   * GET_LOGINFO as soon as it has the summary, and that request must not find
+   * this one still being served. The session itself stays open for it. */
+  flashback_end_request (thread_p);
+
   error_code =
     css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), area,
 				       area_size);
@@ -11781,9 +11786,6 @@ sflashback_get_summary (THREAD_ENTRY * thread_p, unsigned int rid, char *request
     {
       goto css_send_error;
     }
-
-  /* the session stays open for the GET_LOGINFO requests that follow */
-  flashback_end_request (thread_p);
 
   return;
 error:
@@ -11873,7 +11875,7 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
    * past a zero-byte allocation at the unconditional unpack below. */
   if (request == NULL || reqlen < OR_INT_SIZE)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_INT_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_INT_SIZE, reqlen);
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11910,7 +11912,7 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
   if (reqlen - (int) (ptr - request) < 2 * OR_LOG_LSA_ALIGNED_SIZE + 2 * OR_INT_SIZE)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2,
-	      (reqlen - (int) (ptr - request)), 2 * OR_LOG_LSA_ALIGNED_SIZE + 2 * OR_INT_SIZE);
+	      2 * OR_LOG_LSA_ALIGNED_SIZE + 2 * OR_INT_SIZE, (reqlen - (int) (ptr - request)));
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11952,7 +11954,7 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
    * Computed in UINT64: queue_size is the total length actually generated, which
    * the requested batch size does not bound, so a huge transaction can push it
    * past INT_MAX. */
-  area_size64 = (UINT64) OR_LOG_LSA_ALIGNED_SIZE * 2 + OR_INT_SIZE
+  area_size64 = 2 * (UINT64) OR_LOG_LSA_ALIGNED_SIZE + OR_INT_SIZE
     + (UINT64) context.queue_size + (UINT64) context.num_loginfo * MAX_ALIGNMENT;
 
   if (area_size64 <= INT_MAX)
@@ -11980,17 +11982,9 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
 
   ptr = flashback_pack_loginfo (thread_p, ptr, context);
 
-  error_code =
-    css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), area,
-				       area_size);
-
-  db_private_free_and_init (thread_p, area);
-
-  if (error_code != NO_ERROR)
-    {
-      goto css_send_error;
-    }
-
+  /* Settle the session before the reply goes out, as GET_SUMMARY does: the
+   * client may send its next GET_LOGINFO as soon as it has this reply, and
+   * that request must not find this one still being served. */
   if (flashback_is_loginfo_generation_finished (&context.start_lsa, &context.end_lsa))
     {
       flashback_reset_if_owner (thread_p);
@@ -12007,6 +12001,17 @@ sflashback_get_loginfo (THREAD_ENTRY * thread_p, unsigned int rid, char *request
 	}
 
       flashback_end_request (thread_p);
+    }
+
+  error_code =
+    css_send_reply_and_data_to_client (thread_p->conn_entry, rid, reply, OR_ALIGNED_BUF_SIZE (a_reply), area,
+				       area_size);
+
+  db_private_free_and_init (thread_p, area);
+
+  if (error_code != NO_ERROR)
+    {
+      goto css_send_error;
     }
 
   return;
