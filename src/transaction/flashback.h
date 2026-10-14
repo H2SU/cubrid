@@ -85,7 +85,7 @@ typedef struct flashback_summary_entry
                                               + DB_MAX_USER_LENGTH + MAX_ALIGNMENT \
                                               + OR_INT64_SIZE * 2 \
                                               + OR_INT_SIZE * 3 \
-                                              + OR_LOG_LSA_SIZE * 2 \
+                                              + OR_LOG_LSA_ALIGNED_SIZE * 2 \
                                               + OR_INT_SIZE)
 
 /* context for making summary information */
