@@ -10928,7 +10928,7 @@ scdc_auth_challenge (THREAD_ENTRY * thread_p, unsigned int rid, char *request, i
   if (request == NULL || cdc_flashback_unpack_bounded_string (request, request, reqlen, &user_name) == NULL
       || user_name == NULL || strlen (user_name) >= DB_MAX_USER_LENGTH)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_INT_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_INT_SIZE, reqlen);
       goto error;
     }
 
@@ -11032,7 +11032,7 @@ scdc_auth_response (THREAD_ENTRY * thread_p, unsigned int rid, char *request, in
   if (ptr == NULL || user_name == NULL || nonce == NULL || tag == NULL || answer == NULL
       || strlen (user_name) >= DB_MAX_USER_LENGTH || strlen (nonce) != CSS_CDC_AUTH_NONCE_SIZE - 1)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_INT_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_INT_SIZE, reqlen);
       return_error_to_client (thread_p, rid);
       css_send_abort_to_client (thread_p->conn_entry, rid);
       return;
@@ -11105,7 +11105,7 @@ scdc_start_session (THREAD_ENTRY * thread_p, unsigned int rid, char *request, in
    * the request, but is now only a field to step over. */
   if (request == NULL || reqlen < OR_INT_SIZE)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_INT_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_INT_SIZE, reqlen);
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11350,7 +11350,7 @@ scdc_find_lsa (THREAD_ENTRY * thread_p, unsigned int rid, char *request, int req
    * reads past a too-small buffer. */
   if (request == NULL || reqlen < OR_INT64_SIZE)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_INT64_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_INT64_SIZE, reqlen);
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
@@ -11437,7 +11437,7 @@ scdc_get_loginfo_metadata (THREAD_ENTRY * thread_p, unsigned int rid, char *requ
    * reads past a too-small buffer. */
   if (request == NULL || reqlen < OR_LOG_LSA_ALIGNED_SIZE)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, reqlen, OR_LOG_LSA_ALIGNED_SIZE);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_NET_DATASIZE_MISMATCH, 2, OR_LOG_LSA_ALIGNED_SIZE, reqlen);
       error_code = ER_NET_DATASIZE_MISMATCH;
       goto error;
     }
