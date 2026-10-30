@@ -2928,7 +2928,7 @@ void
 css_conn_entry::set_tran_index (int tran_index)
 {
 #if defined (SERVER_MODE)
-  /* CBRD-27446: on the server this is only the index a packet claims. The
+  /* on the server this is only the index a packet claims. The
    * connection runs under the index the server assigned (get_tran_index ()),
    * so the claim is not stored; one that differs is logged once. */
   if (tran_index != NULL_TRAN_INDEX && tran_index != owned_tran_index && !reported_foreign_tran_index)
