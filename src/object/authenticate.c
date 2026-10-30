@@ -96,7 +96,7 @@ au_login (const char *name, const char *password, bool ignore_dba_privilege)
 
 /*
  * au_prove_password () - prove a password to the server by answering a one-time
- *   challenge (CBRD-27445). The password never leaves the client.
+ *   challenge. The password never leaves the client.
  *   return: NO_ERROR, or the error the server returned
  *   user_name (in)      : account to prove
  *   des/sha1/sha2 (in)  : the password in each form it may be stored in
