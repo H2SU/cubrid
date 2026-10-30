@@ -765,7 +765,7 @@ logtb_am_i_dba_client (THREAD_ENTRY * thread_p)
  * logtb_am_i_dba_group_client () - is the caller DBA, or a member of the DBA
  *   group, according to the catalog?
  *
- * CBRD-27447: replaces the flag kill_or_interrupt took from the client.
+ * Replaces the flag kill_or_interrupt took from the client.
  */
 static bool
 logtb_am_i_dba_group_client (THREAD_ENTRY * thread_p)
@@ -5834,7 +5834,7 @@ xlogtb_kill_or_interrupt_tran (THREAD_ENTRY * thread_p, int tran_index, bool int
       return ER_KILL_TR_NOT_ALLOWED;
     }
 
-  /* CBRD-27447: always checked on the server, never skipped on the client's word */
+  /* always checked on the server, never skipped on the client's word */
   error = logtb_check_kill_tran_auth (thread_p, tran_index, &has_authorization);
   if (error != NO_ERROR)
     {
